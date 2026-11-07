@@ -1,0 +1,303 @@
+<!doctype html>
+<!-- Proposition A — « Console » : graphite neutre, un seul accent corail, navigation latérale, densité d'outil pro. -->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clipper — proposition A</title>
+<style>
+:root{
+  --bg:#0c0d0f; --panel:#141619; --raise:#1b1e22; --hover:#22262b; --line:#272b31;
+  --text:#e9eaec; --mute:#a0a6ae; --faint:#7f858e;
+  --accent:#ff6f5b; --accent-ink:#1c0c09; --accent-soft:#ff6f5b1f;
+  --warn:#e9b44c; --warn-soft:#e9b44c17; --ok:#62c98f; --rec:#ff4f4f;
+  --r:10px; --r-sm:7px;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --font:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  font-family:var(--font);
+  font-size:14px; color:var(--text); color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);min-height:100vh;padding:24px 16px 48px;display:grid;justify-items:center;gap:36px}
+::selection{background:var(--accent);color:var(--accent-ink)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+::-webkit-scrollbar{width:10px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:10px;border:3px solid var(--panel)}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.num{font-variant-numeric:tabular-nums}
+.label{font-size:12px;color:var(--mute)}
+h2{font:600 18px/1.3 "Segoe UI Variable Display","Segoe UI",sans-serif;letter-spacing:-.01em}
+h3{font-size:13px;font-weight:600}
+
+/* ---------- Barre Alt+Z ---------- */
+.stage{width:min(100%,1000px);height:200px;border-radius:var(--r);background:#08090a;position:relative;overflow:hidden;display:grid;justify-items:center;border:1px solid var(--line)}
+.stage::after{content:"Votre jeu";position:absolute;bottom:14px;left:16px;font-size:12px;color:var(--faint)}
+.bar{margin-top:0;display:flex;align-items:center;gap:2px;padding:6px;height:60px;
+  background:rgba(20,22,25,.86);backdrop-filter:blur(18px) saturate(1.2);
+  border:1px solid rgba(255,255,255,.07);border-top:0;border-radius:0 0 14px 14px;
+  box-shadow:0 12px 32px rgba(0,0,0,.5);animation:drop .42s var(--ease) both}
+@keyframes drop{from{transform:translateY(-100%)}}
+.bar button{all:unset;cursor:pointer;display:grid;grid-template-columns:auto auto;align-items:center;column-gap:8px;padding:0 12px;height:46px;border-radius:9px;color:var(--text);transition:background .15s}
+.bar button:hover{background:var(--hover)}
+.bar button:focus-visible{outline:2px solid var(--accent)}
+.bar .v{font-size:13px;font-weight:600;line-height:1.1;white-space:nowrap}
+.bar kbd{white-space:nowrap}
+.bar kbd{grid-column:2;font:500 10.5px/1 var(--font);color:var(--faint)}
+.bar svg.i{grid-row:span 2}
+.bar .sep{width:1px;height:28px;background:var(--line);margin:0 4px}
+.bar .clip{background:var(--accent);color:var(--accent-ink)}
+.bar .clip:hover{background:#ff8371}
+.bar .clip kbd{color:#5a2219}
+.bar .rec .v{color:var(--rec)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--rec);animation:blink 1.6s steps(1) infinite}
+@keyframes blink{50%{opacity:.25}}
+.toast{position:absolute;top:84px;display:flex;gap:10px;align-items:center;padding:10px 14px;background:var(--raise);border-radius:var(--r);box-shadow:0 8px 24px rgba(0,0,0,.45);animation:pop .5s .5s var(--ease) both}
+.toast .ok{color:var(--ok)}
+.toast small{color:var(--mute);display:block;font-size:12px}
+@keyframes pop{from{opacity:0;transform:translateY(-8px) scale(.98)}}
+
+/* ---------- Fenêtre réglages ---------- */
+.win{width:min(100%,940px);height:640px;display:grid;grid-template-columns:200px 1fr;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.55)}
+nav{background:var(--bg);border-right:1px solid var(--line);padding:16px 10px;display:flex;flex-direction:column;gap:2px}
+.brand{display:flex;gap:9px;align-items:center;padding:4px 10px 18px;font-weight:650;letter-spacing:-.01em}
+.brand b{width:22px;height:22px;border-radius:6px;background:var(--accent);display:grid;place-items:center;color:var(--accent-ink)}
+.tab{all:unset;cursor:pointer;display:flex;gap:10px;align-items:center;padding:0 10px;height:36px;border-radius:var(--r-sm);color:var(--mute);position:relative}
+.tab:hover{background:var(--panel);color:var(--text)}
+.tab[aria-selected=true]{background:var(--raise);color:var(--text)}
+.tab[aria-selected=true]::before{content:"";position:absolute;left:-10px;top:10px;bottom:10px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
+.sub{display:flex;flex-direction:column;padding:4px 0 10px 36px}
+.sub a{color:var(--faint);text-decoration:none;font-size:12.5px;line-height:26px}
+.sub a:hover{color:var(--text)}
+.status{margin-top:auto;padding:12px 10px;border-top:1px solid var(--line);font-size:12px;color:var(--mute);display:grid;gap:4px}
+.status span{display:flex;gap:7px;align-items:center}
+.live{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+
+main{overflow-y:auto;padding:24px 28px 32px;scroll-behavior:smooth}
+.page{display:none;animation:fade .3s var(--ease)}
+.page.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}}
+section{padding:20px 0;border-bottom:1px solid var(--line)}
+section:last-child{border:0}
+section>h3{margin-bottom:14px;display:flex;justify-content:space-between;align-items:baseline}
+.row{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:16px;min-height:40px}
+.row+.row{margin-top:8px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+
+.seg{display:inline-flex;justify-self:start;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:3px;gap:2px;flex-wrap:wrap}
+.seg label{position:relative}
+.seg input{position:absolute;opacity:0;inset:0}
+.seg span{display:block;padding:0 11px;line-height:28px;border-radius:5px;color:var(--mute);cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+.seg input:checked+span{background:var(--hover);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.4)}
+.seg input:focus-visible+span{outline:2px solid var(--accent)}
+.seg input:disabled+span{color:#4d5259;cursor:not-allowed;text-decoration:line-through;text-decoration-color:#4d525980}
+.seg label:hover input:not(:disabled):not(:checked)+span{color:var(--text)}
+
+select,.field{appearance:none;background:var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a0a6ae' fill='none' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 12px center;border:1px solid var(--line);color:var(--text);border-radius:var(--r-sm);height:34px;padding:0 32px 0 11px;font:inherit;min-width:0;width:100%;max-width:340px}
+.field{background-image:none;display:flex;align-items:center;justify-content:space-between;padding-right:4px}
+select:hover,.field:hover{border-color:#353a41}
+
+input[type=range]{appearance:none;width:100%;max-width:280px;height:4px;border-radius:4px;background:linear-gradient(var(--accent),var(--accent)) 0/var(--p,50%) 100% no-repeat var(--line);cursor:pointer}
+input[type=range]::-webkit-slider-thumb{appearance:none;width:16px;height:16px;border-radius:50%;background:var(--text);border:3px solid var(--panel);box-shadow:0 0 0 1px var(--line)}
+.slide{display:flex;gap:12px;align-items:center}
+.slide output{width:44px;text-align:right;color:var(--mute)}
+
+.btn{all:unset;cursor:pointer;display:inline-flex;gap:8px;align-items:center;height:34px;padding:0 14px;border-radius:var(--r-sm);background:var(--raise);font-weight:500;transition:background .15s}
+.btn:hover{background:var(--hover)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn.primary:hover{background:#ff8371}
+.btn.ghost{background:none;color:var(--mute);height:28px;padding:0 8px}
+.icon-btn{all:unset;cursor:pointer;width:34px;height:34px;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--mute);background:var(--raise)}
+.icon-btn[aria-pressed=true]{background:#ff4f4f22;color:var(--rec)}
+
+.meter{height:6px;border-radius:6px;background:var(--line);overflow:hidden;width:100%;max-width:280px}
+.meter i{display:block;height:100%;width:30%;background:linear-gradient(90deg,var(--ok) 70%,var(--warn) 88%,var(--rec));border-radius:6px;transition:width .08s linear}
+
+.note{display:flex;gap:10px;padding:10px 12px;border-radius:var(--r-sm);font-size:12.5px;line-height:1.45;color:var(--mute);background:var(--raise);margin-top:12px}
+.note.warn{background:var(--warn-soft);color:#e7d2a8}
+.note.warn svg{color:var(--warn)}
+.note b{color:var(--text);font-weight:600}
+
+.estimate{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-radius:var(--r);background:var(--accent-soft);margin-top:16px}
+.estimate strong{font-size:20px;font-weight:650;letter-spacing:-.02em}
+kbd.k{font:600 12px/1 var(--font);padding:6px 8px;border-radius:5px;background:var(--bg);border:1px solid var(--line);border-bottom-width:2px}
+
+/* Pilotes */
+.gpu{display:flex;gap:16px;align-items:center;padding:18px 0}
+.gpu .chip{width:48px;height:48px;border-radius:12px;background:var(--raise);display:grid;place-items:center;color:var(--accent)}
+.gpu .chip svg{width:24px;height:24px}
+.versions{display:grid;grid-template-columns:repeat(2,1fr);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin:8px 0 18px}
+.versions div{padding:16px 18px}
+.versions div+div{border-left:1px solid var(--line)}
+.versions strong{display:block;font-size:24px;font-weight:650;letter-spacing:-.02em;margin-top:4px}
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;background:var(--accent-soft);color:var(--accent)}
+.progress{height:6px;border-radius:6px;background:var(--line);overflow:hidden;margin:14px 0 8px}
+.progress i{display:block;height:100%;width:62%;background:var(--accent);border-radius:6px;transition:width .3s var(--ease)}
+.dl{display:flex;justify-content:space-between;font-size:12px;color:var(--mute)}
+
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media (max-width:760px){.win{grid-template-columns:1fr;height:auto}nav{flex-direction:row;overflow-x:auto}.sub,.status,.brand{display:none}.row,.pair{grid-template-columns:1fr}.bar{overflow-x:auto;max-width:100%}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="clip" viewBox="0 0 24 24"><path d="M4 7h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+  <symbol id="rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></symbol>
+  <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="res" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 20h8"/></symbol>
+  <symbol id="fps" viewBox="0 0 24 24"><path d="M4 18l5-6 4 3 7-9"/></symbol>
+  <symbol id="audio" viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></symbol>
+  <symbol id="chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M3 6.5h6l2 2h10v10H3z"/></symbol>
+  <symbol id="download" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M4 20h16"/></symbol>
+</svg>
+
+<!-- Barre Alt+Z -->
+<div class="stage" aria-label="Aperçu de la barre Alt+Z">
+  <div class="bar" role="toolbar" aria-label="Barre Clipper">
+    <button class="clip"><svg class="i"><use href="#clip"/></svg><span class="v">Clip</span><kbd>Alt+X</kbd></button>
+    <button class="rec" aria-pressed="true"><span class="dot" style="grid-row:span 2"></span><span class="v num" id="recT">00:42</span><kbd>Alt+R · arrêter</kbd></button>
+    <span class="sep"></span>
+    <button><svg class="i"><use href="#clock"/></svg><span class="v">3 min</span><kbd>Alt+B</kbd></button>
+    <button><svg class="i"><use href="#res"/></svg><span class="v">1200p</span><kbd>Alt+V</kbd></button>
+    <button><svg class="i"><use href="#fps"/></svg><span class="v">60 fps</span><kbd>Alt+F</kbd></button>
+    <button><svg class="i"><use href="#audio"/></svg><span class="v">2 pistes</span><kbd>Alt+A</kbd></button>
+    <span class="sep"></span>
+    <button aria-label="Réglages"><svg class="i"><use href="#gear"/></svg><span class="v">Réglages</span><kbd>Alt+S</kbd></button>
+  </div>
+  <div class="toast" role="status"><svg class="i ok"><use href="#check"/></svg><div>Clip enregistré · 3 min<small>Vidéos\Clipper\Clip 2026-11-07 21-14-03.mp4</small></div></div>
+</div>
+
+<!-- Réglages -->
+<div class="win">
+  <nav aria-label="Sections">
+    <div class="brand"><b><svg class="i" style="width:13px;height:13px"><use href="#rec"/></svg></b>Clipper</div>
+    <button class="tab" role="tab" aria-selected="true" data-p="clipper"><svg class="i"><use href="#clip"/></svg>Clipper</button>
+    <div class="sub"><a href="#s-buffer">Buffer</a><a href="#s-qual">Clip et REC</a><a href="#s-enc">Encodage</a><a href="#s-audio">Audio</a><a href="#s-keys">Raccourcis</a><a href="#s-out">Sortie</a></div>
+    <button class="tab" role="tab" aria-selected="false" data-p="pilotes"><svg class="i"><use href="#chip"/></svg>Pilotes</button>
+    <div class="status">
+      <span><i class="live"></i>Buffer actif · 3 min</span>
+      <span class="num">CPU 0,3 % · RAM 18 Mo</span>
+    </div>
+  </nav>
+
+  <main>
+    <!-- ======== CLIPPER ======== -->
+    <div class="page on" id="p-clipper">
+      <h2>Clipper</h2>
+
+      <section id="s-buffer">
+        <h3>Buffer de relecture</h3>
+        <div class="row"><span class="label">Durée gardée en mémoire</span>
+          <div class="seg" role="radiogroup" aria-label="Durée du buffer">
+            <label><input type="radio" name="buf" value="60"><span>1 min</span></label>
+            <label><input type="radio" name="buf" value="90"><span>1:30</span></label>
+            <label><input type="radio" name="buf" value="120"><span>2 min</span></label>
+            <label><input type="radio" name="buf" value="180" checked><span>3 min</span></label>
+            <label><input type="radio" name="buf" value="300"><span>5 min</span></label>
+            <label><input type="radio" name="buf" value="600"><span>10 min</span></label>
+          </div></div>
+      </section>
+
+      <section id="s-qual">
+        <div class="pair">
+          <div>
+            <h3>Clip <span class="label">Alt+X</span></h3>
+            <div class="row" style="grid-template-columns:80px 1fr"><span class="label">Résolution</span>
+              <div class="seg"><label><input type="radio" name="cr" value="1080" checked><span>1200p</span></label><label><input type="radio" name="cr" disabled><span>1440p</span></label><label><input type="radio" name="cr" disabled><span>2160p</span></label></div></div>
+            <div class="row" style="grid-template-columns:80px 1fr"><span class="label">Images/s</span>
+              <div class="seg"><label><input type="radio" name="cf" value="30"><span>30</span></label><label><input type="radio" name="cf" value="60" checked><span>60</span></label></div></div>
+          </div>
+          <div>
+            <h3>REC <span class="label">Alt+R</span></h3>
+            <div class="row" style="grid-template-columns:80px 1fr"><span class="label">Résolution</span>
+              <div class="seg"><label><input type="radio" name="rr" checked><span>1200p</span></label><label><input type="radio" name="rr" disabled><span>1440p</span></label><label><input type="radio" name="rr" disabled><span>2160p</span></label></div></div>
+            <div class="row" style="grid-template-columns:80px 1fr"><span class="label">Images/s</span>
+              <div class="seg"><label><input type="radio" name="rf" value="30" checked><span>30</span></label><label><input type="radio" name="rf" value="60"><span>60</span></label></div></div>
+          </div>
+        </div>
+        <div class="note"><svg class="i"><use href="#info"/></svg><span>1440p et 2160p sont désactivés : ils dépassent votre écran (1920×1200). Le ratio 16:10 de l'écran est toujours conservé.</span></div>
+        <div class="note warn"><svg class="i"><use href="#warn"/></svg><span><b>REC et Clip n'ont pas les mêmes images/s.</b> Une seconde capture tournera pendant le REC : environ +4 % de charge sur l'encodeur vidéo.</span></div>
+      </section>
+
+      <section id="s-enc">
+        <h3>Encodage</h3>
+        <div class="row"><label class="label" for="enc">Encodeur</label>
+          <select id="enc"><option value="1">NVIDIA NVENC · H.264 (recommandé)</option><option value=".7">NVIDIA NVENC · HEVC</option><option value=".7">NVIDIA NVENC · AV1</option><option value="1">AMD AMF · H.264</option><option value="1">Processeur · x264 (lent)</option></select></div>
+        <div class="row"><label class="label" for="q">Qualité</label>
+          <div class="slide"><input type="range" id="q" min="50" max="150" value="100" step="10"><output for="q" class="num">100 %</output></div></div>
+        <div class="row"><span class="label">Débit vidéo</span><span class="num" id="rate">20 Mb/s · preset p3</span></div>
+        <div class="estimate"><div><span class="label">Clip de <span id="estDur">3 min</span> en <span id="estQ">1200p60</span></span></div><strong class="num" id="est">≈ 457 Mo</strong></div>
+      </section>
+
+      <section id="s-audio">
+        <h3>Audio</h3>
+        <div class="row"><span class="label">Pistes</span>
+          <div class="seg"><label><input type="radio" name="am"><span>Sans audio</span></label><label><input type="radio" name="am"><span>1 piste (mélangée)</span></label><label><input type="radio" name="am" checked><span>2 pistes (jeu / micro)</span></label></div></div>
+        <div class="row"><label class="label" for="out">Son du jeu</label><select id="out"><option>Haut-parleurs (Realtek(R) Audio)</option><option>Casque (HyperX Cloud III S Wireless)</option></select></div>
+        <div class="row"><label class="label" for="gv">Volume du jeu</label><div class="slide"><input type="range" id="gv" min="0" max="100" value="80"><output class="num">80 %</output></div></div>
+        <div class="row"><label class="label" for="mic">Micro</label>
+          <div style="display:flex;gap:8px;max-width:340px"><select id="mic"><option>Headset Microphone (HyperX Cloud III S)</option><option>Microphone Array (Realtek(R) Audio)</option></select><button class="icon-btn" aria-pressed="false" aria-label="Couper le micro" id="mute"><svg class="i"><use href="#mic"/></svg></button></div></div>
+        <div class="row"><label class="label" for="mv">Volume du micro</label><div class="slide"><input type="range" id="mv" min="0" max="200" value="100"><output class="num">100 %</output></div></div>
+        <div class="row"><span class="label">Niveau</span><div class="meter" role="meter" aria-label="Niveau du micro"><i id="lvl"></i></div></div>
+      </section>
+
+      <section id="s-keys">
+        <h3>Raccourcis</h3>
+        <div class="row"><span class="label">Enregistrer un clip</span><div><kbd class="k">Alt</kbd> + <kbd class="k">X</kbd> <button class="btn ghost">Modifier</button></div></div>
+        <div class="row"><span class="label">Démarrer / arrêter REC</span><div><kbd class="k">Alt</kbd> + <kbd class="k">R</kbd> <button class="btn ghost">Modifier</button></div></div>
+        <div class="row"><span class="label">Afficher la barre</span><div><kbd class="k">Alt</kbd> + <kbd class="k">Z</kbd> <button class="btn ghost">Modifier</button></div></div>
+        <div class="note warn"><svg class="i"><use href="#warn"/></svg><span><b>Alt+Z ouvre aussi l'overlay NVIDIA.</b> Les deux s'ouvriront ensemble. <button class="btn ghost" style="color:var(--accent);height:auto;padding:0">Utiliser Alt+Maj+Z</button></span></div>
+        <div class="note"><svg class="i"><use href="#info"/></svg><span>La barre ne s'affiche pas sur un jeu en <b>plein écran exclusif</b>, et ses boutons peuvent ne pas répondre si le jeu capture la souris. Les raccourcis fonctionnent toujours.</span></div>
+      </section>
+
+      <section id="s-out">
+        <h3>Sortie</h3>
+        <div class="row"><span class="label">Format</span>
+          <div class="seg"><label><input type="radio" name="fmt" checked><span>MP4</span></label><label><input type="radio" name="fmt"><span>MKV</span></label><label><input type="radio" name="fmt"><span>MOV</span></label></div></div>
+        <div class="row"><span class="label">Dossier</span><div class="field"><span>C:\Users\Vous\Videos\Clipper</span><button class="btn ghost"><svg class="i"><use href="#folder"/></svg>Changer</button></div></div>
+        <div class="note"><svg class="i"><use href="#info"/></svg><span>Le buffer écrit en continu environ <b class="num">9 Go/h</b> sur le disque à 1080p60 (fichiers temporaires effacés au fil de l'eau, rien ne s'accumule).</span></div>
+      </section>
+    </div>
+
+    <!-- ======== PILOTES ======== -->
+    <div class="page" id="p-pilotes">
+      <h2>Pilotes</h2>
+      <div class="gpu"><div class="chip"><svg class="i"><use href="#chip"/></svg></div>
+        <div><h3 style="font-size:15px">NVIDIA GeForce RTX 4060 Laptop GPU</h3><span class="label">Détecté par nvidia-smi</span></div></div>
+      <div class="row"><span class="label">Type de pilote</span>
+        <div class="seg"><label><input type="radio" name="drv" checked><span>Game Ready</span></label><label><input type="radio" name="drv"><span>Studio</span></label></div></div>
+      <div class="versions">
+        <div><span class="label">Installé</span><strong class="num">621.01</strong></div>
+        <div><span class="label">Dernier Game Ready</span><strong class="num">626.14</strong><span class="badge" style="margin-top:6px">Mise à jour disponible</span></div>
+      </div>
+      <button class="btn primary"><svg class="i"><use href="#download"/></svg>Télécharger et installer 626.14</button>
+      <div class="progress" role="progressbar" aria-valuenow="62" aria-valuemin="0" aria-valuemax="100" aria-label="Téléchargement"><i></i></div>
+      <div class="dl num"><span>Téléchargement · 512 / 826 Mo</span><span>Source vérifiée : us.download.nvidia.com</span></div>
+      <div class="note"><svg class="i"><use href="#info"/></svg><span>L'installation est silencieuse et vous sera demandée avant de commencer. L'écran peut clignoter, et un <b>redémarrage</b> peut être nécessaire.</span></div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
+$$('.tab').forEach(t=>t.onclick=()=>{$$('.tab').forEach(x=>x.setAttribute('aria-selected',x===t));$$('.page').forEach(p=>p.classList.toggle('on',p.id==='p-'+t.dataset.p))});
+$$('input[type=range]').forEach(r=>{const f=()=>{r.style.setProperty('--p',(r.value-r.min)/(r.max-r.min)*100+'%');r.nextElementSibling.textContent=r.value+' %';est()};r.oninput=f;f()});
+function est(){
+  const buf=+$('input[name=buf]:checked').value,fps=+$('input[name=cf]:checked').value,q=$('#q').value/100,codec=+$('#enc').value;
+  const mbps=20*(fps==30?.65:1)*codec*q, audio=.32, mb=(mbps+audio)*buf/8;
+  $('#rate').textContent=mbps.toFixed(1).replace('.',',')+' Mb/s · preset p'+(q>1.2?4:q<.8?1:3);
+  $('#estDur').textContent=buf>=60&&buf%60==0?buf/60+' min':(buf/60|0)+' min 30';
+  $('#estQ').textContent='1200p'+fps;
+  $('#est').textContent='≈ '+(mb>=1000?(mb/1000).toFixed(1).replace('.',',')+' Go':Math.round(mb)+' Mo');
+}
+$$('input[name=buf],input[name=cf],#enc').forEach(e=>e.onchange=est);est();
+$('#mute').onclick=e=>{const b=e.currentTarget;b.setAttribute('aria-pressed',b.getAttribute('aria-pressed')!=='true')};
+setInterval(()=>{$('#lvl').style.width=$('#mute').getAttribute('aria-pressed')==='true'?'0%':20+Math.random()*55+'%'},90);
+let s=42;setInterval(()=>{s++;$('#recT').textContent=String(s/60|0).padStart(2,'0')+':'+String(s%60).padStart(2,'0')},1000);
+</script>
+</body>
+</html>

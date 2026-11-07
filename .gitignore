@@ -1,0 +1,5 @@
+# Build (CARGO_TARGET_DIR pointe hors du depot, au cas ou)
+/target/
+# Reglages locaux de l outil de dev
+/.claude/
+*.log

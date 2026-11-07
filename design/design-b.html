@@ -1,0 +1,683 @@
+<!doctype html>
+<!--
+  Clipper — Proposition de design B : « Régie »
+  Inspiré d'une régie de diffusion : encre bleu nuit, lumière de tally ambre comme seul accent,
+  rouge réservé à l'état REC. Navigation horizontale en haut (segmenté), sous-navigation par ancres,
+  bande « buffer » en tête qui montre les segments de 2 s comme une pellicule.
+  Clip et REC sont présentés côte à côte pour comparer leurs réglages indépendants.
+  Maquette statique : toutes les valeurs sont factices.
+-->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clipper — Design B « Régie »</title>
+<style>
+:root{
+  --ink-0:#0b0f17;      /* bureau factice */
+  --ink-1:#111723;      /* fenêtre */
+  --ink-2:#172031;      /* surfaces */
+  --ink-3:#1f2a3e;      /* contrôles */
+  --ink-4:#2a3851;      /* survol / traits forts */
+  --line:#24304a;
+  --text:#e8edf6;
+  --text-2:#a9b4c8;     /* 7.6:1 sur ink-1 */
+  --text-3:#8492ab;     /* 5.0:1 sur ink-1 */
+  --tally:#f2b544;      /* accent ambre */
+  --tally-ink:#1a1204;
+  --tally-soft:rgba(242,181,68,.14);
+  --rec:#ff5a5f;
+  --rec-soft:rgba(255,90,95,.16);
+  --ok:#5fd39a;
+  --warn:#f2b544;
+  --r-sm:8px; --r-md:12px; --r-lg:16px;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --font:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+  --font-d:"Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+  --mono:"Cascadia Mono","Consolas",ui-monospace,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--ink-0);
+  color:var(--text);
+  font:14px/1.45 var(--font);
+  min-height:100vh;
+  padding:0 16px 64px;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--tally);color:var(--tally-ink)}
+:focus-visible{outline:2px solid var(--tally);outline-offset:2px;border-radius:6px}
+*{scrollbar-width:thin;scrollbar-color:var(--ink-4) transparent}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+.num{font-variant-numeric:tabular-nums}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg.i{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+
+/* ---------- Bureau factice + légendes ---------- */
+.stage{max-width:960px;margin:0 auto;position:relative;padding-top:136px}
+.caption{color:var(--text-3);font-size:12px;margin:0 0 10px;letter-spacing:.01em}
+
+/* ---------- Barre Alt+Z ---------- */
+.bar-wrap{position:absolute;top:0;left:50%;transform:translateX(-50%);width:min(760px,100%);}
+.bar{
+  height:64px;display:flex;align-items:center;gap:4px;padding:0 10px;
+  background:rgba(17,23,35,.86);
+  backdrop-filter:blur(18px) saturate(1.2);
+  border:1px solid rgba(255,255,255,.07);border-top:0;
+  border-radius:0 0 var(--r-lg) var(--r-lg);
+  box-shadow:0 12px 32px rgba(0,0,0,.45);
+  animation:drop .42s var(--ease) both;
+}
+@keyframes drop{from{transform:translateY(-72px)}to{transform:none}}
+.bar .sep{width:1px;height:28px;background:var(--line);margin:0 4px}
+.bb{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  min-width:58px;height:52px;padding:0 8px;border:0;border-radius:var(--r-sm);
+  background:transparent;color:var(--text-2);
+  transition:background .15s, color .15s;
+}
+.bb:hover{background:var(--ink-3);color:var(--text)}
+.bb .top{display:flex;align-items:center;gap:6px;color:var(--text);font-weight:600;font-size:13px}
+.bb kbd{font:500 10.5px var(--mono);color:var(--text-3)}
+.bb.clip .top{color:var(--tally)}
+.bb.rec{background:var(--rec-soft);min-width:96px}
+.bb.rec .top{color:var(--rec)}
+.bb.rec .dot{width:9px;height:9px;border-radius:50%;background:var(--rec);animation:blink 1.2s steps(2,start) infinite}
+@keyframes blink{50%{opacity:.25}}
+.bar .grow{flex:1}
+
+/* toast */
+.toast{
+  position:absolute;top:76px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:10px;padding:10px 14px 10px 10px;
+  background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-md);
+  box-shadow:0 10px 28px rgba(0,0,0,.5);white-space:nowrap;
+  animation:toast 3.2s var(--ease) both;
+}
+.toast .chip{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:var(--tally);color:var(--tally-ink)}
+.toast b{font-weight:600}
+.toast span{color:var(--text-2)}
+@keyframes toast{
+  0%{opacity:0;transform:translate(-50%,-8px)}
+  10%,82%{opacity:1;transform:translate(-50%,0)}
+  100%{opacity:0;transform:translate(-50%,-4px)}
+}
+
+/* ---------- Fenêtre Réglages ---------- */
+.win{
+  width:100%;max-width:900px;height:620px;margin:0 auto;
+  display:flex;flex-direction:column;
+  background:var(--ink-1);border:1px solid var(--line);border-radius:var(--r-lg);
+  box-shadow:0 30px 60px rgba(0,0,0,.5);overflow:hidden;
+}
+.titlebar{display:flex;align-items:center;gap:12px;height:52px;padding:0 8px 0 18px;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font:600 15px var(--font-d);letter-spacing:-.01em}
+.brand .tally{width:10px;height:10px;border-radius:3px;background:var(--tally)}
+.tabs{display:flex;gap:2px;padding:3px;background:var(--ink-2);border-radius:10px;margin-left:12px}
+.tab{height:32px;padding:0 16px;border:0;border-radius:8px;background:transparent;color:var(--text-2);font-weight:600}
+.tab[aria-selected=true]{background:var(--ink-4);color:var(--text)}
+.tab .badge{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--tally);margin-left:6px;vertical-align:2px}
+.titlebar .grow{flex:1}
+.status{display:flex;align-items:center;gap:8px;color:var(--text-2);font-size:12.5px}
+.status .live{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.wbtn{display:grid;place-items:center;width:40px;height:36px;border:0;border-radius:8px;background:transparent;color:var(--text-2)}
+.wbtn:hover{background:var(--ink-3);color:var(--text)}
+
+/* bande buffer */
+.reel[hidden]{display:none}.reel{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:16px;padding:14px 18px;border-bottom:1px solid var(--line);background:linear-gradient(var(--ink-1),var(--ink-2))}
+.reel h2{margin:0;font:600 13px var(--font);color:var(--text-2)}
+.reel h2 b{display:block;color:var(--text);font:600 20px var(--font-d);letter-spacing:-.02em}
+.film{display:flex;gap:2px;height:28px;align-items:stretch}
+.film i{flex:1;border-radius:2px;background:var(--ink-4);transform-origin:bottom}
+.film i.on{background:rgba(242,181,68,.26)}
+.film i.new{background:var(--tally);animation:seg .5s var(--ease) both}
+@keyframes seg{from{transform:scaleY(.2);opacity:0}to{transform:none;opacity:1}}
+.reel .meta{text-align:right;font-size:12.5px;color:var(--text-2)}
+.reel .meta b{color:var(--text);font-weight:600}
+
+/* panneaux */
+.panel{position:relative;flex:1;min-height:0;overflow:auto;scroll-behavior:smooth}
+.panel[hidden]{display:none}
+.subnav{position:sticky;top:0;z-index:2;display:flex;gap:4px;padding:10px 18px;background:rgba(17,23,35,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.subnav a{display:flex;align-items:center;height:32px;padding:0 12px;border-radius:999px;color:var(--text-2);text-decoration:none;font-size:13px;font-weight:500}
+.subnav a:hover{background:var(--ink-3);color:var(--text)}
+.subnav a.cur{background:var(--tally-soft);color:var(--tally)}
+.content{padding:8px 18px 28px}
+section{padding:22px 0 6px;scroll-margin-top:56px}
+section+section{border-top:1px solid var(--line)}
+section>h3{margin:0 0 4px;font:600 19px var(--font-d);letter-spacing:-.015em}
+section>p.lead{margin:0 0 16px;color:var(--text-2);max-width:68ch}
+
+.row{display:grid;grid-template-columns:200px 1fr;gap:16px;align-items:center;padding:8px 0}
+.row>label,.row>.lbl{color:var(--text-2);font-weight:500}
+.hint{color:var(--text-3);font-size:12.5px;margin-top:6px}
+
+/* segmenté */
+.seg{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;background:var(--ink-2);border:1px solid var(--line);border-radius:10px}
+.seg button{min-width:44px;height:32px;padding:0 12px;border:0;border-radius:7px;background:transparent;color:var(--text-2);font-weight:600;font-size:13px;transition:background .15s,color .15s}
+.seg button:hover:not(:disabled){color:var(--text);background:var(--ink-3)}
+.seg button[aria-pressed=true]{background:var(--tally);color:var(--tally-ink)}
+.seg button:disabled{color:#56627a;cursor:not-allowed;text-decoration:line-through;text-decoration-color:rgba(132,146,171,.5)}
+.seg small{font-weight:500;opacity:.75;margin-left:4px}
+
+/* Clip vs REC */
+.duo{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}
+.out{background:var(--ink-2);border-radius:var(--r-md);padding:14px 16px 16px}
+.out header{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.out header h4{margin:0;font:600 15px var(--font-d)}
+.out header kbd{margin-left:auto}
+.out.clip header svg{color:var(--tally)}
+.out.rec header svg{color:var(--rec)}
+.out .f{margin-top:12px}
+.out .f>.lbl{display:block;font-size:12.5px;color:var(--text-2);margin-bottom:6px;font-weight:500}
+kbd{font:500 12px var(--mono);padding:3px 7px;border-radius:6px;background:var(--ink-3);border:1px solid var(--ink-4);color:var(--text)}
+
+/* notes */
+.note{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:var(--r-sm);font-size:13px;margin-top:10px}
+.note svg{margin-top:1px}
+.note.warn{background:var(--tally-soft);color:#f6d79a}
+.note.warn svg{color:var(--tally)}
+.note.info{background:var(--ink-2);color:var(--text-2)}
+.note.ok{background:rgba(95,211,154,.10);color:#a6e8c6}
+.note.ok svg{color:var(--ok)}
+.note b{color:var(--text)}
+
+/* select */
+.sel{position:relative;max-width:420px}
+.sel select{appearance:none;width:100%;height:36px;padding:0 36px 0 12px;background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-sm)}
+.sel select:hover{border-color:var(--ink-4)}
+.sel::after{content:"";position:absolute;right:14px;top:14px;width:7px;height:7px;border-right:1.75px solid var(--text-2);border-bottom:1.75px solid var(--text-2);transform:rotate(45deg);pointer-events:none}
+
+/* slider */
+.range{display:flex;align-items:center;gap:12px;max-width:420px}
+input[type=range]{flex:1;height:32px;background:transparent;appearance:none;-webkit-appearance:none;margin:0}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(90deg,var(--tally) var(--p,50%),var(--ink-4) var(--p,50%))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;margin-top:-7px;border-radius:50%;background:var(--text);border:3px solid var(--ink-1);box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.range output{min-width:56px;text-align:right;color:var(--text);font-weight:600}
+
+/* estimation */
+.estimate{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-top:14px;padding:14px 16px;background:var(--ink-2);border-radius:var(--r-md)}
+.estimate .big{font:600 24px var(--font-d);letter-spacing:-.02em}
+.estimate .big em{font-style:normal;color:var(--tally)}
+.estimate span{color:var(--text-2);font-size:13px}
+
+/* audio */
+.meter{display:flex;align-items:center;gap:10px;max-width:420px}
+.vu{position:relative;flex:1;height:8px;border-radius:4px;background:var(--ink-3);overflow:hidden}
+.vu i{position:absolute;inset:0;background:linear-gradient(90deg,var(--ok) 0 70%,var(--tally) 70% 88%,var(--rec) 88%);transform-origin:left;transform:scaleX(.3);transition:transform .08s linear}
+.vu.muted i{transform:scaleX(0)!important}
+.icon-btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--ink-2);color:var(--text-2);font-weight:600;font-size:13px}
+.icon-btn:hover{color:var(--text);border-color:var(--ink-4)}
+.icon-btn[aria-pressed=true]{background:var(--rec-soft);border-color:transparent;color:var(--rec)}
+
+/* raccourcis */
+.keys{display:grid;grid-template-columns:1fr auto auto;gap:8px 16px;align-items:center;max-width:620px}
+.keys .act{color:var(--text)}
+.keys button.change{height:32px;padding:0 12px;border:0;border-radius:var(--r-sm);background:transparent;color:var(--tally);font-weight:600}
+.keys button.change:hover{background:var(--tally-soft)}
+
+.path{display:flex;gap:8px;max-width:520px}
+.path input{flex:1;height:36px;padding:0 12px;background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-sm);font:13px var(--mono);color:var(--text-2)}
+
+.limits{margin:0;padding:0;list-style:none;display:grid;gap:8px}
+.limits li{display:flex;gap:10px;color:var(--text-2);max-width:72ch}
+.limits svg{color:var(--text-3);margin-top:1px}
+
+/* ---------- Pilotes ---------- */
+.drv{padding:28px 32px}
+.gpu{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:end;padding-bottom:24px;border-bottom:1px solid var(--line)}
+.gpu h3{margin:0;font:600 26px var(--font-d);letter-spacing:-.02em}
+.gpu p{margin:4px 0 0;color:var(--text-2)}
+.versions{display:grid;grid-template-columns:auto auto;gap:4px 28px;text-align:right}
+.versions dt{color:var(--text-3);font-size:12px}
+.versions dd{margin:0;font:600 22px var(--font-d);letter-spacing:-.01em}
+.versions dd.new{color:var(--tally)}
+.drv .row{grid-template-columns:200px 1fr}
+.update{margin-top:22px;padding:18px 20px;background:var(--ink-2);border-radius:var(--r-md)}
+.update h4{margin:0;font:600 17px var(--font-d);display:flex;align-items:center;gap:8px}
+.update h4 .pill{font:600 12px var(--font);padding:3px 8px;border-radius:999px;background:var(--tally-soft);color:var(--tally)}
+.update p{margin:6px 0 0;color:var(--text-2);max-width:68ch}
+.cta{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 18px;margin-top:16px;border:0;border-radius:10px;background:var(--tally);color:var(--tally-ink);font-weight:700;transition:transform .15s var(--ease),filter .15s}
+.cta:hover{filter:brightness(1.07)}
+.cta:active{transform:scale(.98)}
+.cta:disabled{background:var(--ink-4);color:var(--text-3);cursor:default}
+.prog{margin-top:16px}
+.prog .track{height:6px;border-radius:3px;background:var(--ink-3);overflow:hidden}
+.prog .fill{height:100%;background:var(--tally);transform-origin:left;transform:scaleX(0);transition:transform .25s linear}
+.prog .lab{display:flex;justify-content:space-between;margin-top:8px;font-size:12.5px;color:var(--text-2)}
+
+.compare{margin-top:48px;display:flex;gap:12px;align-items:center;justify-content:center;color:var(--text-3);font-size:12px}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  .panel{scroll-behavior:auto}
+}
+@media (max-width:760px){
+  .row,.drv .row{grid-template-columns:1fr;gap:6px}
+  .duo{grid-template-columns:1fr}
+  .reel{grid-template-columns:1fr}
+  .reel .meta{text-align:left}
+  .gpu{grid-template-columns:1fr}
+  .versions{text-align:left}
+  .bar{overflow-x:auto}
+  .status{display:none}
+}
+</style>
+</head>
+<body>
+
+<!-- Sprite d'icônes (trait 1.75, 24px) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-clip" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.6 7.5 20 18M8.6 16.5 20 6"/></symbol>
+    <symbol id="i-rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M9 20h6M12 16.5V20"/></symbol>
+    <symbol id="i-fps" viewBox="0 0 24 24"><path d="M4 18a8 8 0 1 1 16 0"/><path d="m12 18 4-6"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/></symbol>
+    <symbol id="i-micoff" viewBox="0 0 24 24"><path d="M15 10V6.5a3 3 0 0 0-5.8-1M9 9v2.5a3 3 0 0 0 4.6 2.5M5.5 11.5a6.5 6.5 0 0 0 10.4 5.2M18.5 11.5a6.4 6.4 0 0 1-.5 2.4M12 18v2.5M4 4l16 16"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2.1-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2.1 1.2l-2.3-.9-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2.1 1.2L10 21h4l.5-2.6a7 7 0 0 0 2.1-1.2l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 2.8 19.5h18.4z"/><path d="M12 10v4.5M12 17.2v.1"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-min" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+  </defs>
+</svg>
+
+<div class="stage">
+
+  <!-- Barre Alt+Z -->
+  <div class="bar-wrap">
+    <div class="bar" role="toolbar" aria-label="Barre Clipper">
+      <button class="bb clip" type="button" aria-label="Enregistrer un clip, Alt+X"><span class="top"><svg class="i"><use href="#i-clip"/></svg>Clip</span><kbd>Alt+X</kbd></button>
+      <button class="bb rec" type="button" aria-label="Arrêter l'enregistrement, Alt+R, 42 secondes"><span class="top"><span class="dot" aria-hidden="true"></span><span class="num" id="recTime">00:42</span></span><kbd>Alt+R</kbd></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button class="bb" type="button" aria-label="Durée du buffer : 2 minutes, Alt+B"><span class="top"><svg class="i"><use href="#i-clock"/></svg>2 min</span><kbd>Alt+B</kbd></button>
+      <button class="bb" type="button" aria-label="Résolution : 1200p, Alt+V"><span class="top"><svg class="i"><use href="#i-screen"/></svg>1200p</span><kbd>Alt+V</kbd></button>
+      <button class="bb" type="button" aria-label="Images par seconde : 60, Alt+F"><span class="top"><svg class="i"><use href="#i-fps"/></svg>60</span><kbd>Alt+F</kbd></button>
+      <button class="bb" type="button" aria-label="Audio : 2 pistes, Alt+A"><span class="top"><svg class="i"><use href="#i-audio"/></svg>2 pistes</span><kbd>Alt+A</kbd></button>
+      <span class="grow"></span>
+      <button class="bb" type="button" aria-label="Ouvrir les réglages, Alt+S"><span class="top"><svg class="i"><use href="#i-gear"/></svg></span><kbd>Alt+S</kbd></button>
+    </div>
+    <div class="toast" role="status" id="toast">
+      <span class="chip"><svg class="i"><use href="#i-check"/></svg></span>
+      <b>Clip enregistré</b><span class="num">2 min · 1200p60 · 312 Mo</span>
+    </div>
+  </div>
+
+  <p class="caption">Fenêtre Réglages (900 × 620). La barre ci-dessus descend du haut de l'écran avec Alt+Z.</p>
+
+  <!-- Fenêtre Réglages -->
+  <div class="win" role="dialog" aria-label="Réglages Clipper">
+    <div class="titlebar">
+      <div class="brand" aria-hidden="true"><span class="tally"></span></div>
+      <div class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab" role="tab" id="t-clip" aria-controls="p-clip" aria-selected="true">Clipper</button>
+        <button class="tab" role="tab" id="t-drv" aria-controls="p-drv" aria-selected="false" tabindex="-1">Pilotes<span class="badge" aria-label="mise à jour disponible"></span></button>
+      </div>
+      <span class="grow"></span>
+      <div class="status"><span class="live" aria-hidden="true"></span>Buffer actif · NVENC H.264</div>
+      <button class="wbtn" type="button" aria-label="Réduire"><svg class="i"><use href="#i-min"/></svg></button>
+      <button class="wbtn" type="button" aria-label="Fermer"><svg class="i"><use href="#i-close"/></svg></button>
+    </div>
+
+    <div class="reel">
+      <h2>Buffer<b class="num" id="reelDur">2 min</b></h2>
+      <div class="film" id="film" aria-label="Segments de 2 secondes en mémoire tampon" role="img"></div>
+      <div class="meta num"><b>60 segments</b> de 2 s<br>≈ 245 Mo sur le disque</div>
+    </div>
+
+    <!-- Panneau Clipper -->
+    <div class="panel" id="p-clip" role="tabpanel" aria-labelledby="t-clip">
+      <nav class="subnav" aria-label="Aller à">
+        <a href="#s-cap" class="cur">Capture</a>
+        <a href="#s-enc">Encodage</a>
+        <a href="#s-aud">Audio</a>
+        <a href="#s-key">Raccourcis</a>
+        <a href="#s-sto">Stockage</a>
+      </nav>
+      <div class="content">
+
+        <section id="s-cap">
+          <h3>Capture</h3>
+          <p class="lead">Le buffer tourne en continu. Le Clip garde les dernières minutes ; le REC enregistre jusqu'à l'arrêt.</p>
+          <div class="row">
+            <span class="lbl" id="l-buf">Durée du buffer</span>
+            <div class="seg" role="group" aria-labelledby="l-buf" data-k="buf">
+              <button aria-pressed="false" data-v="60">1 min</button>
+              <button aria-pressed="false" data-v="90">1 min 30</button>
+              <button aria-pressed="true" data-v="120">2 min</button>
+              <button aria-pressed="false" data-v="180">3 min</button>
+              <button aria-pressed="false" data-v="300">5 min</button>
+              <button aria-pressed="false" data-v="600">10 min</button>
+            </div>
+          </div>
+
+          <div class="duo">
+            <div class="out clip">
+              <header><svg class="i"><use href="#i-clip"/></svg><h4>Clip</h4><kbd>Alt+X</kbd></header>
+              <div class="f">
+                <span class="lbl" id="l-cr">Résolution</span>
+                <div class="seg" role="group" aria-labelledby="l-cr" data-k="cres">
+                  <button aria-pressed="true" data-v="1200">1200p<small>natif</small></button>
+                  <button disabled title="Au-dessus de l'écran (1920 × 1200)">1440p</button>
+                  <button disabled title="Au-dessus de l'écran (1920 × 1200)">2160p</button>
+                </div>
+              </div>
+              <div class="f">
+                <span class="lbl" id="l-cf">Images par seconde</span>
+                <div class="seg" role="group" aria-labelledby="l-cf" data-k="cfps">
+                  <button aria-pressed="false" data-v="30">30</button>
+                  <button aria-pressed="true" data-v="60">60</button>
+                </div>
+              </div>
+            </div>
+            <div class="out rec">
+              <header><svg class="i"><use href="#i-rec"/></svg><h4>REC</h4><kbd>Alt+R</kbd></header>
+              <div class="f">
+                <span class="lbl" id="l-rr">Résolution</span>
+                <div class="seg" role="group" aria-labelledby="l-rr" data-k="rres">
+                  <button aria-pressed="true" data-v="1200">1200p<small>natif</small></button>
+                  <button disabled title="Au-dessus de l'écran (1920 × 1200)">1440p</button>
+                  <button disabled title="Au-dessus de l'écran (1920 × 1200)">2160p</button>
+                </div>
+              </div>
+              <div class="f">
+                <span class="lbl" id="l-rf">Images par seconde</span>
+                <div class="seg" role="group" aria-labelledby="l-rf" data-k="rfps">
+                  <button aria-pressed="true" data-v="30">30</button>
+                  <button aria-pressed="false" data-v="60">60</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="note info"><svg class="i"><use href="#i-info"/></svg><span>1440p et 2160p sont grisés : ils dépassent ton écran (1920 × 1200). Le ratio 16:10 est conservé. Sur un écran plus grand, une résolution plus basse que l'écran passe par un <b>redimensionnement CPU</b> (≈ 3 à 8 % de CPU).</span></div>
+          <div class="note warn" id="dualWarn"><svg class="i"><use href="#i-alert"/></svg><span><b>REC et Clip n'ont pas les mêmes FPS.</b> Une deuxième capture tourne pendant le REC : environ +6 % d'encodeur GPU. Mets les mêmes réglages pour un REC sans coût.</span></div>
+        </section>
+
+        <section id="s-enc">
+          <h3>Encodage</h3>
+          <p class="lead">Seuls les encodeurs qui ont réussi un test sur ce PC sont proposés.</p>
+          <div class="row">
+            <label for="enc">Encodeur</label>
+            <div class="sel"><select id="enc">
+              <option>NVIDIA NVENC · H.264 (recommandé)</option>
+              <option>NVIDIA NVENC · HEVC</option>
+              <option>NVIDIA NVENC · AV1</option>
+              <option>AMD AMF · H.264 (secours)</option>
+              <option>CPU x264 (dernier recours)</option>
+            </select></div>
+          </div>
+          <div class="row">
+            <label for="q">Qualité</label>
+            <div>
+              <div class="range"><input id="q" type="range" min="50" max="150" step="10" value="100" aria-describedby="qh"><output for="q" id="qo" class="num">100 %</output></div>
+              <div class="hint" id="qh">Débit adapté à la résolution et aux FPS. Preset NVENC p3.</div>
+            </div>
+          </div>
+          <div class="row">
+            <span class="lbl" id="l-fmt">Format de sortie</span>
+            <div>
+              <div class="seg" role="group" aria-labelledby="l-fmt" data-k="fmt">
+                <button aria-pressed="true" data-v="mp4">MP4</button>
+                <button aria-pressed="false" data-v="mkv">MKV</button>
+                <button aria-pressed="false" data-v="mov">MOV</button>
+              </div>
+              <div class="hint">Utilisé par le Clip et le REC. Pas de réencodage.</div>
+            </div>
+          </div>
+          <div class="estimate" aria-live="polite">
+            <span class="big num" id="est">2 min 1200p60 ≈ <em>312 Mo</em></span>
+            <span class="num" id="estRate">20,8 Mb/s · REC ≈ 4,7 Go/h</span>
+          </div>
+        </section>
+
+        <section id="s-aud">
+          <h3>Audio</h3>
+          <p class="lead">Les périphériques sont détectés automatiquement et rechargés s'ils changent.</p>
+          <div class="row">
+            <span class="lbl" id="l-am">Mode</span>
+            <div class="seg" role="group" aria-labelledby="l-am" data-k="amode">
+              <button aria-pressed="false">Sans audio</button>
+              <button aria-pressed="false">1 piste (jeu + micro)</button>
+              <button aria-pressed="true">2 pistes séparées</button>
+            </div>
+          </div>
+          <div class="row">
+            <label for="out">Son du jeu</label>
+            <div class="sel"><select id="out">
+              <option>Haut-parleurs (Realtek(R) Audio)</option>
+              <option selected>Casque (HyperX Cloud III S Wireless)</option>
+            </select></div>
+          </div>
+          <div class="row">
+            <label for="gv">Volume du jeu</label>
+            <div class="range"><input id="gv" type="range" min="0" max="150" value="100"><output for="gv" class="num">100 %</output></div>
+          </div>
+          <div class="row">
+            <label for="mic">Micro</label>
+            <div class="sel"><select id="mic">
+              <option selected>Headset Microphone (HyperX Cloud III S Wireless)</option>
+              <option>Microphone Array (Realtek(R) Audio)</option>
+            </select></div>
+          </div>
+          <div class="row">
+            <label for="mv">Volume du micro</label>
+            <div class="range"><input id="mv" type="range" min="0" max="150" value="80"><output for="mv" class="num">80 %</output></div>
+          </div>
+          <div class="row">
+            <span class="lbl" id="l-lvl">Niveau du micro</span>
+            <div class="meter">
+              <div class="vu" id="vu" role="meter" aria-labelledby="l-lvl" aria-valuemin="0" aria-valuemax="100" aria-valuenow="30"><i></i></div>
+              <button class="icon-btn" id="mute" type="button" aria-pressed="false"><svg class="i"><use href="#i-mic"/></svg><span>Couper</span></button>
+            </div>
+          </div>
+        </section>
+
+        <section id="s-key">
+          <h3>Raccourcis</h3>
+          <p class="lead">Les raccourcis marchent même en jeu. C'est le moyen principal : la souris peut être capturée par le jeu.</p>
+          <div class="keys">
+            <span class="act">Enregistrer un clip</span><kbd>Alt+X</kbd><button class="change" type="button">Modifier</button>
+            <span class="act">Démarrer / arrêter le REC</span><kbd>Alt+R</kbd><button class="change" type="button">Modifier</button>
+            <span class="act">Ouvrir la barre</span><kbd>Alt+Z</kbd><button class="change" type="button">Modifier</button>
+          </div>
+          <div class="note warn"><svg class="i"><use href="#i-alert"/></svg><span><b>Alt+Z ouvre aussi l'overlay NVIDIA.</b> Les deux s'ouvriront ensemble. <button class="change" type="button" style="all:unset;color:var(--tally);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px">Utiliser Alt+Maj+Z</button></span></div>
+        </section>
+
+        <section id="s-sto">
+          <h3>Stockage et limites</h3>
+          <div class="row">
+            <label for="dir">Dossier de sortie</label>
+            <div class="path"><input id="dir" value="C:\Users\Vous\Videos\Clipper" readonly><button class="icon-btn" type="button"><svg class="i"><use href="#i-folder"/></svg>Changer</button></div>
+          </div>
+          <ul class="limits" style="margin-top:12px">
+            <li><svg class="i"><use href="#i-info"/></svg><span>La barre ne s'affiche pas au-dessus d'un jeu en plein écran exclusif. Utilise le mode fenêtré sans bordure, ou les raccourcis.</span></li>
+            <li><svg class="i"><use href="#i-info"/></svg><span>Le buffer écrit en continu environ <b class="num">9 Go/h</b> à 1080p60 dans un dossier temporaire. Les anciens segments sont supprimés au fur et à mesure.</span></li>
+            <li><svg class="i"><use href="#i-info"/></svg><span>Capture par API Windows uniquement. Aucune injection, aucun hook : compatible anti-cheat.</span></li>
+          </ul>
+        </section>
+      </div>
+    </div>
+
+    <!-- Panneau Pilotes -->
+    <div class="panel" id="p-drv" role="tabpanel" aria-labelledby="t-drv" hidden>
+      <div class="drv">
+        <div class="gpu">
+          <div>
+            <h3>GeForce RTX 4060 Laptop GPU</h3>
+            <p>Détecté avec nvidia-smi · Windows 11</p>
+          </div>
+          <dl class="versions">
+            <dt>Installé</dt><dt>Disponible</dt>
+            <dd class="num">621.01</dd><dd class="num new">626.44</dd>
+          </dl>
+        </div>
+        <div class="row" style="margin-top:16px">
+          <span class="lbl" id="l-br">Type de pilote</span>
+          <div class="seg" role="group" aria-labelledby="l-br" data-k="branch">
+            <button aria-pressed="true">Game Ready</button>
+            <button aria-pressed="false">Studio</button>
+          </div>
+        </div>
+        <div class="update">
+          <h4>Mise à jour disponible <span class="pill num">626.44</span></h4>
+          <p>Téléchargement depuis nvidia.com uniquement (≈ 812 Mo). La taille du fichier est vérifiée, puis l'installation se fait sans fenêtre. Windows demandera une autorisation. Un redémarrage peut être nécessaire.</p>
+          <button class="cta" id="dl" type="button"><svg class="i"><use href="#i-down"/></svg>Télécharger et installer</button>
+          <div class="prog" id="prog" hidden>
+            <div class="track" role="progressbar" aria-label="Téléchargement du pilote" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="fill" id="fill"></div></div>
+            <div class="lab num"><span id="plab">0 Mo / 812 Mo</span><span id="ppct">0 %</span></div>
+          </div>
+        </div>
+        <div class="note ok" style="margin-top:12px"><svg class="i"><use href="#i-check"/></svg><span>Quand le pilote est à jour, cette zone affiche simplement <b>« À jour »</b>.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="compare">Proposition B « Régie » · maquette statique, valeurs factices</p>
+</div>
+
+<script>
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Onglets
+  const tabs = $$('.tab');
+  tabs.forEach(t => t.addEventListener('click', () => select(t)));
+  $('.tabs').addEventListener('keydown', e => {
+    if (!['ArrowLeft','ArrowRight'].includes(e.key)) return;
+    const i = tabs.indexOf(document.activeElement);
+    const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+    select(n); n.focus();
+  });
+  function select(t) {
+    tabs.forEach(x => {
+      const on = x === t;
+      x.setAttribute('aria-selected', on);
+      x.tabIndex = on ? 0 : -1;
+      $('#' + x.getAttribute('aria-controls')).hidden = !on;
+    });
+    $('.reel').hidden = t.id !== 't-clip';
+  }
+
+  // Segmentés
+  const state = { buf: 120, cfps: 60, rfps: 30 };
+  $$('.seg').forEach(g => g.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b || b.disabled) return;
+    $$('button', g).forEach(x => x.setAttribute('aria-pressed', x === b));
+    if (g.dataset.k && b.dataset.v) state[g.dataset.k] = +b.dataset.v || b.dataset.v;
+    update();
+  }));
+
+  // Sliders
+  $$('input[type=range]').forEach(r => {
+    const paint = () => {
+      r.style.setProperty('--p', ((r.value - r.min) / (r.max - r.min) * 100) + '%');
+      const o = r.parentElement.querySelector('output');
+      if (o) o.textContent = r.value + ' %';
+    };
+    r.addEventListener('input', () => { paint(); update(); });
+    paint();
+  });
+
+  // Estimation : 1200p60 H.264 ≈ 20,8 Mb/s à qualité 100 %
+  const fr = n => n.toLocaleString('fr-FR', { maximumFractionDigits: 1 });
+  function update() {
+    const q = $('#q').value / 100;
+    const mbps = 20.8 * (state.cfps === 30 ? .65 : 1) * q;
+    const mo = mbps * state.buf / 8;
+    const dur = state.buf % 60 ? `${Math.floor(state.buf / 60)} min 30` : `${state.buf / 60} min`;
+    const size = mo >= 1000 ? fr(mo / 1000) + ' Go' : Math.round(mo) + ' Mo';
+    $('#est').innerHTML = `${dur} 1200p${state.cfps} ≈ <em>${size}</em>`;
+    const recMbps = 20.8 * (state.rfps === 30 ? .65 : 1) * q;
+    $('#estRate').textContent = `${fr(mbps)} Mb/s · REC ≈ ${fr(recMbps * 3600 / 8 / 1000)} Go/h`;
+    $('#reelDur').textContent = dur;
+    $('#dualWarn').hidden = state.cfps === state.rfps;
+    buildFilm(state.buf / 2);
+  }
+
+  // Pellicule du buffer
+  function buildFilm(n) {
+    const f = $('#film'), cols = Math.min(n, 75);
+    f.innerHTML = '';
+    for (let i = 0; i < cols; i++) {
+      const s = document.createElement('i');
+      s.className = i === cols - 1 ? 'new' : 'on';
+      f.appendChild(s);
+    }
+  }
+  if (!reduce) setInterval(() => {
+    const f = $('#film'); if (!f.firstChild) return;
+    f.firstChild.remove();
+    f.lastChild.className = 'on';
+    const s = document.createElement('i'); s.className = 'new'; f.appendChild(s);
+  }, 2000);
+
+  // Vu-mètre
+  const vu = $('#vu'), bar = $('i', vu);
+  let muted = false;
+  if (!reduce) setInterval(() => {
+    const v = muted ? 0 : Math.max(.08, Math.min(.95, .35 + Math.sin(Date.now() / 260) * .2 + Math.random() * .3)) * ($('#mv').value / 100);
+    bar.style.transform = `scaleX(${Math.min(v, 1)})`;
+    vu.setAttribute('aria-valuenow', Math.round(v * 100));
+  }, 90);
+  $('#mute').addEventListener('click', e => {
+    muted = !muted;
+    const b = e.currentTarget;
+    b.setAttribute('aria-pressed', muted);
+    vu.classList.toggle('muted', muted);
+    $('use', b).setAttribute('href', muted ? '#i-micoff' : '#i-mic');
+    $('span', b).textContent = muted ? 'Coupé' : 'Couper';
+  });
+
+  // Compteur REC
+  let rec = 42;
+  setInterval(() => {
+    rec++;
+    const t = `${String(Math.floor(rec / 60)).padStart(2, '0')}:${String(rec % 60).padStart(2, '0')}`;
+    $('#recTime').textContent = t;
+  }, 1000);
+
+  // Toast rejoué au clic sur Clip
+  $('.bb.clip').addEventListener('click', () => {
+    const t = $('#toast'); t.style.animation = 'none'; t.offsetWidth; t.style.animation = '';
+  });
+
+  // Sous-navigation active
+  const panel = $('#p-clip'), links = $$('.subnav a');
+  panel.addEventListener('scroll', () => {
+    let cur = links[0];
+    links.forEach(a => { if ($(a.getAttribute('href')).offsetTop - panel.scrollTop < 120) cur = a; });
+    links.forEach(a => a.classList.toggle('cur', a === cur));
+  }, { passive: true });
+
+  // Téléchargement simulé
+  $('#dl').addEventListener('click', e => {
+    const b = e.currentTarget; b.disabled = true; b.lastChild.textContent = 'Téléchargement…';
+    $('#prog').hidden = false;
+    let p = 0;
+    const id = setInterval(() => {
+      p = Math.min(100, p + 3 + Math.random() * 5);
+      $('#fill').style.transform = `scaleX(${p / 100})`;
+      $('.track').setAttribute('aria-valuenow', Math.round(p));
+      $('#plab').textContent = `${Math.round(812 * p / 100)} Mo / 812 Mo`;
+      $('#ppct').textContent = Math.round(p) + ' %';
+      if (p >= 100) { clearInterval(id); b.lastChild.textContent = 'Taille vérifiée · installation…'; }
+    }, 180);
+  });
+
+  update();
+})();
+</script>
+</body>
+</html>

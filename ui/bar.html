@@ -1,0 +1,140 @@
+<!doctype html>
+<!-- Barre Alt+Z — DA E « Instrument ». Fenêtre transparente, toujours au premier plan, sans focus.
+     Hors de l'app (pas de window.__INIT__) : données factices pour tester dans un navigateur. -->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Clipper — barre</title>
+<style>
+@font-face{font-family:"Archivo";font-weight:500;font-display:swap;src:url(fonts/archivo-latin-500-normal.woff2) format("woff2")}
+@font-face{font-family:"Archivo";font-weight:600;font-display:swap;src:url(fonts/archivo-latin-600-normal.woff2) format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-weight:500;font-display:swap;src:url(fonts/jetbrains-mono-latin-500-normal.woff2) format("woff2")}
+:root{
+  --body:#141913;--raise:#222a20;--raise-h:#2a3327;--line:#2b3429;--line-2:#3c4739;
+  --text:#e9ece2;--text-2:#b3bba9;--text-3:#8d9786;
+  --signal:#ff7d2e;--signal-ink:#1d0e03;--rec:#ff4a3d;--ok:#9ed672;
+  --ease:cubic-bezier(.16,1,.3,1);--sans:"Archivo",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:transparent;overflow:hidden;user-select:none}
+body{display:grid;justify-items:center;align-content:start;font:500 13px/1.2 var(--sans);color:var(--text);-webkit-font-smoothing:antialiased}
+:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.bar{display:flex;align-items:center;gap:2px;height:62px;padding:6px;background:rgba(20,25,19,.94);
+  border:1px solid var(--line-2);border-top:0;border-radius:0 0 12px 12px;box-shadow:0 10px 28px rgba(0,0,0,.55);
+  transform:translateY(-110%);transition:transform .38s var(--ease)}
+.bar.in{transform:none}
+.bar.out{transform:translateY(-110%);transition-duration:.22s}
+.bar button{all:unset;cursor:pointer;display:grid;grid-template-columns:auto auto;align-items:center;column-gap:8px;height:48px;padding:0 11px;border-radius:7px;transition:background .15s}
+.bar button:hover{background:var(--raise-h)}
+.bar button:focus-visible{outline:2px solid var(--signal)}
+.bar svg{width:17px;height:17px;grid-row:span 2;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.v{font-weight:600;white-space:nowrap}
+kbd{grid-column:2;font:500 10px/1 var(--mono);color:var(--text-3);letter-spacing:.02em;white-space:nowrap}
+.sep{width:1px;height:30px;background:var(--line);margin:0 4px}
+.bar .clip{background:var(--signal);color:var(--signal-ink)}
+.bar .clip:hover{background:#ff9148}
+.clip kbd{color:#5c2a0c}
+.rec.on .v{color:var(--rec);font-family:var(--mono)}
+.led{width:8px;height:8px;border-radius:50%;background:var(--text-3);grid-row:span 2}
+.rec.on .led{background:var(--rec);animation:blink 1.4s steps(1) infinite}
+@keyframes blink{50%{opacity:.25}}
+.stats.on{color:var(--ok)}
+.toast{margin-top:10px;display:flex;align-items:center;gap:10px;padding:9px 10px 9px 14px;background:var(--body);border:1px solid var(--line-2);border-radius:10px;box-shadow:0 8px 22px rgba(0,0,0,.5);opacity:0;transform:translateY(-6px);transition:opacity .25s,transform .35s var(--ease)}
+.toast.show{opacity:1;transform:none}
+.toast .t{font-weight:600}
+.toast .t.err{color:var(--rec)}
+.toast small{display:block;color:var(--text-2);font-weight:500;font-size:11.5px;margin-top:2px;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast button{all:unset;cursor:pointer;padding:6px 12px;border-radius:6px;background:var(--raise);font-weight:600}
+.toast button:hover{background:var(--raise-h)}
+@media (prefers-reduced-motion:reduce){.bar,.toast{transition:none}.rec.on .led{animation:none}}
+</style>
+</head>
+<body>
+<div class="bar" id="bar" role="toolbar" aria-label="Barre Clipper">
+  <button class="clip" id="b-clip" aria-label="Enregistrer un clip"><svg viewBox="0 0 24 24"><path d="M4 7h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span class="v">Clip</span><kbd id="k-clip"></kbd></button>
+  <button class="rec" id="b-rec" aria-label="Démarrer ou arrêter le REC"><span class="led"></span><span class="v" id="rec-v">REC</span><kbd id="k-rec"></kbd></button>
+  <span class="sep"></span>
+  <button id="b-buf" aria-label="Durée du buffer"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="v" id="v-buf"></span><kbd>buffer</kbd></button>
+  <button id="b-res" aria-label="Résolution du clip"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg><span class="v" id="v-res"></span><kbd>résolution</kbd></button>
+  <button id="b-fps" aria-label="Images par seconde"><svg viewBox="0 0 24 24"><path d="M4 18l5-6 4 3 7-9"/></svg><span class="v" id="v-fps"></span><kbd>images/s</kbd></button>
+  <button id="b-aud" aria-label="Mode audio"><svg viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></svg><span class="v" id="v-aud"></span><kbd>audio</kbd></button>
+  <button class="stats" id="b-stats" aria-label="Statistiques à l'écran"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 15v-3M12 15V9M16 15v-5"/></svg><span class="v" id="v-stats"></span><kbd id="k-ov"></kbd></button>
+  <span class="sep"></span>
+  <button id="b-set" aria-label="Ouvrir les réglages"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg><span class="v">Réglages</span><kbd>Échap ferme</kbd></button>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"><div><div class="t" id="t-t"></div><small id="t-s"></small></div><button id="t-see">Voir</button></div>
+
+<script>
+(()=>{
+const dev=!window.__INIT__;
+if(dev){
+  window.__INIT__={page:"bar",native:[1920,1200],recording:true,rec_secs:42,
+    config:{buffer_secs:180,clip:{height:1080,fps:60},audio_mode:"split",overlay_mode:"hotkey"},
+    hotkeys:{clip:"Alt+X",rec:"Ctrl+Alt+R",bar:"Alt+Maj+Z",overlay:"Alt+F"}};
+  window.ipc={postMessage(s){const m=JSON.parse(s);console.log("ipc",m);
+    if(m.cmd==="clip")setTimeout(()=>window.__on({type:"toast",kind:"clip",text:"Clip enregistré · 3 min",path:"C:\\Users\\Vous\\Videos\\Clipper\\Clip 2026-11-07 21-14-03.mp4"}),300);
+    if(m.cmd==="rec"){I.recording=!I.recording;I.rec_secs=0;window.__on({type:"state",recording:I.recording,rec_secs:0})}
+    if(m.cmd==="set"){I.config=setPath(I.config,m.key,m.value);window.__on({type:"config",config:I.config})}}};
+}
+const I=window.__INIT__,$=id=>document.getElementById(id);
+const send=m=>window.ipc.postMessage(JSON.stringify(m));
+function setPath(o,k,v){const c=structuredClone(o),p=k.split(".");let t=c;while(p.length>1)t=t[p.shift()];t[p[0]]=v;return c}
+
+const BUF=[60,90,120,180,300,600],RES=[720,1080,1440,2160],AUD=["none","mixed","split"],OV=["hidden","hotkey","always"];
+const AUD_L={none:"Muet",mixed:"1 piste",split:"2 pistes"},OV_L={hidden:"Stats off",hotkey:"Stats",always:"Stats fixes"};
+const next=(list,v)=>list[(list.indexOf(v)+1)%list.length];
+const fmtBuf=s=>s%60?`${s/60|0}:${String(s%60).padStart(2,"0")}`:`${s/60} min`;
+const fmtT=s=>`${String(s/60|0).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+// Même règle que capture.rs : une classe au-dessus de la hauteur native est refusée ; 1080p couvre 1080 à 1209.
+const resOk=h=>h<=I.native[1];
+const resLabel=h=>(I.native[1]>=h&&I.native[1]<=h*1.12)?`${I.native[1]}p`:`${h}p`;
+
+function render(){
+  const c=I.config,k=I.hotkeys||{};
+  $("k-clip").textContent=k.clip||"";$("k-rec").textContent=(k.rec||"")+(I.recording?" · arrêter":"");$("k-ov").textContent=k.overlay||"";
+  $("v-buf").textContent=fmtBuf(c.buffer_secs);$("v-res").textContent=resLabel(c.clip.height);$("v-fps").textContent=c.clip.fps+" fps";
+  $("v-aud").textContent=AUD_L[c.audio_mode]||c.audio_mode;$("v-stats").textContent=OV_L[c.overlay_mode]||"Stats";
+  $("b-stats").classList.toggle("on",c.overlay_mode!=="hidden");
+  $("b-rec").classList.toggle("on",!!I.recording);$("b-rec").setAttribute("aria-pressed",!!I.recording);
+  $("rec-v").textContent=I.recording?fmtT(I.rec_secs):"REC";
+}
+
+// Compteur REC : seulement pendant un REC (aucun minuteur sinon).
+let recTimer=null;
+function recTick(){clearInterval(recTimer);recTimer=null;if(I.recording)recTimer=setInterval(()=>{I.rec_secs++;render()},1000)}
+
+$("b-clip").onclick=()=>send({cmd:"clip"});
+$("b-rec").onclick=()=>send({cmd:"rec"});
+$("b-buf").onclick=()=>send({cmd:"set",key:"buffer_secs",value:next(BUF,I.config.buffer_secs)});
+$("b-res").onclick=()=>{let h=I.config.clip.height;do{h=next(RES,h)}while(!resOk(h)&&h!==I.config.clip.height);send({cmd:"set",key:"clip.height",value:h})};
+$("b-fps").onclick=()=>send({cmd:"set",key:"clip.fps",value:I.config.clip.fps===60?30:60});
+$("b-aud").onclick=()=>send({cmd:"set",key:"audio_mode",value:next(AUD,I.config.audio_mode)});
+$("b-stats").onclick=()=>send({cmd:"set",key:"overlay_mode",value:next(OV,I.config.overlay_mode)});
+$("b-set").onclick=()=>send({cmd:"open_settings"});
+$("t-see").onclick=()=>send({cmd:"open_settings",tab:"videos"});
+
+// Fermeture auto : 5 s sans souris sur la barre (le compte repart à chaque mouvement).
+let idle=null;
+const arm=()=>{clearTimeout(idle);idle=setTimeout(close,5000)};
+function close(){$("bar").classList.replace("in","out");setTimeout(()=>send({cmd:"close"}),220)}
+document.addEventListener("mousemove",arm);document.addEventListener("mousedown",arm);
+document.addEventListener("keydown",e=>{if(e.key==="Escape")close()});
+
+let toastT=null;
+window.__on=m=>{switch(m&&m.type){
+  case "state":I.recording=m.recording;I.rec_secs=m.rec_secs||0;render();recTick();break;
+  case "config":I.config=m.config;render();break;
+  case "toast":{
+    $("t-t").textContent=m.text;$("t-t").classList.toggle("err",m.kind==="error");
+    $("t-s").textContent=m.path?m.path.split("\\").pop():"";$("t-see").hidden=m.kind==="error"||!m.path;
+    $("toast").classList.add("show");clearTimeout(toastT);toastT=setTimeout(()=>$("toast").classList.remove("show"),4000);arm();break}
+}};
+
+render();recTick();
+requestAnimationFrame(()=>requestAnimationFrame(()=>$("bar").classList.add("in")));
+arm();
+})();
+</script>
+</body>
+</html>

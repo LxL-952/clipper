@@ -1,0 +1,1137 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clipper · Arène</title>
+<style>
+@font-face{font-family:"Saira Condensed";font-weight:600;font-style:normal;font-display:swap;src:url("fonts/g/saira-condensed-latin-600-normal.woff2") format("woff2")}
+@font-face{font-family:"Saira Condensed";font-weight:800;font-style:normal;font-display:swap;src:url("fonts/g/saira-condensed-latin-800-normal.woff2") format("woff2")}
+@font-face{font-family:"Barlow";font-weight:400;font-style:normal;font-display:swap;src:url("fonts/g/barlow-latin-400-normal.woff2") format("woff2")}
+@font-face{font-family:"Barlow";font-weight:500;font-style:normal;font-display:swap;src:url("fonts/g/barlow-latin-500-normal.woff2") format("woff2")}
+@font-face{font-family:"Barlow";font-weight:600;font-style:normal;font-display:swap;src:url("fonts/g/barlow-latin-600-normal.woff2") format("woff2")}
+
+:root{
+  --void:#06090f;
+  --deck:#0b1018;
+  --plate:#111824;
+  --plate-2:#172131;
+  --plate-3:#1e2a3d;
+  --line:#1f2a3b;
+  --line-2:#2c3a51;
+  --text:#edf1f7;
+  --text-2:#a9b4c6;
+  --text-3:#7f8ca2;
+  --volt:#2fdcff;
+  --volt-ink:#02141a;
+  --volt-dim:#2fdcff1f;
+  --rec:#ff4b5c;
+  --warn:#f2bd4b;
+  --ok:#55d69a;
+  --chip:#e8edf5;
+  --chip-ink:#0a0f17;
+  --f-disp:"Saira Condensed","Barlow",sans-serif;
+  --f-text:"Barlow","Segoe UI Variable Text","Segoe UI",sans-serif;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --cut:10px;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{background:var(--void)}
+body{margin:0;background:var(--void);color:var(--text);font:400 14px/1.45 var(--f-text);-webkit-font-smoothing:antialiased;caret-color:var(--volt)}
+::selection{background:var(--volt);color:var(--volt-ink)}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--volt);outline-offset:2px}
+*{scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--line-2);border:3px solid var(--deck)}
+::-webkit-scrollbar-track{background:transparent}
+.num{font-variant-numeric:tabular-nums}
+[hidden]{display:none!important}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg.i{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:square;stroke-linejoin:miter}
+kbd{font:600 11px/1 var(--f-text);letter-spacing:.02em;color:var(--text-2);background:var(--plate-2);padding:3px 5px 2px;border-radius:2px}
+
+/* page */
+.page{max-width:1140px;margin:0 auto;padding:40px 20px 80px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:28px}
+.page-head h1{font:800 56px/.9 var(--f-disp);text-transform:uppercase;letter-spacing:-.01em;margin:0}
+.page-head h1 span{color:var(--volt)}
+.page-head p{margin:0;max-width:52ch;color:var(--text-2)}
+.part{font:800 26px/1 var(--f-disp);text-transform:uppercase;margin:56px 0 6px;letter-spacing:.01em}
+.part-sub{margin:0 0 18px;color:var(--text-2);max-width:70ch}
+.scroller{overflow-x:auto;overflow-y:hidden;padding-bottom:4px}
+
+/* ============ STAGE ============ */
+.stage{position:relative;width:1100px;height:560px;overflow:hidden;background:#0a1220;isolation:isolate}
+.scene{position:absolute;inset:0;width:100%;height:100%;transition:filter .5s var(--ease)}
+.stage.open .scene{filter:brightness(.72) saturate(.9)}
+.hud{position:absolute;color:#c7d2e2;font:600 15px/1 var(--f-text);opacity:.85}
+.hud.l{left:28px;bottom:26px;display:flex;align-items:center;gap:10px}
+.hud.l b{font:800 30px/1 var(--f-disp)}
+.hud.l i{display:block;width:120px;height:6px;background:#c7d2e233}
+.hud.l i::before{content:"";display:block;height:100%;width:78%;background:#c7d2e2}
+.hud.r{right:28px;bottom:26px;font:800 30px/1 var(--f-disp)}
+.hud.r small{font:600 16px var(--f-disp);color:#c7d2e2}
+.cross{position:absolute;left:50%;top:50%;width:26px;height:26px;margin:-13px 0 0 -13px}
+
+/* stats overlay preview */
+.ov{position:absolute;left:12px;top:12px;background:rgb(6 9 15 / .8);padding:9px 12px 10px;width:150px;display:grid;gap:6px;transition:opacity .2s}
+.ov-fps{display:flex;align-items:baseline;gap:6px}
+.ov-fps b{font:800 34px/.9 var(--f-disp);color:var(--text)}
+.ov-fps span{font:600 13px var(--f-disp);color:var(--text-2);text-transform:uppercase;letter-spacing:.06em}
+.ov-fps em{margin-left:auto;font:600 13px var(--f-disp);font-style:normal;color:var(--text-2)}
+.ov dl{margin:0;display:grid;grid-template-columns:auto 1fr auto;gap:3px 10px;font:500 12.5px/1.25 var(--f-text)}
+.ov dt{color:var(--text-3);font-weight:600;letter-spacing:.04em}
+.ov dd{margin:0;color:var(--text);font-variant-numeric:tabular-nums}
+.ov dd.t{color:var(--text-2);text-align:right}
+.ov dd{white-space:nowrap}.ov dd.w2{grid-column:span 2}
+
+/* Alt+Z bar */
+.bar{position:absolute;left:50%;top:0;width:760px;height:64px;margin-left:-380px;display:flex;align-items:stretch;background:rgb(10 15 23 / .94);
+  clip-path:polygon(0 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,14px 100%,0 calc(100% - 14px));
+  transform:translateY(-110%);transition:transform .62s var(--ease)}
+.stage.open .bar{transform:none}
+.bar::after{content:"";position:absolute;left:14px;right:14px;bottom:0;height:2px;background:var(--volt);transform:scaleX(0);transform-origin:left;transition:transform .7s var(--ease) .28s}
+.stage.open .bar::after{transform:scaleX(1)}
+.bi{appearance:none;border:0;background:transparent;display:flex;flex-direction:column;justify-content:center;gap:5px;padding:0 13px;min-width:0;color:var(--text);text-align:left;position:relative}
+.bi:hover{background:var(--plate-2)}
+.bi:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--volt)}
+.bi .top{display:flex;align-items:center;gap:7px;font:800 19px/1 var(--f-disp);text-transform:uppercase;white-space:nowrap}
+.bi .bot{display:flex;align-items:center;gap:6px;font:500 11.5px/1 var(--f-text);color:var(--text-2);white-space:nowrap}
+.bi .bot kbd{font-size:11px;padding:2px 4px}
+.bi.clip{padding-left:22px}
+.bi.clip .top{color:var(--volt)}
+.bi.rec .top{color:var(--text)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--rec);flex:none}
+.sep{width:1px;background:var(--line-2);margin:14px 4px}
+.bi.x{margin-left:auto;align-items:center;padding:0 18px 0 14px}
+
+/* toast */
+.toast{position:absolute;right:20px;top:86px;display:flex;align-items:center;gap:14px;background:var(--deck);padding:12px 12px 12px 16px;
+  clip-path:polygon(0 0,calc(100% - 12px) 0,100% 12px,100% 100%,0 100%);
+  transform:translateX(24px);opacity:0;transition:transform .5s var(--ease),opacity .3s}
+.stage.toasted .toast{transform:none;opacity:1}
+.toast-ico{width:34px;height:34px;display:grid;place-items:center;background:var(--volt);color:var(--volt-ink)}
+.toast-ico svg.i{stroke-width:2.2}
+.toast b{display:block;font:800 18px/1.05 var(--f-disp);text-transform:uppercase}
+.toast span{font-size:12.5px;color:var(--text-2)}
+.stage-foot{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:12px;color:var(--text-3);font-size:13px;flex-wrap:wrap}
+
+/* ============ BUTTONS ============ */
+.btn{appearance:none;border:0;min-height:34px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--plate-2);color:var(--text);font:600 13.5px/1 var(--f-text);transition:background .15s}
+.btn:hover{background:var(--plate-3)}
+.btn.pri{background:var(--volt);color:var(--volt-ink);font:800 15px/1 var(--f-disp);text-transform:uppercase;letter-spacing:.03em;padding:0 18px;min-height:38px;
+  clip-path:polygon(0 0,calc(100% - var(--cut)) 0,100% var(--cut),100% 100%,var(--cut) 100%,0 calc(100% - var(--cut)))}
+.btn.pri:hover{background:#7ae9ff}
+.btn.pri:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--volt-ink),inset 0 0 0 4px var(--volt)}
+.btn.ghost{background:transparent;color:var(--text-2)}
+.btn.ghost:hover{background:var(--plate-2);color:var(--text)}
+.btn.danger{color:#ff8a95}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.sm{min-height:32px;padding:0 10px;font-size:13px}
+
+/* ============ WINDOW ============ */
+.win{width:900px;height:620px;background:var(--deck);display:grid;grid-template-rows:36px 1fr;box-shadow:0 24px 60px -12px rgb(0 0 0 / .7);position:relative}
+.titlebar{display:flex;align-items:center;gap:10px;padding-left:12px;background:var(--void);user-select:none}
+.mark{width:20px;height:20px;background:var(--volt);color:var(--volt-ink);display:grid;place-items:center;font:800 14px/1 var(--f-disp);clip-path:polygon(0 0,100% 0,100% 70%,70% 100%,0 100%)}
+.titlebar .name{font:800 15px/1 var(--f-disp);text-transform:uppercase;letter-spacing:.06em}
+.live{display:flex;align-items:center;gap:7px;color:var(--text-2);font-size:12.5px;margin-left:8px}
+.live i{width:7px;height:7px;background:var(--ok);border-radius:50%}
+.wc{margin-left:auto;display:flex;height:100%}
+.wc button{appearance:none;border:0;background:transparent;width:46px;height:100%;color:var(--text-2);display:grid;place-items:center}
+.wc button:hover{background:var(--plate-2);color:var(--text)}
+.wc button.close:hover{background:#c42b1c;color:#fff}
+.wc svg.i{width:14px;height:14px;stroke-width:1.4}
+.body{display:grid;grid-template-columns:64px 1fr;min-height:0}
+
+/* rail with vertical labels */
+.rail{background:var(--void);display:flex;flex-direction:column;padding:6px 0 0}
+.tab{appearance:none;border:0;background:transparent;flex:0 0 auto;height:126px;display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px 0 0;color:var(--text-3);position:relative;transition:color .15s,background .15s}
+.tab .lbl{writing-mode:vertical-rl;transform:rotate(180deg);font:800 21px/1 var(--f-disp);text-transform:uppercase;letter-spacing:.06em}
+.tab:hover{color:var(--text)}
+.tab[aria-selected="true"]{background:var(--deck);color:var(--text)}
+.tab[aria-selected="true"]::before{content:"";position:absolute;left:0;top:0;width:12px;height:12px;background:var(--volt);clip-path:polygon(0 0,100% 0,0 100%)}
+.tab:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--volt)}
+.tab .badge{position:absolute;top:12px;right:12px;width:7px;height:7px;background:var(--volt);border-radius:50%}
+.rail-foot{margin-top:auto;padding:12px 0 14px;text-align:center;font:600 11px/1.2 var(--f-text);color:var(--text-3)}
+
+.panel{min-height:0;overflow-y:auto;padding:18px 26px 28px}
+.panel[hidden]{display:none}
+
+/* scoreboard header */
+.board{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding-bottom:14px;margin-bottom:4px}
+.board h2{margin:0;font:800 46px/.82 var(--f-disp);text-transform:uppercase;letter-spacing:-.005em}
+.stats{display:flex;margin:0}
+.stats div{padding:0 0 0 18px;margin-left:18px;box-shadow:-1px 0 0 var(--line-2)}
+.stats div:first-child{box-shadow:none;margin-left:0}
+.stats dt{font:600 11px/1 var(--f-text);color:var(--text-3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}
+.stats dd{margin:0;font:800 25px/1 var(--f-disp);font-variant-numeric:tabular-nums;white-space:nowrap}
+.stats dd.v{color:var(--volt)}
+
+/* sub nav */
+.sub{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:8px 0 6px;position:sticky;top:-18px;background:var(--deck);z-index:2;padding-top:6px}
+.sub button{appearance:none;border:0;background:transparent;min-height:36px;padding:0 12px;font:600 15px/1 var(--f-disp);text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);position:relative}
+.sub button:hover{color:var(--text)}
+.sub button[aria-selected="true"]{color:var(--text)}
+.sub button[aria-selected="true"]::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:2px;background:var(--volt)}
+.sub button:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--volt)}
+
+/* rows */
+.grp{margin-top:18px}
+.grp h3{font:800 17px/1 var(--f-disp);text-transform:uppercase;letter-spacing:.05em;color:var(--text-2);margin:0 0 6px}
+.row{display:grid;grid-template-columns:190px 1fr;gap:16px;align-items:center;padding:11px 0;border-top:1px solid var(--line)}
+.row:first-of-type{border-top:0}
+.row > :last-child{justify-self:start;max-width:100%}
+.row > label,.row > .k{font-weight:500;color:var(--text)}
+.row .k small,.row > label small{display:block;font-weight:400;color:var(--text-3);font-size:12.5px;margin-top:2px}
+.ctl{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
+.hint{color:var(--text-3);font-size:12.5px}
+
+/* segmented */
+.seg{display:inline-flex;background:var(--plate);padding:2px;gap:2px;border:0;margin:0;min-width:0}
+.seg legend{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.seg label{position:relative;display:block}
+.seg input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.seg span{display:flex;flex-direction:column;justify-content:center;min-height:32px;padding:0 12px;font:600 13.5px/1.05 var(--f-text);color:var(--text-2);white-space:nowrap;transition:background .15s,color .15s}
+.seg span small{font-size:11px;font-weight:500;color:var(--text-3);margin-top:2px}
+.seg label:hover span{color:var(--text);background:var(--plate-2)}
+.seg input:checked + span{background:var(--chip);color:var(--chip-ink)}
+.seg input:checked + span small{color:#3c4658}
+.seg input:focus-visible + span{outline:2px solid var(--volt);outline-offset:1px}
+.seg input:disabled{cursor:not-allowed}
+.seg input:disabled + span{color:#566278;background:transparent}
+.seg input:disabled + span small{color:#566278}
+.seg.big span{font:800 17px/1 var(--f-disp);padding:0 14px;min-height:36px}
+
+/* switch */
+.sw{position:relative;display:inline-flex;align-items:center;gap:10px;cursor:pointer;min-height:32px}
+.sw input{position:absolute;opacity:0;width:40px;height:22px;margin:0;cursor:pointer}
+.sw .tr{width:40px;height:22px;background:var(--plate-3);position:relative;transition:background .2s;flex:none}
+.sw .tr::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;background:var(--text-2);transition:transform .25s var(--ease),background .2s}
+.sw input:checked + .tr{background:var(--volt)}
+.sw input:checked + .tr::after{transform:translateX(18px);background:var(--volt-ink)}
+.sw input:focus-visible + .tr{outline:2px solid var(--volt);outline-offset:2px}
+
+/* select */
+.sel{appearance:none;background:var(--plate) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23a9b4c6' stroke-width='1.6'/%3E%3C/svg%3E") no-repeat right 12px center;border:0;min-height:34px;padding:0 34px 0 12px;min-width:240px;max-width:100%}
+.sel:hover{background-color:var(--plate-2)}
+.sel option{background:var(--plate);color:var(--text)}
+
+/* range */
+.rng{appearance:none;-webkit-appearance:none;width:200px;height:32px;background:transparent;margin:0}
+.rng::-webkit-slider-runnable-track{height:4px;background:linear-gradient(var(--volt),var(--volt)) 0/var(--p,50%) 100% no-repeat,var(--plate-3)}
+.rng::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:18px;margin-top:-7px;background:var(--text);border:0;clip-path:polygon(0 0,100% 0,100% 70%,50% 100%,0 70%)}
+.rng::-moz-range-track{height:4px;background:var(--plate-3)}
+.rng::-moz-range-progress{height:4px;background:var(--volt)}
+.rng::-moz-range-thumb{width:14px;height:18px;border:0;border-radius:0;background:var(--text)}
+.val{font:800 18px/1 var(--f-disp);min-width:52px;font-variant-numeric:tabular-nums}
+
+/* notes */
+.note{display:flex;gap:10px;align-items:flex-start;background:var(--plate);padding:10px 12px;color:var(--text-2);font-size:13px;line-height:1.45;margin-top:10px;max-width:72ch}
+.note svg.i{margin-top:1px;color:var(--text-3)}
+.note.w svg.i{color:var(--warn)}
+.note.ok svg.i{color:var(--ok)}
+.note b{color:var(--text);font-weight:600}
+.tag{display:inline-flex;align-items:center;gap:5px;font:600 11px/1 var(--f-text);text-transform:uppercase;letter-spacing:.06em;padding:4px 6px;background:var(--plate-2);color:var(--text-2)}
+.tag.w{color:var(--warn)}
+.tag.ok{color:var(--ok)}
+
+/* VS card */
+.vs{display:grid;grid-template-columns:1fr 54px 1fr;background:var(--plate);margin-top:12px}
+.side{padding:14px 16px 16px;display:grid;gap:10px;align-content:start}
+.side h3{margin:0;display:flex;align-items:center;gap:8px;font:800 24px/1 var(--f-disp);text-transform:uppercase}
+.side h3 .kb{margin-left:auto}
+.side .out{font:600 13px var(--f-text);color:var(--text-2)}
+.side .out b{font-weight:600;color:var(--text)}
+.side .seg{background:var(--deck)}
+.vsmark{display:grid;place-items:center;font:800 26px/1 var(--f-disp);color:var(--text-3);background:var(--deck);clip-path:polygon(30% 0,100% 0,70% 100%,0 100%)}
+.cost{grid-column:1/-1;display:flex;gap:10px;align-items:center;padding:10px 16px;background:var(--plate-2);font-size:13px;color:var(--text-2)}
+.cost b{color:var(--text);font-weight:600}
+
+/* estimate block */
+.est{display:flex;gap:28px;align-items:flex-end;flex-wrap:wrap;margin-top:6px}
+.est div span{display:block;font:600 11px/1 var(--f-text);text-transform:uppercase;letter-spacing:.08em;color:var(--text-3);margin-bottom:6px}
+.est div b{font:800 34px/.9 var(--f-disp);font-variant-numeric:tabular-nums}
+.est div b small{font-size:18px;color:var(--text-2);margin-left:3px}
+
+/* details */
+.adv{margin-top:22px;background:var(--plate)}
+.adv summary{list-style:none;display:flex;align-items:center;gap:12px;min-height:48px;padding:0 14px;cursor:pointer}
+.adv summary::-webkit-details-marker{display:none}
+.adv summary b{font:800 17px/1 var(--f-disp);text-transform:uppercase;letter-spacing:.05em}
+.adv summary span{color:var(--text-3);font-size:12.5px}
+.adv summary svg.i{margin-left:auto;transition:transform .25s var(--ease)}
+.adv[open] summary svg.i{transform:rotate(180deg)}
+.adv summary:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--volt)}
+.adv .in{padding:0 14px 14px}
+.adv .row{border-color:var(--line-2)}
+.adv .seg,.adv .path{background:var(--deck)}
+.adv .note,.ram .note{background:var(--deck)}
+.hk:hover{background:var(--plate-2)}
+
+/* meters */
+.meter{display:flex;gap:2px;height:10px;width:150px}
+.meter i{flex:1;background:var(--plate-3)}
+.meter i.on{background:var(--text-2)}
+.meter i.on.hi{background:var(--warn)}
+
+/* corner picker */
+.corners{display:grid;grid-template-columns:repeat(2,40px);grid-template-rows:repeat(2,28px);gap:3px;padding:3px;background:var(--plate);border:0;margin:0}
+.corners label{position:relative}
+.corners input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer}
+.corners span{display:block;height:100%;background:var(--plate-2);position:relative}
+.corners span::after{content:"";position:absolute;width:10px;height:6px;background:var(--text-3)}
+.corners label:nth-child(2) span::after{left:4px;top:4px}
+.corners label:nth-child(3) span::after{right:4px;top:4px}
+.corners label:nth-child(4) span::after{left:4px;bottom:4px}
+.corners label:nth-child(5) span::after{right:4px;bottom:4px}
+.corners input:checked + span{background:var(--plate-3)}
+.corners input:checked + span::after{background:var(--volt)}
+.corners input:focus-visible + span{outline:2px solid var(--volt)}
+.chk{display:grid;grid-template-columns:repeat(4,auto);gap:4px 18px;justify-content:start}
+.cb{display:inline-flex;align-items:center;gap:8px;min-height:32px;cursor:pointer;position:relative}
+.cb input{appearance:none;-webkit-appearance:none;width:18px;height:18px;margin:0;background:var(--plate-2);display:grid;place-items:center;flex:none;cursor:pointer;box-shadow:inset 0 0 0 1px var(--line-2)}
+.cb input:checked{background:var(--volt);box-shadow:none}
+.cb input:checked::after{content:"";width:9px;height:5px;border:2px solid var(--volt-ink);border-top:0;border-right:0;transform:translateY(-1px) rotate(-45deg)}
+
+/* paths */
+.path{display:flex;align-items:center;gap:10px;background:var(--plate);padding:4px 4px 4px 12px;min-height:40px;max-width:520px}
+.path code{font:500 13px var(--f-text);color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.disk{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:12.5px;color:var(--text-2);max-width:520px}
+.disk .cap{flex:1;height:4px;background:var(--plate-3);position:relative}
+.disk .cap i{position:absolute;inset:0 auto 0 0;background:var(--text-3)}
+
+/* hotkeys */
+.hk{appearance:none;border:0;color:var(--text);display:inline-flex;align-items:center;gap:4px;background:var(--plate);padding:4px 6px;min-height:34px;min-width:120px}
+.hk kbd{font-size:12.5px;padding:5px 7px 4px;background:var(--plate-3);color:var(--text)}
+.conf{color:var(--warn);font-size:13px;display:inline-flex;gap:6px;align-items:center}
+
+/* ===== Vidéos ===== */
+.vtop{display:grid;grid-template-columns:1fr 228px;gap:18px;margin-top:10px}
+.player{background:#000;display:grid;grid-template-rows:auto auto}
+.screen{position:relative;aspect-ratio:16/9;overflow:hidden}
+.ctrls{display:flex;align-items:center;gap:10px;padding:6px 10px;background:var(--plate)}
+.ctrls .play{width:36px;height:36px;padding:0;background:var(--text);color:var(--chip-ink)}
+.ctrls .play:hover{background:#fff}
+.ctrls .play svg.i{fill:currentColor;stroke:none}
+.tl{flex:1;width:auto}
+.time{font:600 13px var(--f-disp);color:var(--text-2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.vol{width:70px}
+.ib{appearance:none;border:0;background:transparent;width:34px;height:34px;display:grid;place-items:center;color:var(--text-2)}
+.ib:hover{color:var(--text);background:var(--plate-2)}
+.meta h3{font:800 22px/1.05 var(--f-disp);text-transform:uppercase;margin:4px 0 4px;word-break:break-word}
+.meta dl{margin:12px 0 14px;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px}
+.meta dt{color:var(--text-3)}
+.meta dd{margin:0;font-variant-numeric:tabular-nums}
+.meta .acts{display:grid;gap:4px}
+.meta .acts .btn{justify-content:flex-start}
+.rename{display:flex;gap:6px;margin:4px 0}
+.rename input{flex:1;min-width:0;min-height:34px;background:var(--plate);border:0;box-shadow:inset 0 0 0 1px var(--volt);padding:0 8px}
+.confirm{background:var(--plate-2);padding:10px;font-size:13px;display:grid;gap:8px}
+.confirm div{display:flex;gap:6px}
+.vbar{display:flex;align-items:center;justify-content:space-between;margin:22px 0 10px;gap:12px}
+.vbar h3{margin:0;font:800 17px/1 var(--f-disp);text-transform:uppercase;letter-spacing:.05em;color:var(--text-2)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px 12px}
+.th{appearance:none;border:0;background:transparent;padding:0;text-align:left;color:var(--text);display:grid;gap:7px}
+.th .fr{position:relative;aspect-ratio:16/9;overflow:hidden;outline:2px solid transparent;outline-offset:2px;transition:outline-color .15s}
+.th:hover .fr{outline-color:var(--line-2)}
+.th[aria-pressed="true"] .fr{outline-color:var(--volt)}
+.th:focus-visible{outline:none}
+.th:focus-visible .fr{outline-color:var(--volt)}
+.th .nm{font:500 13px/1.2 var(--f-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th .sub2{font-size:12px;color:var(--text-3);font-variant-numeric:tabular-nums}
+.art{position:absolute;inset:0;background:linear-gradient(180deg,hsl(var(--h) 30% 14%),hsl(var(--h) 26% 7%))}
+.art::before{content:"";position:absolute;left:-10%;right:-10%;bottom:0;height:var(--m,48%);background:hsl(var(--h) 24% 5%);clip-path:polygon(0 40%,18% 10%,34% 36%,52% 0,70% 30%,86% 12%,100% 34%,100% 100%,0 100%)}
+.art::after{content:"";position:absolute;width:var(--s,18%);aspect-ratio:1;border-radius:50%;left:var(--x,62%);top:var(--y,22%);background:hsl(var(--h) 32% 30% / .55)}
+.art .slab{position:absolute;bottom:0;left:var(--bx,14%);width:var(--bw,10%);height:var(--bh,56%);background:hsl(var(--h) 22% 4%)}
+.bdg{position:absolute;left:6px;top:6px;display:inline-flex;align-items:center;gap:5px;font:800 12px/1 var(--f-disp);letter-spacing:.06em;padding:4px 6px;background:rgb(6 9 15 / .85);color:var(--text)}
+.bdg.rec .dot{width:7px;height:7px}
+.bdg.clip{color:var(--text)}
+.dur{position:absolute;right:6px;bottom:6px;font:600 12px/1 var(--f-disp);padding:3px 5px;background:rgb(6 9 15 / .85);font-variant-numeric:tabular-nums}
+.screen .bdg{left:12px;top:12px;font-size:14px;padding:5px 8px}
+.screen .prog{position:absolute;left:0;bottom:0;height:3px;background:var(--volt);width:var(--pp,30%)}
+
+/* ===== Pilotes ===== */
+.dv{display:grid;grid-template-columns:1fr auto 1fr;align-items:stretch;margin-top:14px;background:var(--plate)}
+.dv .s{padding:18px 20px 20px}
+.dv .s span{display:block;font:600 11px/1 var(--f-text);text-transform:uppercase;letter-spacing:.08em;color:var(--text-3);margin-bottom:8px}
+.dv .s b{display:block;font:800 72px/.82 var(--f-disp);letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.dv .s small{display:block;margin-top:10px;color:var(--text-2);font-size:13px}
+.dv .s.new{background:var(--plate-2);clip-path:polygon(18px 0,100% 0,100% 100%,0 100%)}
+.dv .s.new b{color:var(--volt)}
+.dv .arrow{display:grid;place-items:center;padding:0 6px;color:var(--text-3)}
+.dv .arrow svg.i{width:28px;height:28px}
+.inst{display:flex;align-items:center;gap:16px;margin-top:16px;flex-wrap:wrap}
+.prog-wrap{margin-top:16px;background:var(--plate);padding:14px 16px}
+.prog-wrap .ph{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:var(--text-2);margin-bottom:10px}
+.prog-wrap .ph b{color:var(--text);font-weight:600}
+.pbar{height:8px;background:var(--plate-3);position:relative;overflow:hidden}
+.pbar i{position:absolute;inset:0;background:var(--volt);transform-origin:left;transform:scaleX(var(--v,0));transition:transform .3s linear}
+.steps{display:flex;gap:18px;margin-top:12px;font-size:12.5px;color:var(--text-3);flex-wrap:wrap}
+.steps span{display:inline-flex;gap:6px;align-items:center}
+.steps span.on{color:var(--text)}
+.steps span.done{color:var(--ok)}
+
+/* ===== Outils ===== */
+.tools{display:grid;grid-template-columns:1fr 262px;gap:18px;margin-top:10px;align-items:start}
+.tool h3{font:800 22px/1 var(--f-disp);text-transform:uppercase;margin:0}
+.tool-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.cl{margin:0;padding:0;list-style:none}
+.cl li{display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--line)}
+.cl li:first-child{border-top:0}
+.cl .n{font-weight:500}
+.cl .n small{display:block;color:var(--text-3);font-size:12px;font-weight:400;overflow-wrap:anywhere}
+.cl .sz{font:600 15px var(--f-disp);font-variant-numeric:tabular-nums;text-align:right;color:var(--text);white-space:nowrap}
+.cl li.off .sz{color:var(--text-3)}
+.cl .gh{display:block;padding:12px 0 4px;border:0;font:600 11px/1 var(--f-text);text-transform:uppercase;letter-spacing:.08em;color:var(--text-3)}
+.cl .tag{margin-left:6px;vertical-align:1px;padding:2px 4px;font-size:11px}
+.total{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:12px;padding-top:14px;border-top:1px solid var(--line-2);flex-wrap:wrap}
+.total span{display:block;font:600 11px/1 var(--f-text);text-transform:uppercase;letter-spacing:.08em;color:var(--text-3);margin-bottom:6px}
+.total b{font:800 44px/.85 var(--f-disp);font-variant-numeric:tabular-nums}
+.ram{background:var(--plate);padding:16px}
+.ram .big{display:flex;align-items:flex-end;gap:10px;margin:14px 0 4px}
+.ram .big div span{display:block;font:600 11px/1 var(--f-text);text-transform:uppercase;letter-spacing:.08em;color:var(--text-3);margin-bottom:6px}
+.ram .big b{font:800 40px/.85 var(--f-disp);font-variant-numeric:tabular-nums}
+.ram .big b.after{color:var(--volt)}
+.ram .big svg.i{margin-bottom:6px;color:var(--text-3)}
+.mem{display:flex;height:10px;margin:14px 0 6px;background:var(--plate-3)}
+.mem i{display:block;height:100%;transition:flex-basis .6s var(--ease)}
+.mem .u{background:var(--text-2)}
+.mem .sb{background:#56637a}
+.legend{display:flex;gap:12px;font-size:12px;color:var(--text-3);flex-wrap:wrap}
+.legend i{display:inline-block;width:8px;height:8px;margin-right:5px}
+.ram .btn.pri{width:100%;margin-top:14px}
+
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{transition-duration:.01ms !important;transition-delay:0s !important;animation:none !important}
+}
+@media (max-width:700px){
+  .page{padding:24px 16px 60px}
+  .page-head h1{font-size:40px}
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="M4 7V4h3M17 4h3v3M20 17v3h-3M7 20H4v-3"/><path d="M10 8.5v7l5.5-3.5z"/></symbol>
+  <symbol id="i-time" viewBox="0 0 24 24"><circle cx="12" cy="13" r="7.5"/><path d="M12 9v4l2.5 2M9.5 2.5h5"/></symbol>
+  <symbol id="i-res" viewBox="0 0 24 24"><path d="M3 5h18v12H3zM8 21h8M12 17v4"/></symbol>
+  <symbol id="i-fps" viewBox="0 0 24 24"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/></symbol>
+  <symbol id="i-audio" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><path d="M9 3h6v10H9zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
+  <symbol id="i-stats" viewBox="0 0 24 24"><path d="M5 20V11M10 20V5M15 20v-7M20 20V8"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><path d="M13 4.5h4v5h-4zM7 14.5h4v5H7z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-min" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-max" viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5l9.5 17h-19z"/><path d="M12 10v5M12 17.2v.6"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.2v.6"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 7.8-8 9-4.6-1.2-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6.5 4.5h4v15h-4zM13.5 4.5h4v15h-4z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 5h6l2 2.5h10V19H3z"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20l1-4.5L16 4.5l3.5 3.5-11 11zM13.5 7l3.5 3.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6.5h16M9 6.5V3.5h6v3M6 6.5l1 14h10l1-14M10 10.5v6M14 10.5v6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 3.5v12M6.5 10l5.5 5.5 5.5-5.5M4 20.5h16"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M3 12h17M14 6l6 6-6 6"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><path d="M3.5 5h7.5v6H3.5zM13 5h7.5v6H13zM3.5 13h7.5v6H3.5zM13 13h7.5v6H13z"/></symbol>
+  <symbol id="i-chip" viewBox="0 0 24 24"><path d="M6 6h12v12H6zM9.5 9.5h5v5h-5zM9 2.5V6M15 2.5V6M9 18v3.5M15 18v3.5M2.5 9H6M2.5 15H6M18 9h3.5M18 15h3.5"/></symbol>
+  <symbol id="i-broom" viewBox="0 0 24 24"><path d="M14.5 3.5l-3.5 7M7 11h9l2 9.5H5z"/><path d="M9.5 15.5l-.5 5M13.5 15.5v5"/></symbol>
+  <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4zM16.5 9a4 4 0 0 1 0 6"/></symbol>
+  <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M19 5v5h-5"/><path d="M19 10a7.5 7.5 0 1 0 1.5 5"/></symbol>
+</svg>
+
+<main class="page">
+  <header class="page-head">
+    <h1>Clipper <span>Arène</span></h1>
+    <p>Proposition G. L'énergie d'un habillage de match, sans néon : noir bleuté, un seul cyan pour ce qui compte, des chiffres qu'on lit d'un coup d'œil en pleine partie.</p>
+  </header>
+
+  <h2 class="part">En jeu</h2>
+  <p class="part-sub">Alt+Z fait descendre la barre comme un bandeau de score. L'overlay de stats reste dans son coin, le toast confirme le clip.</p>
+
+  <div class="scroller">
+  <section class="stage" id="stage" aria-label="Aperçu en jeu : barre Alt+Z, overlay de stats, toast">
+    <svg class="scene" viewBox="0 0 1100 560" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <defs>
+        <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#0c1628"/><stop offset=".62" stop-color="#1b2b43"/><stop offset="1" stop-color="#2b3b53"/>
+        </linearGradient>
+      </defs>
+      <rect width="1100" height="560" fill="url(#sky)"/>
+      <circle cx="790" cy="300" r="74" fill="#3b4c65" opacity=".55"/>
+      <polygon points="0,330 120,262 230,300 360,214 480,290 600,236 720,300 850,226 980,282 1100,246 1100,560 0,560" fill="#18263c"/>
+      <polygon points="0,404 140,342 260,384 420,318 560,392 700,350 860,404 1000,340 1100,372 1100,560 0,560" fill="#101b2c"/>
+      <path d="M150 470V300h46v-30h20v30h40v170zM820 470V330l40-30 40 30v140zM900 470V368h90v102z" fill="#0a1220"/>
+      <rect y="468" width="1100" height="92" fill="#0d1726"/>
+      <polygon points="430,560 520,468 580,468 670,560" fill="#132034"/>
+    </svg>
+    <svg class="cross" viewBox="0 0 26 26" aria-hidden="true"><path d="M13 2v7M13 17v7M2 13h7M17 13h7" stroke="#e6edf7" stroke-opacity=".8" stroke-width="2"/></svg>
+    <div class="hud l" aria-hidden="true"><b>100</b><i></i></div>
+    <div class="hud r" aria-hidden="true">24 <small>/ 90</small></div>
+
+    <div class="ov" id="ov" aria-label="Overlay de statistiques (aperçu)">
+      <div class="ov-fps"><b class="num" id="ovFps">143</b><span>FPS</span></div>
+      <dl>
+        <dt>IMG</dt><dd class="w2">6,9 ms</dd>
+        <dt>CPU</dt><dd>31 %</dd><dd class="t">78 °C</dd>
+        <dt>GPU</dt><dd>87 %</dd><dd class="t">71 °C</dd>
+        <dt>VRAM</dt><dd class="w2">5,2 / 8 Go</dd>
+        <dt>RAM</dt><dd class="w2">11,4 / 16 Go</dd>
+      </dl>
+    </div>
+
+    <nav class="bar" aria-label="Barre Clipper">
+      <button class="bi clip" type="button" id="doClip"><span class="top"><svg class="i"><use href="#i-clip"/></svg>Clip</span><span class="bot">2 dernières min <kbd>Alt+X</kbd></span></button>
+      <button class="bi rec" type="button" aria-pressed="true"><span class="top"><span class="dot"></span><span class="num" id="recT">00:42</span></span><span class="bot">Arrêter REC <kbd>Alt+R</kbd></span></button>
+      <span class="sep"></span>
+      <button class="bi" type="button"><span class="top num"><svg class="i"><use href="#i-time"/></svg>2:00</span><span class="bot">Buffer</span></button>
+      <button class="bi" type="button"><span class="top"><svg class="i"><use href="#i-res"/></svg>1080p</span><span class="bot">1920×1200</span></button>
+      <button class="bi" type="button"><span class="top"><svg class="i"><use href="#i-fps"/></svg>60</span><span class="bot">Image/s</span></button>
+      <button class="bi" type="button"><span class="top"><svg class="i"><use href="#i-audio"/></svg><svg class="i"><use href="#i-mic"/></svg></span><span class="bot">Jeu + micro</span></button>
+      <button class="bi" type="button" aria-pressed="true"><span class="top"><svg class="i"><use href="#i-stats"/></svg>Stats</span><span class="bot"><kbd>Alt+F</kbd></span></button>
+      <button class="bi" type="button" id="toSettings"><span class="top"><svg class="i"><use href="#i-sliders"/></svg></span><span class="bot">Réglages</span></button>
+      <button class="bi x" type="button" aria-label="Fermer la barre (Alt+Z)" id="closeBar"><svg class="i"><use href="#i-x"/></svg></button>
+    </nav>
+
+    <div class="toast" role="status" aria-live="polite">
+      <div class="toast-ico"><svg class="i"><use href="#i-check"/></svg></div>
+      <div><b>Clip enregistré</b><span class="num">2:00 · 305 Mo · MP4</span></div>
+      <button class="btn sm" type="button" id="seeClip">Voir</button>
+    </div>
+  </section>
+  </div>
+  <div class="stage-foot">
+    <span>Fond de jeu fictif. La barre est une fenêtre séparée : rien n'est dessiné dans le jeu.</span>
+    <button class="btn ghost sm" type="button" id="replay"><svg class="i"><use href="#i-redo"/></svg>Rejouer Alt+Z</button>
+  </div>
+
+  <h2 class="part">Fenêtre</h2>
+  <p class="part-sub">900×620. Quatre onglets en rail vertical, l'essentiel d'abord, le reste derrière « Réglages avancés ».</p>
+
+  <div class="scroller">
+  <div class="win" id="win" role="region" aria-label="Fenêtre Clipper">
+    <div class="titlebar">
+      <span class="mark" aria-hidden="true">C</span><span class="name">Clipper</span>
+      <span class="live"><i></i>Buffer actif · REC 00:42</span>
+      <div class="wc"><button type="button" aria-label="Réduire"><svg class="i"><use href="#i-min"/></svg></button><button type="button" aria-label="Agrandir"><svg class="i"><use href="#i-max"/></svg></button><button type="button" class="close" aria-label="Fermer"><svg class="i"><use href="#i-x"/></svg></button></div>
+    </div>
+    <div class="body">
+      <div class="rail" role="tablist" aria-orientation="vertical" aria-label="Sections">
+        <button class="tab" role="tab" id="t-clipper" aria-controls="p-clipper" aria-selected="true"><svg class="i"><use href="#i-clip"/></svg><span class="lbl">Clipper</span></button>
+        <button class="tab" role="tab" id="t-videos" aria-controls="p-videos" aria-selected="false" tabindex="-1"><svg class="i"><use href="#i-grid"/></svg><span class="lbl">Vidéos</span></button>
+        <button class="tab" role="tab" id="t-pilotes" aria-controls="p-pilotes" aria-selected="false" tabindex="-1"><svg class="i"><use href="#i-chip"/></svg><span class="lbl">Pilotes</span><span class="badge" aria-label="Mise à jour disponible"></span></button>
+        <button class="tab" role="tab" id="t-outils" aria-controls="p-outils" aria-selected="false" tabindex="-1"><svg class="i"><use href="#i-broom"/></svg><span class="lbl">Outils</span></button>
+        <div class="rail-foot">v0.9</div>
+      </div>
+
+      <!-- ================= CLIPPER ================= -->
+      <section class="panel" id="p-clipper" role="tabpanel" aria-labelledby="t-clipper">
+        <header class="board">
+          <h2>Clipper</h2>
+          <dl class="stats">
+            <div><dt>Buffer</dt><dd class="num" id="sBuf">2:00</dd></div>
+            <div><dt>Clip</dt><dd id="sClip">1080p60</dd></div>
+            <div><dt>Encodeur</dt><dd id="sEnc">NVENC</dd></div>
+            <div><dt>Par clip</dt><dd class="v num" id="sSize">≈305 Mo</dd></div>
+          </dl>
+        </header>
+
+        <div class="sub" role="tablist" aria-label="Réglages Clipper">
+          <button role="tab" aria-selected="true" aria-controls="s-capture" id="st-capture">Capture</button>
+          <button role="tab" aria-selected="false" aria-controls="s-audio" id="st-audio" tabindex="-1">Audio</button>
+          <button role="tab" aria-selected="false" aria-controls="s-overlay" id="st-overlay" tabindex="-1">Overlay stats</button>
+          <button role="tab" aria-selected="false" aria-controls="s-files" id="st-files" tabindex="-1">Emplacements</button>
+          <button role="tab" aria-selected="false" aria-controls="s-keys" id="st-keys" tabindex="-1">Raccourcis</button>
+        </div>
+
+        <!-- capture -->
+        <div id="s-capture" role="tabpanel" aria-labelledby="st-capture">
+          <div class="row" style="border-top:0">
+            <span class="k" id="lbBuf">Durée du buffer<small>Ce que garde un clip</small></span>
+            <fieldset class="seg big" aria-labelledby="lbBuf" id="buf">
+              <legend>Durée du buffer</legend>
+              <label><input type="radio" name="buf" value="30"><span>0:30</span></label>
+              <label><input type="radio" name="buf" value="60"><span>1:00</span></label>
+              <label><input type="radio" name="buf" value="120" checked><span>2:00</span></label>
+              <label><input type="radio" name="buf" value="300"><span>5:00</span></label>
+              <label><input type="radio" name="buf" value="600"><span>10:00</span></label>
+            </fieldset>
+          </div>
+
+          <div class="vs" id="vs">
+            <div class="side">
+              <h3><svg class="i"><use href="#i-clip"/></svg>Clip<span class="kb"><kbd>Alt+X</kbd></span></h3>
+              <fieldset class="seg" data-res="clip"><legend>Résolution du clip</legend></fieldset>
+              <fieldset class="seg"><legend>Images par seconde du clip</legend>
+                <label><input type="radio" name="clipfps" value="30"><span>30 fps</span></label>
+                <label><input type="radio" name="clipfps" value="60" checked><span>60 fps</span></label>
+              </fieldset>
+              <div class="out" id="clipOut"></div>
+            </div>
+            <div class="vsmark" aria-hidden="true">VS</div>
+            <div class="side">
+              <h3><span class="dot"></span>REC<span class="kb"><kbd>Alt+R</kbd></span></h3>
+              <fieldset class="seg" data-res="rec"><legend>Résolution du REC</legend></fieldset>
+              <fieldset class="seg"><legend>Images par seconde du REC</legend>
+                <label><input type="radio" name="recfps" value="30"><span>30 fps</span></label>
+                <label><input type="radio" name="recfps" value="60" checked><span>60 fps</span></label>
+              </fieldset>
+              <div class="out" id="recOut"></div>
+            </div>
+            <div class="cost" id="cost" role="status"></div>
+          </div>
+
+          <div class="grp">
+            <div class="row" style="border-top:0">
+              <label for="enc">Encodeur<small>Test réel au démarrage</small></label>
+              <div class="ctl">
+                <select class="sel" id="enc">
+                  <option value="h264" selected>NVENC H.264 · RTX 4060</option>
+                  <option value="hevc">NVENC HEVC · RTX 4060</option>
+                  <option value="av1">NVENC AV1 · RTX 4060</option>
+                  <option value="amf">AMF H.264 · Radeon 780M</option>
+                  <option value="x264">x264 · processeur</option>
+                </select>
+                <span class="tag ok" id="encTag"><svg class="i" style="width:12px;height:12px"><use href="#i-check"/></svg>Testé</span>
+              </div>
+            </div>
+            <div class="note w" id="encNote" hidden><svg class="i"><use href="#i-warn"/></svg><span></span></div>
+            <div class="row">
+              <label for="q">Qualité<small>Débit ×0,5 à ×1,5</small></label>
+              <div class="ctl"><input class="rng" type="range" id="q" min="50" max="150" step="10" value="100" aria-describedby="qv"><span class="val" id="qv">×1,0</span><span class="hint" id="rate">20 Mb/s · VBR · preset p3</span></div>
+            </div>
+            <div class="row">
+              <span class="k" id="lbFmt">Format<small>Clip et REC, sans réencodage</small></span>
+              <fieldset class="seg" aria-labelledby="lbFmt"><legend>Format de sortie</legend>
+                <label><input type="radio" name="fmt" value="MP4" checked><span>MP4</span></label>
+                <label><input type="radio" name="fmt" value="MKV"><span>MKV</span></label>
+                <label><input type="radio" name="fmt" value="MOV"><span>MOV</span></label>
+              </fieldset>
+            </div>
+            <div class="row">
+              <span class="k">Estimation</span>
+              <div class="est">
+                <div><span>Clip</span><b id="eClip" class="num">305<small>Mo</small></b></div>
+                <div><span>REC, par minute</span><b id="eRec" class="num">152<small>Mo</small></b></div>
+                <div><span>Écriture buffer</span><b id="eDisk" class="num">9,0<small>Go/h</small></b></div>
+              </div>
+            </div>
+            <div class="row">
+              <label for="scr">Écran capturé<small>Les résolutions en dépendent</small></label>
+              <div class="ctl">
+                <select class="sel" id="scr">
+                  <option value="auto" selected>Automatique (écran du jeu)</option>
+                  <option value="int">Écran interne · 1920×1200 · 144 Hz · RTX 4060</option>
+                  <option value="ext">Écran externe · 1920×1080 · 179 Hz · Radeon 780M</option>
+                </select>
+              </div>
+            </div>
+            <div class="note" id="scrNote" hidden><svg class="i"><use href="#i-info"/></svg><span>Cet écran est branché sur la puce AMD. Si NVENC refuse ses images, Clipper encode en AMF (vérifié au lancement, pas supposé).</span></div>
+            <div class="row">
+              <span class="k">Capture du bureau<small>Hors jeu plein écran</small></span>
+              <label class="sw"><input type="checkbox" id="desk" role="switch"><span class="tr"></span><span id="deskTxt">Désactivée : 0 % GPU sur le bureau</span></label>
+            </div>
+          </div>
+
+          <details class="adv">
+            <summary><b>Réglages avancés</b><span>Puce d'encodage, mode étiré, ffmpeg</span><svg class="i"><use href="#i-chev"/></svg></summary>
+            <div class="in">
+              <div class="row" style="border-top:0">
+                <span class="k" id="lbChip">Puce d'encodage<small>PC portable hybride</small></span>
+                <fieldset class="seg" aria-labelledby="lbChip"><legend>Puce d'encodage</legend>
+                  <label><input type="radio" name="chip" checked><span>Automatique<small>NVIDIA</small></span></label>
+                  <label><input type="radio" name="chip"><span>Carte graphique<small>RTX 4060</small></span></label>
+                  <label><input type="radio" name="chip"><span>Puce intégrée<small>Radeon 780M</small></span></label>
+                </fieldset>
+              </div>
+              <div class="note"><svg class="i"><use href="#i-info"/></svg><span><b>NVENC est déjà une puce à part</b> des cœurs qui font tourner le jeu : impact typique 1 à 3 % de FPS. La puce intégrée libère NVENC mais coûte <b>~6 % de CPU</b> et de la bande passante mémoire (mesuré : 1920×1200 à ~57 fps). Jeu limité par le processeur ? Restez sur NVIDIA.</span></div>
+              <div class="row">
+                <span class="k" id="lbStr">Mode étiré<small>4:3 étiré, ex. 1440×1080</small></span>
+                <fieldset class="seg" aria-labelledby="lbStr"><legend>Mode étiré</legend>
+                  <label><input type="radio" name="str" checked><span>Désactivé</span></label>
+                  <label><input type="radio" name="str"><span>Étirer en 16:9</span></label>
+                  <label><input type="radio" name="str"><span>Étirer en 16:10</span></label>
+                </fieldset>
+              </div>
+              <p class="hint" style="margin:0 0 6px 206px">Étirement réel en CPU (fast_bilinear), lisible sur Discord et YouTube. Coût : environ 3 à 5 % de CPU.</p>
+              <div class="row">
+                <label for="ff">ffmpeg<small>Non embarqué (licence)</small></label>
+                <div class="path" style="max-width:420px"><code id="ff">C:\ffmpeg\bin\ffmpeg.exe · trouvé dans le PATH</code><button class="btn sm" type="button">Changer</button></div>
+              </div>
+            </div>
+          </details>
+
+          <div class="note w" style="margin-top:18px"><svg class="i"><use href="#i-warn"/></svg><span><b>Limites honnêtes.</b> La barre est invisible en plein écran exclusif, et ses clics peuvent être bloqués si le jeu capture la souris : les raccourcis marchent toujours. Une résolution différente du natif passe par le processeur.</span></div>
+        </div>
+
+        <!-- audio -->
+        <div id="s-audio" role="tabpanel" aria-labelledby="st-audio" hidden>
+          <div class="row" style="border-top:0">
+            <span class="k" id="lbTr">Pistes<small>AAC 160 kb/s par piste</small></span>
+            <fieldset class="seg" aria-labelledby="lbTr"><legend>Pistes audio</legend>
+              <label><input type="radio" name="tr"><span>Aucune</span></label>
+              <label><input type="radio" name="tr"><span>Jeu seul</span></label>
+              <label><input type="radio" name="tr"><span>Jeu + micro<small>1 piste</small></span></label>
+              <label><input type="radio" name="tr" checked><span>Séparées<small>2 pistes</small></span></label>
+            </fieldset>
+          </div>
+          <div class="grp">
+            <h3>Son du jeu</h3>
+            <div class="row" style="border-top:0"><label for="outDev">Sortie</label><select class="sel" id="outDev"><option>Haut-parleurs (Realtek) · par défaut</option><option>HyperX Cloud III S · casque</option></select></div>
+            <div class="row"><label for="gGame">Gain</label><div class="ctl"><input class="rng" type="range" id="gGame" min="0" max="200" value="100" style="--p:50%"><span class="val">100 %</span><span class="meter" aria-label="Niveau du jeu"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i></span></div></div>
+          </div>
+          <div class="grp">
+            <h3>Micro</h3>
+            <div class="row" style="border-top:0"><label for="micDev">Entrée</label><select class="sel" id="micDev"><option>HyperX Cloud III S</option><option>Réseau de micros (AMD Audio)</option></select></div>
+            <div class="row"><label for="gMic">Gain</label><div class="ctl"><input class="rng" type="range" id="gMic" min="0" max="200" value="130" style="--p:65%"><span class="val">130 %</span><span class="meter" aria-label="Niveau du micro"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on hi"></i><i></i><i></i></span></div></div>
+            <div class="row"><span class="k">Couper le micro</span><label class="sw"><input type="checkbox" role="switch"><span class="tr"></span><span>Micro actif</span></label></div>
+          </div>
+          <div class="note"><svg class="i"><use href="#i-info"/></svg><span>Le son est lu sur la sortie du périphérique (WASAPI loopback), comme OBS ou Discord. Rien n'est lu dans le jeu.</span></div>
+        </div>
+
+        <!-- overlay -->
+        <div id="s-overlay" role="tabpanel" aria-labelledby="st-overlay" hidden>
+          <div class="row" style="border-top:0">
+            <span class="k" id="lbOv">Affichage</span>
+            <fieldset class="seg" aria-labelledby="lbOv" id="ovMode"><legend>Affichage de l'overlay</legend>
+              <label><input type="radio" name="ovm" value="hide"><span>Masqué</span></label>
+              <label><input type="radio" name="ovm" value="key" checked><span>Avec raccourci<small>Alt+F</small></span></label>
+              <label><input type="radio" name="ovm" value="always"><span>Toujours visible</span></label>
+            </fieldset>
+          </div>
+          <div id="ovOpts">
+            <div class="row">
+              <span class="k">Éléments</span>
+              <div class="chk">
+                <label class="cb"><input type="checkbox" checked>FPS</label>
+                <label class="cb"><input type="checkbox" checked>Temps d'image</label>
+                <label class="cb"><input type="checkbox" checked>CPU %</label>
+                <label class="cb"><input type="checkbox" checked>GPU %</label>
+                <label class="cb"><input type="checkbox" checked>Temp. CPU</label>
+                <label class="cb"><input type="checkbox" checked>Temp. GPU</label>
+                <label class="cb"><input type="checkbox" checked>VRAM</label>
+                <label class="cb"><input type="checkbox" checked>RAM</label>
+              </div>
+            </div>
+            <div class="row">
+              <span class="k" id="lbCo">Coin</span>
+              <fieldset class="corners" aria-labelledby="lbCo"><legend class="sr">Coin de l'overlay</legend>
+                <label><input type="radio" name="co" value="tl" checked aria-label="Haut gauche"><span></span></label>
+                <label><input type="radio" name="co" value="tr" aria-label="Haut droite"><span></span></label>
+                <label><input type="radio" name="co" value="bl" aria-label="Bas gauche"><span></span></label>
+                <label><input type="radio" name="co" value="br" aria-label="Bas droite"><span></span></label>
+              </fieldset>
+            </div>
+            <div class="row">
+              <span class="k" id="lbSz">Taille</span>
+              <fieldset class="seg" aria-labelledby="lbSz"><legend>Taille</legend>
+                <label><input type="radio" name="ovs"><span>Petite</span></label>
+                <label><input type="radio" name="ovs" checked><span>Moyenne</span></label>
+                <label><input type="radio" name="ovs"><span>Grande</span></label>
+              </fieldset>
+            </div>
+            <div class="row"><label for="op">Opacité du fond</label><div class="ctl"><input class="rng" type="range" id="op" min="0" max="100" step="5" value="80"><span class="val" id="opv">80 %</span></div></div>
+            <div class="row"><span class="k">Visible dans les clips<small>Exclu par défaut</small></span><label class="sw"><input type="checkbox" role="switch"><span class="tr"></span><span>Non capturé</span></label></div>
+          </div>
+          <div class="note w"><svg class="i"><use href="#i-shield"/></svg><span><b>FPS : droits admin requis</b> (ou groupe « Utilisateurs du journal de performances »). Les FPS viennent des événements Windows de présentation d'images, comme PresentMon. Sans ces droits, l'overlay affiche CPU et GPU seulement.</span></div>
+          <div class="note"><svg class="i"><use href="#i-info"/></svg><span>Fenêtre Windows séparée, sans injection, rafraîchie 2 fois par seconde. Invisible en plein écran exclusif, comme la barre.</span></div>
+        </div>
+
+        <!-- files -->
+        <div id="s-files" role="tabpanel" aria-labelledby="st-files" hidden>
+          <div class="grp">
+            <h3>Clips et REC</h3>
+            <div class="path"><code>D:\Vidéos\Clipper</code><button class="btn sm" type="button"><svg class="i"><use href="#i-folder"/></svg>Choisir…</button></div>
+            <div class="disk"><span>D:</span><span class="cap"><i style="width:58%"></i></span><span class="num">412 Go libres sur 954 Go</span></div>
+          </div>
+          <div class="grp" style="margin-top:24px">
+            <h3>Buffer temporaire</h3>
+            <div class="path"><code>C:\Users\Kurero\AppData\Local\Temp\Clipper\buf</code><button class="btn sm" type="button"><svg class="i"><use href="#i-folder"/></svg>Choisir…</button></div>
+            <div class="disk"><span>C:</span><span class="cap"><i style="width:79%"></i></span><span class="num">97 Go libres sur 476 Go</span></div>
+            <div class="note"><svg class="i"><use href="#i-info"/></svg><span>Le buffer écrit <b>≈9 Go par heure</b> à 1080p60, en tournant : rien ne s'accumule. Le mettre sur un autre disque épargne le SSD système.</span></div>
+          </div>
+        </div>
+
+        <!-- keys -->
+        <div id="s-keys" role="tabpanel" aria-labelledby="st-keys" hidden>
+          <div class="row" style="border-top:0"><span class="k">Clip</span><button class="hk" type="button" aria-label="Raccourci Clip : Alt+X, modifier"><kbd>Alt</kbd><kbd>X</kbd></button></div>
+          <div class="row"><span class="k">REC démarrer / arrêter</span><button class="hk" type="button" aria-label="Raccourci REC : Alt+R, modifier"><kbd>Alt</kbd><kbd>R</kbd></button></div>
+          <div class="row"><span class="k">Barre Clipper</span>
+            <div class="ctl"><button class="hk" type="button" aria-label="Raccourci barre : Alt+Z, modifier" id="hkBar"><kbd>Alt</kbd><kbd>Z</kbd></button>
+              <span class="conf" id="conf"><svg class="i"><use href="#i-warn"/></svg>Déjà pris par l'app NVIDIA</span>
+              <button class="btn sm" type="button" id="useAlt">Utiliser Alt+Shift+Z</button></div>
+          </div>
+          <div class="row"><span class="k">Overlay de stats</span><button class="hk" type="button" aria-label="Raccourci overlay : Alt+F, modifier"><kbd>Alt</kbd><kbd>F</kbd></button></div>
+          <div class="note"><svg class="i"><use href="#i-shield"/></svg><span>Raccourcis déclarés à Windows (RegisterHotKey), sans hook clavier. Clipper ne touche jamais au processus du jeu. Personne ne peut <b>garantir</b> l'absence de ban, chaque éditeur décide seul ; on garantit qu'aucune technique de triche n'est utilisée.</span></div>
+        </div>
+      </section>
+
+      <!-- ================= VIDÉOS ================= -->
+      <section class="panel" id="p-videos" role="tabpanel" aria-labelledby="t-videos" hidden>
+        <header class="board">
+          <h2>Vidéos</h2>
+          <dl class="stats">
+            <div><dt>Clips</dt><dd class="num">6</dd></div>
+            <div><dt>REC</dt><dd class="num">3</dd></div>
+            <div><dt>Total</dt><dd class="num">5,9 Go</dd></div>
+          </dl>
+        </header>
+        <div class="vtop">
+          <div class="player">
+            <div class="screen" id="screen"><div class="art" id="bigArt"><span class="slab"></span></div><span class="bdg clip" id="bigBdg">CLIP</span><span class="prog" id="bigProg"></span></div>
+            <div class="ctrls">
+              <button class="btn play" type="button" id="play" aria-label="Lecture"><svg class="i"><use href="#i-play"/></svg></button>
+              <input class="rng tl" type="range" id="tl" min="0" max="120" value="37" aria-label="Position">
+              <span class="time" id="time">0:37 / 2:00</span>
+              <svg class="i" style="color:var(--text-2)" aria-hidden="true"><use href="#i-vol"/></svg>
+              <input class="rng vol" type="range" min="0" max="100" value="80" aria-label="Volume" style="--p:80%">
+              <button class="ib" type="button" aria-label="Plein écran"><svg class="i"><use href="#i-full"/></svg></button>
+            </div>
+          </div>
+          <div class="meta" id="meta"></div>
+        </div>
+        <div class="vbar">
+          <h3>Toutes les vidéos</h3>
+          <fieldset class="seg" id="vf"><legend>Filtrer</legend>
+            <label><input type="radio" name="vf" value="all" checked><span>Tout</span></label>
+            <label><input type="radio" name="vf" value="clip"><span>Clips</span></label>
+            <label><input type="radio" name="vf" value="rec"><span>REC</span></label>
+          </fieldset>
+        </div>
+        <div class="grid" id="grid"></div>
+      </section>
+
+      <!-- ================= PILOTES ================= -->
+      <section class="panel" id="p-pilotes" role="tabpanel" aria-labelledby="t-pilotes" hidden>
+        <header class="board">
+          <h2>Pilotes</h2>
+          <dl class="stats">
+            <div><dt>Carte</dt><dd>RTX 4060 Laptop</dd></div>
+            <div><dt>Mémoire</dt><dd class="num">8 Go</dd></div>
+          </dl>
+        </header>
+        <div class="dv">
+          <div class="s"><span>Installé</span><b>621.01</b><small>Game Ready · 23 sept. 2026</small></div>
+          <div class="arrow" aria-hidden="true"><svg class="i"><use href="#i-arrow"/></svg></div>
+          <div class="s new"><span>Mise à jour disponible</span><b>626.14</b><small>Game Ready · 30 oct. 2026 · 871 Mo</small></div>
+        </div>
+        <div class="row" style="border-top:0;margin-top:10px">
+          <span class="k" id="lbBr">Branche<small>Vérifiée à l'ouverture</small></span>
+          <fieldset class="seg" aria-labelledby="lbBr"><legend>Branche du pilote</legend>
+            <label><input type="radio" name="br" checked><span>Game Ready<small>Optimisé jeux récents</small></span></label>
+            <label><input type="radio" name="br"><span>Studio<small>Stabilité création</small></span></label>
+          </fieldset>
+        </div>
+        <div class="inst">
+          <button class="btn pri" type="button" id="dl"><svg class="i"><use href="#i-down"/></svg>Télécharger et installer</button>
+          <span class="hint">Installation silencieuse. Source vérifiée : <b style="color:var(--text-2);font-weight:500">*.nvidia.com</b> uniquement.</span>
+        </div>
+        <div class="prog-wrap" id="pw" hidden>
+          <div class="ph"><span id="phTxt"><b>Téléchargement</b> · us.download.nvidia.com</span><span class="num" id="phNum">0 / 871 Mo</span></div>
+          <div class="pbar" role="progressbar" aria-label="Progression" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="pb"><i></i></div>
+          <div class="steps"><span id="st1" class="on">Télécharger</span><span id="st2">Contrôler la taille</span><span id="st3">Installer (UAC)</span></div>
+        </div>
+        <div class="note w"><svg class="i"><use href="#i-warn"/></svg><span><b>Redémarrage conseillé</b> après l'installation. L'écran clignote une ou deux fois pendant l'installation : fermez le jeu avant. Windows demandera l'autorisation (UAC), Clipper ne la contourne pas.</span></div>
+        <div class="note"><svg class="i"><use href="#i-info"/></svg><span>Version comparée avec le service public de NVIDIA, celui du site officiel. Les réglages du panneau NVIDIA sont conservés.</span></div>
+      </section>
+
+      <!-- ================= OUTILS ================= -->
+      <section class="panel" id="p-outils" role="tabpanel" aria-labelledby="t-outils" hidden>
+        <header class="board">
+          <h2>Outils</h2>
+          <dl class="stats">
+            <div><dt>À libérer</dt><dd class="v num" id="sFree">7,48 Go</dd></div>
+            <div><dt>RAM libre</dt><dd class="num" id="sRam">5,1 Go</dd></div>
+          </dl>
+        </header>
+        <div class="tools">
+          <section class="tool" aria-labelledby="hClean">
+            <div class="tool-head"><h3 id="hClean">Nettoyage</h3><button class="btn sm" type="button" id="scan"><svg class="i"><use href="#i-redo"/></svg><span>Analyser</span></button></div>
+            <p class="hint" style="margin:0 0 6px" id="scanTxt">Analysé il y a 1 min. Les fichiers en cours d'utilisation sont ignorés.</p>
+            <ul class="cl" id="cl"></ul>
+            <div class="note w"><svg class="i"><use href="#i-warn"/></svg><span><b>Caches de shaders</b> : au prochain lancement, chaque jeu recompile ses shaders. Quelques saccades le temps d'un chargement.</span></div>
+            <div class="total">
+              <div><span>Sélection</span><b id="tot" class="num">7,48 Go</b></div>
+              <div id="cleanZone"><button class="btn pri" type="button" id="clean"><svg class="i"><use href="#i-broom"/></svg>Nettoyer</button></div>
+            </div>
+            <div class="note"><svg class="i"><use href="#i-info"/></svg><span><b>Prefetch volontairement absent.</b> Le vider ralentit le lancement des applications : c'est un mythe des vidéos d'optimisation.</span></div>
+          </section>
+          <aside class="ram" aria-labelledby="hRam">
+            <h3 class="tool" id="hRam" style="font:800 22px/1 var(--f-disp);text-transform:uppercase;margin:0">Nettoyer la RAM</h3>
+            <div class="big">
+              <div><span>Libre avant</span><b class="num" id="rBefore">5,1 Go</b></div>
+              <svg class="i" aria-hidden="true"><use href="#i-arrow"/></svg>
+              <div><span>Après</span><b class="num after" id="rAfter">—</b></div>
+            </div>
+            <div class="mem" aria-hidden="true"><i class="u" style="flex-basis:52%"></i><i class="sb" id="mSb" style="flex-basis:16%"></i></div>
+            <div class="legend"><span><i style="background:var(--text-2)"></i>Utilisée 8,4</span><span><i style="background:#56637a"></i><span id="lSb">Standby 2,5</span></span><span><i style="background:var(--plate-3)"></i>Libre</span></div>
+            <button class="btn pri" type="button" id="ramBtn"><svg class="i"><use href="#i-shield"/></svg>Nettoyer la RAM</button>
+            <p class="hint" style="margin:10px 0 0">Windows demande l'autorisation (UAC) à chaque clic. Aucun processus n'est ouvert, le jeu n'est pas touché.</p>
+            <div class="note" style="margin-top:12px"><svg class="i"><use href="#i-info"/></svg><span>Les apps rechargent ensuite leurs pages : petit ralentissement possible. Utile surtout quand la mémoire standby gonfle. Jamais automatique en pleine partie.</span></div>
+          </aside>
+        </div>
+      </section>
+    </div>
+  </div>
+  </div>
+</main>
+
+<script>
+(() => {
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const fr = (n, d = 1) => n.toFixed(d).replace('.', ',');
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ---------- stage ---------- */
+const stage = $('#stage');
+function openBar(){
+  stage.classList.remove('open','toasted');
+  void stage.offsetWidth;
+  requestAnimationFrame(() => stage.classList.add('open'));
+  setTimeout(() => stage.classList.add('toasted'), reduce ? 0 : 1300);
+}
+openBar();
+$('#replay').onclick = openBar;
+$('#closeBar').onclick = () => stage.classList.remove('open','toasted');
+$('#doClip').onclick = () => { stage.classList.remove('toasted'); setTimeout(() => stage.classList.add('toasted'), 60); };
+let rec = 42;
+setInterval(() => { rec++; const t = String(Math.floor(rec/60)).padStart(2,'0') + ':' + String(rec%60).padStart(2,'0'); $('#recT').textContent = t; $('.live').lastChild.textContent = 'Buffer actif · REC ' + t; }, 1000);
+const fps = [143,141,144,139,142,144,140];
+let fi = 0; setInterval(() => { $('#ovFps').textContent = fps[fi++ % fps.length]; }, 500);
+
+/* ---------- tabs ---------- */
+function tabs(list, onChange){
+  const ts = $$('[role=tab]', list);
+  const pick = (t, focus) => {
+    ts.forEach(x => { const on = x === t; x.setAttribute('aria-selected', on); x.tabIndex = on ? 0 : -1; document.getElementById(x.getAttribute('aria-controls')).hidden = !on; });
+    if (focus) t.focus();
+    onChange && onChange(t);
+  };
+  ts.forEach((t, i) => {
+    t.addEventListener('click', () => pick(t));
+    t.addEventListener('keydown', e => {
+      const k = e.key, n = ts.length;
+      const j = (k === 'ArrowDown' || k === 'ArrowRight') ? (i+1)%n : (k === 'ArrowUp' || k === 'ArrowLeft') ? (i-1+n)%n : k === 'Home' ? 0 : k === 'End' ? n-1 : -1;
+      if (j >= 0){ e.preventDefault(); pick(ts[j], true); }
+    });
+  });
+  return pick;
+}
+const pickMain = tabs($('.rail'), () => { $$('.panel').forEach(p => p.scrollTop = 0); });
+tabs($('.sub'));
+const goto = id => pickMain(document.getElementById(id));
+const H = {videos:'t-videos', pilotes:'t-pilotes', outils:'t-outils', audio:'st-audio', overlay:'st-overlay', fichiers:'st-files', raccourcis:'st-keys'};
+const hh = location.hash.slice(1); if (H[hh]) document.getElementById(H[hh]).click();
+$('#toSettings').onclick = () => { goto('t-clipper'); $('#win').scrollIntoView({behavior: reduce ? 'auto' : 'smooth', block:'center'}); };
+
+/* ---------- capture settings ---------- */
+const screens = { int:{w:1920,h:1200,name:'interne'}, ext:{w:1920,h:1080,name:'externe'} };
+const classes = [720,1080,1440,2160];
+const base = {720:10,1080:20,1440:35,2160:70};
+// Les classes gardent le ratio de l'écran (16:10 : 1080p = 1920×1200 natif).
+function dims(cls, s){
+  if (s.h === 1200) return {w:{720:1152,1080:1920,1440:2304,2160:3456}[cls], h:{720:720,1080:1200,1440:1440,2160:2160}[cls]};
+  return {w:Math.round(cls*16/9), h:cls};
+}
+function curScreen(){ return screens[$('#scr').value === 'ext' ? 'ext' : 'int']; }
+function buildRes(){
+  const s = curScreen();
+  $$('[data-res]').forEach(fs => {
+    const kind = fs.dataset.res, prev = (fs.querySelector('input:checked')||{}).value || '1080';
+    fs.querySelectorAll('label').forEach(l => l.remove());
+    classes.forEach(c => {
+      const d = dims(c, s), over = d.h > s.h, nat = d.h === s.h;
+      const l = document.createElement('label');
+      l.innerHTML = `<input type="radio" name="${kind}res" value="${c}" ${over?'disabled':''} ${String(c)===prev && !over ? 'checked':''}><span>${c}p<small>${over ? '&gt; natif' : nat ? 'natif' : d.w+'×'+d.h}</small></span>`;
+      if (over) l.title = `${d.w}×${d.h} dépasse l'écran (${s.w}×${s.h})`;
+      fs.appendChild(l);
+    });
+    if (!fs.querySelector('input:checked')) fs.querySelector('input[value="1080"]').checked = true;
+  });
+}
+function val(n){ return +($(`input[name="${n}"]:checked`)||{value:0}).value; }
+function update(){
+  const s = curScreen(), enc = $('#enc').value, q = +$('#q').value/100, buf = val('buf');
+  const cR = val('clipres'), cF = val('clipfps'), rR = val('recres'), rF = val('recfps');
+  const encK = (enc === 'hevc' || enc === 'av1') ? .7 : 1;
+  const mbps = (r, f) => base[r] * (f === 30 ? .65 : 1) * encK * q;
+  const cd = dims(cR, s), rd = dims(rR, s);
+  const clipMo = (mbps(cR,cF) + .32) * buf / 8;
+  const recMo = (mbps(rR,rF) + .32) * 60 / 8;
+  $('#eClip').innerHTML = `${Math.round(clipMo)}<small>Mo</small>`;
+  $('#eRec').innerHTML = `${Math.round(recMo)}<small>Mo</small>`;
+  $('#eDisk').innerHTML = `${fr(mbps(cR,cF)*3600/8/1000)}<small>Go/h</small>`;
+  $('#sSize').textContent = `≈${Math.round(clipMo)} Mo`;
+  $('#sBuf').textContent = `${Math.floor(buf/60)}:${String(buf%60).padStart(2,'0')}`;
+  $('#sClip').textContent = `${cR}p${cF}`;
+  $('#sEnc').textContent = {h264:'NVENC',hevc:'NVENC',av1:'NVENC',amf:'AMF',x264:'x264'}[enc];
+  $('#qv').textContent = '×' + fr(q);
+  $('#q').style.setProperty('--p', ((q-.5)/1*100) + '%');
+  $('#rate').textContent = `${fr(mbps(cR,cF),0)} Mb/s · ${q >= 1.2 ? 'CBR' : 'VBR'} · preset p${q < .8 ? 1 : q < 1.1 ? 3 : 4}`;
+  const natTxt = (d) => d.h === s.h ? '<b>natif</b> · zéro copie GPU' : 'mise à l\'échelle CPU';
+  $('#clipOut').innerHTML = `${cd.w}×${cd.h} · ${cF} fps · ${natTxt(cd)}`;
+  $('#recOut').innerHTML = `${rd.w}×${rd.h} · ${rF} fps · ${natTxt(rd)}`;
+  const same = cR === rR && cF === rF;
+  const scaled = cd.h !== s.h || rd.h !== s.h;
+  $('#cost').innerHTML = same
+    ? `<svg class="i" style="color:var(--ok)"><use href="#i-check"/></svg><span><b>Coût nul pour le REC</b> : mêmes réglages que le buffer, il garde ses segments.</span>`
+    : `<svg class="i" style="color:var(--warn)"><use href="#i-warn"/></svg><span><b>REC différent du Clip</b> : une 2<sup>e</sup> capture tourne pendant le REC, environ +3 à 5 % de GPU.</span>`;
+  if (scaled && same) $('#cost').insertAdjacentHTML('beforeend', '<span style="margin-left:auto;color:var(--warn)">Hors natif : +CPU</span>');
+  const en = $('#encNote');
+  const msg = { hevc:'Lecture HEVC dans l\'onglet Vidéos : demande l\'extension Windows « Vidéo HEVC ».', av1:'AV1 : fichiers plus légers, mais certains sites et vieux lecteurs ne le lisent pas.', amf:'AMF sur la Radeon 780M : passe par la mémoire système, ~6 % de CPU.', x264:'x264 encode sur le processeur : coûteux en jeu (10 à 25 % de CPU). Déconseillé.' }[enc];
+  en.hidden = !msg; if (msg) en.querySelector('span').textContent = msg;
+}
+buildRes(); update();
+$('#p-clipper').addEventListener('input', update);
+$('#p-clipper').addEventListener('change', e => {
+  if (e.target.id === 'scr'){ buildRes(); $('#scrNote').hidden = e.target.value !== 'ext'; update(); }
+  if (e.target.id === 'desk') $('#deskTxt').textContent = e.target.checked ? 'Activée : le buffer tourne tout le temps' : 'Désactivée : 0 % GPU sur le bureau';
+});
+$('#useAlt').onclick = e => { $('#hkBar').innerHTML = '<kbd>Alt</kbd><kbd>Shift</kbd><kbd>Z</kbd>'; $('#hkBar').setAttribute('aria-label','Raccourci barre : Alt+Shift+Z, modifier'); $('#conf').innerHTML = '<svg class="i" style="color:var(--ok)"><use href="#i-check"/></svg><span style="color:var(--text-2)">Aucun conflit</span>'; e.target.remove(); };
+
+/* overlay settings */
+const ov = $('#ov');
+$('#op').addEventListener('input', e => { $('#opv').textContent = e.target.value + ' %'; e.target.style.setProperty('--p', e.target.value + '%'); ov.style.background = `rgb(6 9 15 / ${e.target.value/100})`; });
+$('#op').style.setProperty('--p','80%');
+$('#ovMode').addEventListener('change', e => { const hide = e.target.value === 'hide'; ov.style.opacity = hide ? 0 : 1; $('#ovOpts').style.opacity = hide ? .45 : 1; });
+$$('input[name=co]').forEach(r => r.addEventListener('change', () => {
+  const v = r.value; Object.assign(ov.style, { left: v[1]==='l' ? '12px':'auto', right: v[1]==='r' ? '12px':'auto', top: v[0]==='t' ? '12px' : 'auto', bottom: v[0]==='b' ? '70px':'auto' });
+}));
+
+/* ---------- vidéos ---------- */
+const vids = [
+  {n:'Valorant · ace sur Ascent', k:'clip', d:120, date:'Aujourd\'hui 21:14', sz:'305 Mo', enc:'H.264', h:212, x:'64%', y:'18%', bx:'12%', bh:'58%'},
+  {n:'Apex · dernier cercle', k:'rec', d:1462, date:'Aujourd\'hui 20:31', sz:'2,1 Go', enc:'HEVC', h:24, x:'20%', y:'30%', bx:'70%', bh:'44%'},
+  {n:'Valorant · clutch 1v3', k:'clip', d:120, date:'Aujourd\'hui 20:02', sz:'298 Mo', enc:'H.264', h:200, x:'76%', y:'14%', bx:'30%', bh:'62%'},
+  {n:'Rocket League · but aérien', k:'clip', d:60, date:'Hier 23:48', sz:'151 Mo', enc:'H.264', h:160, x:'40%', y:'24%', bx:'78%', bh:'36%'},
+  {n:'Elden Ring · Malenia', k:'rec', d:2310, date:'Hier 22:10', sz:'1,4 Go', enc:'AV1', h:36, x:'52%', y:'10%', bx:'8%', bh:'70%'},
+  {n:'CS2 · retake B', k:'clip', d:120, date:'Hier 21:37', sz:'302 Mo', enc:'H.264', h:190, x:'28%', y:'20%', bx:'56%', bh:'50%'},
+  {n:'Fortnite · victoire', k:'clip', d:120, date:'5 nov. 19:20', sz:'310 Mo', enc:'H.264', h:250, x:'70%', y:'26%', bx:'20%', bh:'40%'},
+  {n:'Overwatch · play of the game', k:'clip', d:30, date:'4 nov. 22:51', sz:'76 Mo', enc:'H.264', h:14, x:'34%', y:'16%', bx:'66%', bh:'60%'},
+  {n:'Cyberpunk · course', k:'rec', d:845, date:'2 nov. 18:05', sz:'1,0 Go', enc:'H.264', h:280, x:'58%', y:'32%', bx:'40%', bh:'52%'},
+];
+const t = s => { const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = String(s%60).padStart(2,'0'); return h ? `${h}:${String(m).padStart(2,'0')}:${x}` : `${m}:${x}`; };
+const artStyle = v => `--h:${v.h};--x:${v.x};--y:${v.y};--bx:${v.bx};--bh:${v.bh}`;
+const bdg = k => k === 'rec' ? '<span class="bdg rec"><span class="dot"></span>REC</span>' : '<span class="bdg clip">CLIP</span>';
+let sel = 0, pos = 37, playing = null;
+function renderGrid(){
+  const filter = $('input[name=vf]:checked').value;
+  $('#grid').innerHTML = vids.map((v,i) => (filter==='all' || filter===v.k) ? `<button class="th" type="button" data-i="${i}" aria-pressed="${i===sel}"><span class="fr"><span class="art" style="${artStyle(v)}"><span class="slab"></span></span>${bdg(v.k)}<span class="dur">${t(v.d)}</span></span><span class="nm">${v.n}</span><span class="sub2">${v.date} · ${v.sz}</span></button>` : '').join('');
+}
+function renderMeta(){
+  const v = vids[sel];
+  $('#bigArt').setAttribute('style', artStyle(v));
+  $('#bigBdg').outerHTML = bdg(v.k).replace('class="bdg', 'id="bigBdg" class="bdg');
+  $('#tl').max = v.d; pos = Math.min(pos, v.d); setPos();
+  $('#meta').innerHTML = `
+    <h3 id="vName">${v.n}</h3>
+    <dl><dt>Durée</dt><dd>${t(v.d)}</dd><dt>Date</dt><dd>${v.date}</dd><dt>Taille</dt><dd>${v.sz}</dd><dt>Vidéo</dt><dd>1920×1200 · 60 fps · ${v.enc}</dd></dl>
+    ${v.enc==='HEVC' ? '<div class="note w" style="margin:0 0 10px"><svg class="i"><use href="#i-warn"/></svg><span>Extension « Vidéo HEVC » absente. <button class="btn sm" type="button" style="margin-top:6px">Ouvrir avec le lecteur Windows</button></span></div>' : ''}
+    <div class="acts" id="acts">
+      <button class="btn ghost" type="button"><svg class="i"><use href="#i-folder"/></svg>Ouvrir le dossier</button>
+      <button class="btn ghost" type="button" id="ren"><svg class="i"><use href="#i-pen"/></svg>Renommer</button>
+      <button class="btn ghost danger" type="button" id="del"><svg class="i"><use href="#i-trash"/></svg>Supprimer</button>
+    </div>`;
+  $('#ren').onclick = () => {
+    const h = $('#vName'); const f = document.createElement('div'); f.className = 'rename';
+    f.innerHTML = `<input aria-label="Nouveau nom" value="${v.n}"><button class="btn sm" type="button">OK</button>`;
+    h.replaceWith(f); const inp = f.querySelector('input'); inp.focus(); inp.select();
+    const ok = () => { v.n = inp.value.trim() || v.n; renderMeta(); renderGrid(); };
+    f.querySelector('button').onclick = ok; inp.onkeydown = e => { if (e.key==='Enter') ok(); if (e.key==='Escape') renderMeta(); };
+  };
+  $('#del').onclick = () => {
+    $('#acts').innerHTML = `<div class="confirm" role="alertdialog" aria-label="Confirmer"><span>Mettre « ${v.n} » à la corbeille ?</span><div><button class="btn sm danger" type="button" id="yes">Mettre à la corbeille</button><button class="btn sm ghost" type="button" id="no">Annuler</button></div></div>`;
+    $('#no').onclick = renderMeta; $('#no').focus();
+    $('#yes').onclick = () => { vids.splice(sel,1); sel = 0; renderGrid(); renderMeta(); };
+  };
+}
+function setPos(){ const v = vids[sel]; $('#tl').value = pos; $('#tl').style.setProperty('--p', pos/v.d*100 + '%'); $('#bigProg').style.setProperty('--pp', pos/v.d*100 + '%'); $('#time').textContent = `${t(pos)} / ${t(v.d)}`; }
+$('#grid').addEventListener('click', e => { const b = e.target.closest('.th'); if (!b) return; sel = +b.dataset.i; pos = 0; renderGrid(); renderMeta(); });
+$('#vf').addEventListener('change', renderGrid);
+$('#tl').addEventListener('input', e => { pos = +e.target.value; setPos(); });
+$('#play').onclick = () => {
+  const b = $('#play');
+  if (playing){ clearInterval(playing); playing = null; b.innerHTML = '<svg class="i"><use href="#i-play"/></svg>'; b.setAttribute('aria-label','Lecture'); return; }
+  b.innerHTML = '<svg class="i"><use href="#i-pause"/></svg>'; b.setAttribute('aria-label','Pause');
+  playing = setInterval(() => { pos = Math.min(pos+1, vids[sel].d); setPos(); if (pos >= vids[sel].d) b.click(); }, 1000);
+};
+renderGrid(); renderMeta();
+$('#seeClip').onclick = () => { sel = 0; pos = 0; renderGrid(); renderMeta(); goto('t-videos'); $('#win').scrollIntoView({behavior: reduce ? 'auto' : 'smooth', block:'center'}); };
+
+/* ---------- pilotes ---------- */
+$('#dl').onclick = () => {
+  const b = $('#dl'); b.disabled = true; $('#pw').hidden = false;
+  let mo = 0; const total = 871, pb = $('#pb');
+  const step = setInterval(() => {
+    mo = Math.min(total, mo + 37 + Math.round(Math.random()*20));
+    pb.style.setProperty('--v', mo/total); pb.setAttribute('aria-valuenow', Math.round(mo/total*100));
+    $('#phNum').textContent = `${mo} / ${total} Mo`;
+    if (mo >= total){
+      clearInterval(step);
+      $('#st1').className = 'done'; $('#st2').className = 'done'; $('#st3').className = 'on';
+      $('#phTxt').innerHTML = '<b>Taille vérifiée</b> · en attente de l\'autorisation Windows (UAC)';
+      $('#phNum').textContent = '871 Mo';
+      b.innerHTML = '<svg class="i"><use href="#i-shield"/></svg>Installation…';
+    }
+  }, 120);
+};
+
+/* ---------- outils ---------- */
+const cats = [
+  {g:'Fichiers temporaires'},
+  {n:'Temp utilisateur', p:'%TEMP%', s:1.84, on:1},
+  {n:'Temp Windows', p:'C:\\Windows\\Temp', s:.412, on:1, a:1},
+  {g:'Caches de shaders'},
+  {n:'Cache DirectX', p:'%LOCALAPPDATA%\\D3DSCache', s:.698, on:1, w:1},
+  {n:'Cache NVIDIA', p:'NVIDIA\\DXCache, GLCache', s:1.12, on:1, w:1},
+  {n:'Cache AMD', p:'AMD\\DxCache', s:.086, on:1, w:1},
+  {g:'Windows'},
+  {n:'Windows Update', p:'SoftwareDistribution\\Download', s:2.31, on:1, a:1},
+  {n:'Optimisation de distribution', p:'Fichiers partagés de mises à jour', s:.54, on:1, a:1},
+  {n:'Rapports d\'erreurs', p:'CrashDumps, WER', s:.318, on:1},
+  {n:'Cache des miniatures', p:'Explorateur', s:.154, on:1},
+  {g:'Décochés par défaut'},
+  {n:'Caches des navigateurs', p:'Edge, Chrome, Firefox · dossiers Cache seulement, jamais mots de passe, historique ou cookies', s:1.46, on:0},
+  {n:'Corbeille', p:'Tous les disques', s:3.02, on:0},
+];
+const size = s => s >= 1 ? fr(s,2) + ' Go' : Math.round(s*1000) + ' Mo';
+function renderCl(){
+  $('#cl').innerHTML = cats.map((c,i) => c.g ? `<li class="gh">${c.g}</li>` :
+    `<li class="${c.on?'':'off'}"><label class="cb" style="min-height:32px"><input type="checkbox" data-i="${i}" ${c.on?'checked':''} aria-label="${c.n}"></label><span class="n">${c.n}${c.a?'<span class="tag">admin</span>':''}${c.w?'<span class="tag w">saccades</span>':''}<small>${c.p}</small></span><span class="sz">${size(c.s)}</span></li>`).join('');
+  total();
+}
+function total(){ const s = cats.reduce((a,c) => a + (c.on ? c.s : 0), 0); $('#tot').textContent = size(s); $('#sFree').textContent = size(s); $('#clean').disabled = s === 0; return s; }
+$('#cl').addEventListener('change', e => { const c = cats[e.target.dataset.i]; c.on = e.target.checked ? 1 : 0; e.target.closest('li').className = c.on ? '' : 'off'; total(); });
+renderCl();
+$('#scan').onclick = () => {
+  const b = $('#scan'); b.disabled = true; b.querySelector('span').textContent = 'Analyse…'; $('#scanTxt').textContent = 'Analyse des dossiers…';
+  setTimeout(() => { b.disabled = false; b.querySelector('span').textContent = 'Analyser'; $('#scanTxt').textContent = 'Analysé à l\'instant. Les fichiers en cours d\'utilisation sont ignorés.'; renderCl(); }, 900);
+};
+function bindClean(){
+  $('#clean').onclick = () => {
+    const s = total();
+    $('#cleanZone').innerHTML = `<div class="confirm" role="alertdialog" aria-label="Confirmer le nettoyage"><span>Supprimer ${size(s)} ? Pas de retour en arrière.</span><div><button class="btn sm" type="button" id="cy" style="background:var(--volt);color:var(--volt-ink)">Supprimer</button><button class="btn sm ghost" type="button" id="cn">Annuler</button></div></div>`;
+    $('#cn').focus();
+    $('#cn').onclick = restore;
+    $('#cy').onclick = () => {
+      $('#cleanZone').innerHTML = `<div style="text-align:right"><b style="font:800 20px/1 var(--f-disp);color:var(--ok);text-transform:uppercase">${size(s*.94)} libérés</b><div class="hint">37 fichiers en cours d'utilisation ignorés</div></div>`;
+      cats.forEach(c => { if (c.on) c.s = c.s*.06; }); renderCl();
+    };
+  };
+}
+function restore(){ $('#cleanZone').innerHTML = '<button class="btn pri" type="button" id="clean"><svg class="i"><use href="#i-broom"/></svg>Nettoyer</button>'; bindClean(); total(); }
+bindClean();
+$('#ramBtn').onclick = () => {
+  const b = $('#ramBtn'); b.disabled = true; b.lastChild.textContent = 'En attente de l\'UAC…';
+  setTimeout(() => { $('#rAfter').textContent = '7,4 Go'; $('#sRam').textContent = '7,4 Go'; $('#mSb').style.flexBasis = '2%'; $('#lSb').textContent = 'Standby 0,3'; b.disabled = false; b.lastChild.textContent = 'Nettoyer à nouveau'; }, 1100);
+};
+})();
+</script>
+</body>
+</html>
