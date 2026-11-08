@@ -6,6 +6,7 @@ mod config;
 mod drivers;
 mod elevate;
 mod overlay;
+mod sounds;
 mod tools;
 mod tray;
 mod update;
@@ -90,10 +91,11 @@ fn log(msg: &str) {
     }
 }
 
-fn beep(ok: bool) {
-    use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONHAND, MB_OK};
-    unsafe { MessageBeep(if ok { MB_OK } else { MB_ICONHAND }) };
+/// Son de confirmation, sauf si l'utilisateur les a coupés (Avancé > Sons).
+fn sound(cfg: &Config, s: sounds::Sound) {
+    if cfg.sounds {
+        sounds::play(s);
+    }
 }
 
 fn disk_free(p: &Path) -> u64 {
@@ -150,7 +152,7 @@ fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>) -> Value {
             let stem = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
             let date = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             let play = capture::ready_url(&p, &pr);
-            if play.is_none() && i < 8 {
+            if play.is_none() && i < 6 {
                 warm.push(p.clone());
             }
             json!({
@@ -275,6 +277,7 @@ impl App {
             "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs()),
             "gpu": self.gpu.as_ref().map(|g| json!({"name": g.name, "driver": g.driver})),
             "elevated": elevate::is_elevated(),
+            "gpu_scale": capture::gpu_scaling(),
             "gpus": self.gpus, "chip": capture::effective_chip(&self.cfg, &self.gpus),
             "cpu_temp": self.cpu_temp, "autostart": elevate::autostart(),
         })
@@ -346,14 +349,16 @@ impl App {
     fn toggle_rec(&mut self) {
         if self.recording.take().is_none() {
             if let Err(e) = capture::rec_start(&self.cfg, &self.buffer) {
-                beep(false);
+                sound(&self.cfg, sounds::Sound::Error);
                 log(&e);
                 self.push(&json!({"type": "toast", "kind": "error", "text": e}));
                 return;
             }
             self.recording = Some(Instant::now());
-            beep(true);
+            sound(&self.cfg, sounds::Sound::RecStart);
         } else {
+            // Tout de suite à l'appui : l'assemblage du fichier prend ensuite 2 à 3 s.
+            sound(&self.cfg, sounds::Sound::RecStop);
             let (c, b, p) = (self.cfg.clone(), self.buffer.clone(), self.proxy.clone());
             std::thread::spawn(move || {
                 let _ = p.send_event(UserEvent::Saved(capture::rec_stop(&c, &b), "rec"));
@@ -638,7 +643,7 @@ impl App {
     /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
     fn set_many(&mut self, items: &[(String, Value)]) {
         // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
+        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
         let mut restart = false;
         let reprobe = items.iter().any(|(k, _)| k == "monitor");
@@ -931,7 +936,11 @@ fn main() {
                 }
             }
             Event::UserEvent(UserEvent::Saved(r, kind)) => {
-                beep(r.is_ok());
+                match (&r, kind) {
+                    (Err(_), _) => sound(&app.cfg, sounds::Sound::Error),
+                    (Ok(_), "clip") => sound(&app.cfg, sounds::Sound::Clip),
+                    _ => {} // fin de REC : son déjà joué à l'appui
+                }
                 log(&format!("{kind} : {r:?}"));
                 if let Ok(p) = &r {
                     prewarm(&app.cfg, vec![p.clone()], &app.proxy); // lisible dans l'app dès l'ouverture

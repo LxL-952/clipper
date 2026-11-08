@@ -1,4 +1,4 @@
-//! Buffer ffmpeg : ddagrab -> encodeur matériel -> segments .ts de 2 s.
+//! Buffer ffmpeg : capture -> encodeur matériel -> segments de 2 s (.ts, ou .mkv pour l'AV1).
 use crate::config::Config;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -75,8 +75,8 @@ fn registry_path() -> String {
 }
 
 pub fn probe_encoders(cfg: &Config) -> Vec<&'static str> {
-    // Pas d'AV1 : dans les segments MPEG-TS, ffmpeg l'écrit en flux de données (« bin_data ») et les clips sont illisibles.
-    const ALL: [&str; 6] = ["h264_nvenc", "hevc_nvenc", "h264_amf", "hevc_amf", "h264_qsv", "libx264"];
+    // AV1 : segments MKV (voir seg_ext), le MPEG-TS de ffmpeg le transformait en flux de données illisible.
+    const ALL: [&str; 8] = ["h264_nvenc", "hevc_nvenc", "av1_nvenc", "h264_amf", "hevc_amf", "av1_amf", "h264_qsv", "libx264"];
     ALL.into_iter()
         .filter(|e| {
             ffmpeg(cfg)
@@ -270,8 +270,8 @@ fn gdi_size(gdi: &str) -> Option<(u32, u32)> {
     (unsafe { EnumDisplaySettingsW(name.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) } != 0).then_some((dm.dmPelsWidth, dm.dmPelsHeight))
 }
 
-/// Nom de chaque sortie ddagrab : écran de même résolution, dans l'ordre DISPLAY1, DISPLAY2…
-fn match_names(sizes: &[(u32, u32)], mut screens: Vec<(String, (u32, u32), String)>) -> Vec<Option<String>> {
+/// (\\.\DISPLAYn, nom) de chaque sortie ddagrab : écran de même résolution, dans l'ordre DISPLAY1, DISPLAY2…
+fn match_names(sizes: &[(u32, u32)], mut screens: Vec<(String, (u32, u32), String)>) -> Vec<Option<(String, String)>> {
     screens.sort_by_key(|(gdi, _, _)| gdi.trim_start_matches(r"\\.\DISPLAY").parse::<u32>().unwrap_or(99));
     let mut used = vec![false; screens.len()];
     sizes
@@ -279,7 +279,7 @@ fn match_names(sizes: &[(u32, u32)], mut screens: Vec<(String, (u32, u32), Strin
         .map(|s| {
             let i = (0..screens.len()).find(|&i| !used[i] && screens[i].1 == *s)?;
             used[i] = true;
-            Some(screens[i].2.clone()).filter(|n| !n.is_empty())
+            Some((screens[i].0.clone(), screens[i].2.clone()))
         })
         .collect()
 }
@@ -308,12 +308,92 @@ pub fn monitors(cfg: &Config) -> Vec<serde_json::Value> {
         .collect();
     let screens = monitor_names().into_iter().filter_map(|(gdi, name)| Some((gdi.clone(), gdi_size(&gdi)?, name))).collect();
     let names = match_names(&sizes, screens);
+    *MONITOR_GDI.lock().unwrap() = names.iter().map(|n| n.as_ref().map(|(gdi, _)| gdi.clone())).collect();
     sizes
         .iter()
         .zip(names)
         .enumerate()
-        .map(|(i, (&(w, h), name))| serde_json::json!({"idx": i, "w": w, "h": h, "name": name.unwrap_or_else(|| format!("Écran {}", i + 1))}))
+        .map(|(i, (&(w, h), name))| {
+            let name = name.map(|(_, n)| n).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("Écran {}", i + 1));
+            serde_json::json!({"idx": i, "w": w, "h": h, "name": name})
+        })
         .collect()
+}
+
+/// \\.\DISPLAYn de chaque sortie ddagrab (rempli par `monitors`) : retrouve le même écran pour gfxcapture.
+static MONITOR_GDI: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
+
+/// HMONITOR de l'écran GDI `gdi` (\\.\DISPLAYn).
+fn hmonitor(gdi: &str) -> Option<usize> {
+    use windows_sys::Win32::Foundation::{LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW};
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> windows_sys::core::BOOL {
+        let (want, found) = unsafe { &mut *(data as *mut (String, Option<usize>)) };
+        let mut mi: MONITORINFOEXW = unsafe { std::mem::zeroed() };
+        mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if unsafe { GetMonitorInfoW(m, &mut mi as *mut _ as _) } != 0 {
+            let n = mi.szDevice.iter().position(|&c| c == 0).unwrap_or(mi.szDevice.len());
+            if String::from_utf16_lossy(&mi.szDevice[..n]).eq_ignore_ascii_case(want) {
+                *found = Some(m as usize);
+                return 0;
+            }
+        }
+        1
+    }
+    let mut data: (String, Option<usize>) = (gdi.to_string(), None);
+    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut data as *mut _ as LPARAM) };
+    data.1
+}
+
+/// Source gfxcapture (Windows Graphics Capture) qui livre directement des images à la taille voulue :
+/// le redimensionnement se fait sur la carte graphique, sans copie de l'écran entier vers le processeur.
+/// Mesuré (1440p -> 720p, 60 i/s, NVENC) : 6 % d'un cœur au lieu de 30 à 87 % par le processeur.
+fn gfx_source(cfg: &Config, (w, h): (u32, u32), fps: u32) -> String {
+    let gdi = MONITOR_GDI.lock().unwrap().get(cfg.monitor as usize).cloned().flatten();
+    let screen = gdi.as_deref().and_then(hmonitor).map_or(format!("monitor_idx={}", cfg.monitor), |m| format!("hmonitor={m}"));
+    format!("gfxcapture={screen}:width={w}:height={h}:resize_mode=scale:scale_mode=bilinear:max_framerate={fps}:capture_cursor=1,fps={fps}")
+}
+
+/// Résultat du dernier essai de redimensionnement sur la carte graphique (None = pas encore essayé).
+static GPU_SCALE: Mutex<Option<(String, bool)>> = Mutex::new(None);
+
+/// Le chemin GPU marche-t-il sur ce PC avec cet encodeur ? Essai réel de 3 images (8 s max), gardé en cache.
+/// Échec (portable AMD + NVIDIA, Windows trop ancien…) : retour au redimensionnement processeur.
+fn gpu_scale_ok(cfg: &Config, src: &str, off_gpu: bool) -> bool {
+    let key = format!("{src}|{}", cfg.encoder);
+    if let Some((k, ok)) = GPU_SCALE.lock().unwrap().as_ref() {
+        if *k == key {
+            return *ok;
+        }
+    }
+    let mut vf = src.to_string();
+    if off_gpu {
+        vf += ",hwdownload,format=bgra,format=nv12";
+    }
+    let ok = ffmpeg(cfg)
+        .args(["-loglevel", "quiet", "-f", "lavfi", "-i", &vf, "-frames:v", "3", "-c:v", &cfg.encoder, "-f", "null", "-"])
+        .spawn()
+        .is_ok_and(|mut ch| {
+            let t = std::time::Instant::now();
+            loop {
+                match ch.try_wait() {
+                    Ok(Some(s)) => break s.success(),
+                    Ok(None) if t.elapsed() < Duration::from_secs(8) => std::thread::sleep(Duration::from_millis(100)),
+                    _ => {
+                        let _ = ch.kill();
+                        break false;
+                    }
+                }
+            }
+        });
+    crate::log(&format!("redimensionnement sur la carte graphique : {}", if ok { "oui" } else { "non, retour au processeur" }));
+    *GPU_SCALE.lock().unwrap() = Some((key, ok));
+    ok
+}
+
+/// Pour l'UI : le redimensionnement passe-t-il par la carte graphique ? (None = pas encore essayé.)
+pub fn gpu_scaling() -> Option<bool> {
+    GPU_SCALE.lock().unwrap().as_ref().map(|(_, ok)| *ok)
 }
 
 /// Ce que l'onglet Vidéos doit savoir d'un fichier (un seul ffprobe, gardé en cache).
@@ -369,7 +449,9 @@ fn useful_audio(pr: &Probe) -> usize {
 /// WebView2 lit sans extension le H.264 en MP4 avec une seule piste utile : lecture directe du fichier.
 fn direct_url(src: &Path, pr: &Probe) -> Option<String> {
     let ext = src.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
-    (pr.video == "h264" && useful_audio(pr) <= 1 && (ext == "mp4" || ext == "mov")).then(|| format!("/video?p={}", crate::ui::pct_encode(&src.to_string_lossy())))
+    // AV1 : décodé par Chromium (dav1d / carte graphique). Si WebView2 refuse, l'UI demande une copie de lecture.
+    ((pr.video == "h264" || pr.video == "av1") && useful_audio(pr) <= 1 && (ext == "mp4" || ext == "mov"))
+        .then(|| format!("/video?p={}", crate::ui::pct_encode(&src.to_string_lossy())))
 }
 
 fn preview_dir() -> PathBuf {
@@ -377,7 +459,8 @@ fn preview_dir() -> PathBuf {
 }
 
 fn preview_name(src: &Path) -> String {
-    format!("{}.mp4", src.file_stem().unwrap_or_default().to_string_lossy())
+    // « .hd » : les anciennes copies en 720p ne sont plus reprises (recréées en pleine résolution).
+    format!("{}.hd.mp4", src.file_stem().unwrap_or_default().to_string_lossy())
 }
 
 /// Copie de lecture à jour (plus récente que le clip) : son adresse.
@@ -429,15 +512,15 @@ fn convert(cfg: &Config, src: &Path, pr: &Probe) -> Result<String, String> {
     let _ = std::fs::create_dir_all(&dir);
     let name = preview_name(src);
     let tmp = dir.join(format!("{name}.part"));
-    // H.264 : simple changement de conteneur (instantané). Sinon : réencodage, 720p max pour aller vite.
-    let small = "scale=-2:'min(720,ih)'";
+    // H.264 : simple changement de conteneur (instantané, qualité d'origine). Sinon (HEVC, AV1) :
+    // réencodage en pleine résolution, qualité visuellement identique (cq 19), préparé d'avance.
     let encoders: &[&[&str]] = if pr.video == "h264" {
         &[&["-c:v", "copy"]]
     } else {
         &[
-            &["-vf", small, "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "26", "-pix_fmt", "yuv420p"],
-            &["-vf", small, "-c:v", "h264_amf", "-quality", "speed", "-pix_fmt", "yuv420p"],
-            &["-vf", small, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p"],
+            &["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p"],
+            &["-c:v", "h264_amf", "-quality", "quality", "-rc", "qvbr", "-qvbr_quality_level", "20", "-pix_fmt", "yuv420p"],
+            &["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p"],
         ]
     };
     let audio = useful_audio(pr);
@@ -461,7 +544,7 @@ fn convert(cfg: &Config, src: &Path, pr: &Probe) -> Result<String, String> {
         let _ = std::fs::remove_file(&tmp);
         return Err("Conversion pour la lecture impossible.".into());
     }
-    prune_previews(&dir, 16);
+    prune_previews(&dir, 8); // pleine résolution : quelques centaines de Mo par copie
     Ok(format!("/preview/{}", crate::ui::pct_encode(&name)))
 }
 
@@ -510,13 +593,22 @@ fn prune_previews(dir: &Path, keep: usize) {
     v.iter().skip(keep).for_each(|(_, p)| drop(std::fs::remove_file(p)));
 }
 
+/// Extension des segments du buffer. ffmpeg écrit l'AV1 dans un MPEG-TS comme un flux de données
+/// (« bin_data ») : clips sans vidéo. En MKV il reste de l'AV1 (vérifié : 360 images sur 360, durée exacte).
+pub fn seg_ext(encoder: &str) -> &'static str {
+    if encoder.starts_with("av1") { "mkv" } else { "ts" }
+}
+
 pub fn buffer_args(cfg: &Config, native: (u32, u32), dir: &Path, start: u64, pipes: &[String]) -> Vec<String> {
     let mut a = capture_args(cfg, cfg.clip, native, pipes);
-    for s in [
-        "-f".into(), "segment".into(), "-segment_time".into(), SEG_SECS.to_string(),
-        "-segment_format".into(), "mpegts".into(), "-segment_start_number".into(), start.to_string(),
-        dir.join("%010d.ts").to_string_lossy().into_owned(),
-    ] {
+    let ext = seg_ext(&cfg.encoder);
+    let format = if ext == "mkv" { "matroska" } else { "mpegts" };
+    a.extend(["-f".into(), "segment".into(), "-segment_time".into(), SEG_SECS.to_string(), "-segment_format".into(), format.into()]);
+    if ext == "mkv" {
+        // Chaque segment MKV repart de 0 : sinon l'assemblage additionnait les horodatages (8 s au lieu de 6).
+        a.extend(["-reset_timestamps".into(), "1".into()]);
+    }
+    for s in ["-segment_start_number".into(), start.to_string(), dir.join(format!("%010d.{ext}")).to_string_lossy().into_owned()] {
         a.push(s);
     }
     a
@@ -532,7 +624,14 @@ fn capture_args(cfg: &Config, q: crate::config::Quality, native: (u32, u32), pip
     let mut vf = format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1", cfg.monitor, q.fps);
     // Les images de ddagrab vivent sur la carte NVIDIA : AMF/QSV/x264 doivent passer par la mémoire.
     let off_gpu = !cfg.encoder.ends_with("_nvenc");
-    if (w, h) != native || off_gpu {
+    let gfx = gfx_source(cfg, (w, h), q.fps);
+    if (w, h) != native && gpu_scale_ok(cfg, &gfx, off_gpu) {
+        // Réduction sur la carte graphique ; seule la petite image quitte le GPU si l'encodeur n'est pas NVIDIA.
+        vf = gfx;
+        if off_gpu {
+            vf += ",hwdownload,format=bgra,format=nv12";
+        }
+    } else if (w, h) != native || off_gpu {
         // Image hors du GPU : changement de résolution (720p…) ou encodeur non NVIDIA. scale_d3d11 (sur
         // la carte) échoue sur les portables AMD + NVIDIA : redimensionnement processeur, filtre bilinéaire.
         vf += ",hwdownload,format=bgra";
@@ -572,7 +671,7 @@ pub fn segments(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         // Seulement les segments numérotés (pas le fichier rec-….ts de la 2e capture).
-        .filter(|p| p.extension().is_some_and(|x| x == "ts") && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())))
+        .filter(|p| p.extension().is_some_and(|x| x == "ts" || x == "mkv") && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())))
         .collect();
     v.sort();
     v
@@ -836,11 +935,12 @@ pub fn rec_start(cfg: &Config, buf: &Buffer) -> Result<(), String> {
         *buf.rec_from.lock().unwrap() = Some(n);
         return Ok(());
     }
-    let file = buf.dir.join(format!("rec-{}.ts", stamp()));
+    let file = buf.dir.join(format!("rec-{}.{}", stamp(), seg_ext(&cfg.encoder)));
     let pipes = buf.audio.as_ref().map_or(vec![], |a| a.open_pipes(1, &crate::audio::tracks(cfg), 0));
     let mut a = capture_args(cfg, cfg.rec, buf.native, &pipes);
     // Un seul .ts : lisible même si le PC s'arrête en plein REC.
-    a.extend(["-f".into(), "mpegts".into(), file.to_string_lossy().into_owned()]);
+    let format = if seg_ext(&cfg.encoder) == "mkv" { "matroska" } else { "mpegts" };
+    a.extend(["-f".into(), format.into(), file.to_string_lossy().into_owned()]);
     let mut cmd = ffmpeg(cfg);
     if let Ok(f) = std::fs::File::create(buf.dir.join("ffmpeg-rec.log")) {
         cmd.stderr(f);
@@ -926,7 +1026,8 @@ mod tests {
         let s = |g: &str, w, h, n: &str| (g.to_string(), (w, h), n.to_string());
         let screens = vec![s(r"\\.\DISPLAY2", 1920, 1080, "DELL P2419H"), s(r"\\.\DISPLAY1", 2560, 1440, "LG ULTRAGEAR")];
         let n = match_names(&[(2560, 1440), (1920, 1080), (800, 600)], screens);
-        assert_eq!(n, vec![Some("LG ULTRAGEAR".into()), Some("DELL P2419H".into()), None]);
+        let s2 = |g: &str, n: &str| Some((g.to_string(), n.to_string()));
+        assert_eq!(n, vec![s2(r"\\.\DISPLAY1", "LG ULTRAGEAR"), s2(r"\\.\DISPLAY2", "DELL P2419H"), None]);
     }
 
     #[test]
