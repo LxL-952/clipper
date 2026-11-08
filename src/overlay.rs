@@ -76,7 +76,13 @@ pub fn apply(cfg: &Config, shown: bool) {
     WIDTH.store(0, Ordering::Relaxed); // taille, éléments ou visibilité changés : largeur recalculée
     let h = OV.load(Ordering::Relaxed);
     if !h.is_null() {
-        unsafe { PostMessageW(h, WM_APP, 0, 0) };
+        unsafe {
+            // Overlay activé : sondes chargées tout de suite, en arrière-plan, pour un premier Alt+F instantané.
+            if ENABLED.load(Ordering::Relaxed) {
+                PostMessageW(h, WM_APP + 1, 0, 0);
+            }
+            PostMessageW(h, WM_APP, 0, 0);
+        }
     }
     WAKE.lock().unwrap().iter().for_each(std::thread::Thread::unpark);
 }
@@ -760,6 +766,11 @@ unsafe fn window_thread() {
                     ShowWindow(h, SW_HIDE);
                 }
                 WM_TIMER => tick(&mut probes),
+                m if m == WM_APP + 1 => {
+                    if probes.is_none() {
+                        probes = Some(load());
+                    }
+                }
                 _ => {
                     DispatchMessageW(&msg);
                 }

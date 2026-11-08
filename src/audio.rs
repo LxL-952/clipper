@@ -135,6 +135,9 @@ impl Audio {
         // Boost du micro en dB, en plus du volume (+6 dB = x2, +20 dB = x10).
         let boost = 10f32.powf(cfg.mic_boost_db.clamp(0.0, 30.0) / 20.0);
         let (gv, mv) = (cfg.game_volume, if cfg.mic_muted { 0.0 } else { cfg.mic_volume * boost });
+        // Seulement si le micro finit dans un clip (piste Tout ou Micro) : sinon aucun calcul.
+        let mic_recorded = tracks(cfg).iter().any(|t| matches!(t, Track::Mix | Track::Mic));
+        let mut denoiser = (cfg.mic_denoise && !cfg.mic_muted && mic_recorded).then(Denoiser::new);
         let epoch = Instant::now();
         let mut sent = 0usize;
         while !self.stop.load(Ordering::Relaxed) {
@@ -161,7 +164,17 @@ impl Audio {
                 v.resize(n, 0.0);
                 v
             };
-            let (g, mut m) = (take(&self.game, gv), take(&self.mic, mv));
+            let g = take(&self.game, gv);
+            // Réduction de bruit : sur le micro brut (RNNoise attend des niveaux naturels), puis volume et boost.
+            let mut m = match denoiser.as_mut() {
+                Some(d) => {
+                    let mut m = take(&self.mic, 1.0);
+                    d.process(&mut m);
+                    m.iter_mut().for_each(|s| *s *= mv);
+                    m
+                }
+                None => take(&self.mic, mv),
+            };
             if boost > 1.0 {
                 m.iter_mut().for_each(|s| *s = soft_limit(*s));
             }
@@ -223,6 +236,47 @@ impl Audio {
             a.slots.lock().unwrap()[slot] = files;
         });
         names
+    }
+}
+
+/// Réduction de bruit du micro : RNNoise (réseau de neurones de Xiph, celui des outils de visio),
+/// en Rust pur. Travaille en mono par trames de 10 ms ; 10 ms de retard ajoutés, constant.
+struct Denoiser {
+    st: Box<nnnoiseless::DenoiseState<'static>>,
+    pending: Vec<f32>,
+    ready: VecDeque<f32>,
+}
+
+impl Denoiser {
+    const FRAME: usize = nnnoiseless::DenoiseState::FRAME_SIZE;
+
+    fn new() -> Self {
+        // Une trame de silence d'avance : il y a toujours de quoi rendre autant d'échantillons que reçus.
+        Self { st: nnnoiseless::DenoiseState::new(), pending: Vec::with_capacity(Self::FRAME * 2), ready: VecDeque::from(vec![0.0; Self::FRAME]) }
+    }
+
+    /// `buf` : stéréo entrelacé, débruité sur place (même son dans les deux canaux, comme un micro).
+    fn process(&mut self, buf: &mut [f32]) {
+        // RNNoise attend des valeurs à l'échelle 16 bits.
+        self.pending.extend(buf.chunks_exact(CH).map(|f| (f[0] + f[1]) * 0.5 * 32767.0));
+        let mut out = [0f32; Self::FRAME];
+        let mut done = 0;
+        while self.pending.len() - done >= Self::FRAME {
+            let frame = &self.pending[done..done + Self::FRAME];
+            // Silence complet (micro absent, coupé par Windows) : rien à débruiter, aucun calcul.
+            if frame.iter().all(|s| s.abs() < 1.0) {
+                self.ready.extend(std::iter::repeat_n(0.0, Self::FRAME));
+            } else {
+                self.st.process_frame(&mut out, frame);
+                self.ready.extend(out.iter().map(|s| s / 32767.0));
+            }
+            done += Self::FRAME;
+        }
+        self.pending.drain(..done);
+        for f in buf.chunks_exact_mut(CH) {
+            let s = self.ready.pop_front().unwrap_or(0.0);
+            f.fill(s);
+        }
     }
 }
 
@@ -310,3 +364,35 @@ mod boost {
         }
     }
 }
+
+#[cfg(test)]
+mod denoise {
+    /// Bruit de fond grave (ventilateur, ronflement : bruit « brun ») fortement atténué, et autant
+    /// d'échantillons en sortie qu'en entrée. (Le bruit blanc synthétique passe : RNNoise le prend pour une voix.)
+    #[test]
+    fn rnnoise_removes_background_noise_and_keeps_length() {
+        let mut d = super::Denoiser::new();
+        let (mut seed, mut brown) = (1u32, 0f32);
+        let mut noise = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let white = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+            brown = 0.98 * brown + 0.02 * white;
+            brown * 0.3
+        };
+        let (mut e_in, mut e_out) = (0f64, 0f64);
+        for tick in 0..150 {
+            // 20 ms stéréo par tour, comme le mélangeur
+            let mut buf: Vec<f32> = (0..960).flat_map(|_| { let s = noise(); [s, s] }).collect();
+            let before: f64 = buf.iter().map(|s| (*s as f64).powi(2)).sum();
+            d.process(&mut buf);
+            assert_eq!(buf.len(), 1920);
+            if tick >= 100 {
+                e_in += before;
+                e_out += buf.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+            }
+        }
+        let db = 10.0 * (e_out / e_in).log10();
+        assert!(db < -15.0, "réduction seulement {db:.1} dB");
+    }
+}
+

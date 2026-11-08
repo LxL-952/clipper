@@ -62,6 +62,12 @@ pub struct Config {
     pub overlay_refresh_ms: u32,
     /// Animation et son du trombone à l'ouverture de la fenêtre.
     pub intro: bool,
+    /// Vidéos supprimées définitivement (sans Corbeille).
+    pub delete_permanent: bool,
+    /// Demander confirmation avant de supprimer une vidéo (« Ne plus me demander » le désactive).
+    pub delete_confirm: bool,
+    /// Réduction de bruit du micro (RNNoise).
+    pub mic_denoise: bool,
     /// Lancement via la tâche planifiée « Clipper (administrateur) » : admin sans demande UAC.
     pub admin_mode: bool,
 }
@@ -106,6 +112,9 @@ impl Default for Config {
             overlay_opacity: 0.7,
             overlay_refresh_ms: 250,
             intro: true,
+            delete_permanent: false,
+            delete_confirm: true,
+            mic_denoise: false,
             admin_mode: false,
         }
     }

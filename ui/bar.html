@@ -84,11 +84,10 @@ const I=window.__INIT__,$=id=>document.getElementById(id);
 const send=m=>window.ipc.postMessage(JSON.stringify(m));
 function setPath(o,k,v){const c=structuredClone(o),p=k.split(".");let t=c;while(p.length>1)t=t[p.shift()];t[p[0]]=v;return c}
 
-const BUF=[60,90,120,180,300,600],RES=[720,1080,1440,2160],OV=["hidden","hotkey","always"];
+const BUF=[60,90,120,180,300,600],RES=[720,1080,1440,2160];
 // Pistes audio : préréglages parcourus au clic (Tout / PC / Micro).
 const AUD=["","mix","game,mic","mix,game,mic"];
 const audLabel=t=>t.length?t.length+(t.length>1?" pistes":" piste"):"Muet";
-const OV_L={hidden:"Stats off",hotkey:"Stats",always:"Stats fixes"};
 const next=(list,v)=>list[(list.indexOf(v)+1)%list.length];
 const fmtBuf=s=>s%60?`${s/60|0}:${String(s%60).padStart(2,"0")}`:`${s/60} min`;
 const fmtT=s=>`${String(s/60|0).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
@@ -100,8 +99,8 @@ function render(){
   const c=I.config,k=I.hotkeys||{};
   $("k-clip").textContent=k.clip||"";$("k-rec").textContent=I.recording?"arrêter":(k.rec||"");$("k-ov").textContent=k.overlay||"";
   $("v-buf").textContent=fmtBuf(c.buffer_secs);$("v-res").textContent=resLabel(c.clip.height);$("v-fps").textContent=c.clip.fps+" fps";
-  $("v-aud").textContent=audLabel(c.audio_tracks||[]);$("v-stats").textContent=OV_L[c.overlay_mode]||"Stats";
-  $("b-stats").classList.toggle("on",c.overlay_mode!=="hidden");
+  $("v-aud").textContent=audLabel(c.audio_tracks||[]);$("v-stats").textContent=I.overlay_on?"Stats on":"Stats off";
+  $("b-stats").classList.toggle("on",!!I.overlay_on);$("b-stats").setAttribute("aria-pressed",!!I.overlay_on);
   $("b-rec").classList.toggle("on",!!I.recording);$("b-rec").setAttribute("aria-pressed",!!I.recording);
   $("rec-v").textContent=I.recording?fmtT(I.rec_secs):"REC";
 }
@@ -120,15 +119,13 @@ $("b-buf").onclick=()=>set("buffer_secs",next(BUF,I.config.buffer_secs));
 $("b-res").onclick=()=>{let h=I.config.clip.height;do{h=next(RES,h)}while(!resOk(h)&&h!==I.config.clip.height);set("clip.height",h)};
 $("b-fps").onclick=()=>set("clip.fps",I.config.clip.fps===60?30:60);
 $("b-aud").onclick=()=>set("audio_tracks",next(AUD,(I.config.audio_tracks||[]).join(",")).split(",").filter(Boolean));
-$("b-stats").onclick=()=>set("overlay_mode",next(OV,I.config.overlay_mode));
+// Même action qu'Alt+F : affiche ou masque l'overlay (le mode choisi dans les réglages n'est pas touché).
+$("b-stats").onclick=()=>send({cmd:"overlay_toggle"});
 $("b-set").onclick=()=>send({cmd:"open_settings"});
 $("t-see").onclick=()=>send({cmd:"open_settings",tab:"videos"});
 
-// Fermeture auto : 5 s sans souris sur la barre (le compte repart à chaque mouvement).
-let idle=null;
-const arm=()=>{clearTimeout(idle);idle=setTimeout(close,5000)};
+// Pas de fermeture automatique : la barre reste jusqu'à Alt+Z ou Échap.
 function close(){flush();$("bar").classList.replace("in","out");setTimeout(()=>send({cmd:"close"}),220)}
-document.addEventListener("mousemove",arm);document.addEventListener("mousedown",arm);
 document.addEventListener("keydown",e=>{if(e.key==="Escape")close()});
 
 let toastT=null;
@@ -138,7 +135,9 @@ window.__on=m=>{switch(m&&m.type){
   case "toast":{
     $("t-t").textContent=m.text;$("t-t").classList.toggle("err",m.kind==="error");
     $("t-s").textContent=m.path?m.path.split("\\").pop():"";$("t-see").hidden=m.kind==="error"||!m.path;
-    $("toast").classList.add("show");clearTimeout(toastT);toastT=setTimeout(()=>$("toast").classList.remove("show"),4000);arm();break}
+    $("toast").classList.add("show");clearTimeout(toastT);toastT=setTimeout(()=>$("toast").classList.remove("show"),4000);break}
+  // Overlay affiché ou masqué (Alt+F, ce bouton, le menu) : le bouton suit l'état réel.
+  case "overlay":I.overlay_on=!!m.on;render();break;
 }};
 
 render();recTick();

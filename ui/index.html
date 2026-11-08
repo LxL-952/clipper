@@ -271,6 +271,8 @@ kbd{font:600 10px/1 var(--sans);letter-spacing:.06em;color:var(--text-3);padding
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{position:relative;display:inline-flex;align-items:center;gap:7px;min-height:32px;padding:0 10px;border:1px solid var(--line-2);border-radius:5px;font-size:12.5px;color:var(--text-2);cursor:pointer}
 .chip.off{opacity:.4;cursor:default}
+.chk{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2);cursor:pointer}
+.chk input{accent-color:var(--signal);width:14px;height:14px;margin:0}
 .chip input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
 .chip::before{content:"";width:10px;height:10px;border-radius:2px;border:1px solid var(--line-2);background:var(--well);flex:none}
 .chip:has(input:checked){color:var(--text);border-color:#56634f;background:var(--raise)}
@@ -635,6 +637,14 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
         <span class="lbl"><span id="l-intro">Intro à l'ouverture</span><span class="hint">Le trombone se clipse sur la page, avec son bruitage (environ 3 s, un clic la passe).</span></span>
         <input type="checkbox" class="sw" role="switch" data-k="intro" aria-labelledby="l-intro">
       </div>
+      <div class="sw-row">
+        <span class="lbl"><span id="l-delp">Supprimer définitivement</span><span class="hint">Les vidéos supprimées ne passent pas par la Corbeille : elles ne peuvent pas être récupérées.</span></span>
+        <input type="checkbox" class="sw" role="switch" data-k="delete_permanent" aria-labelledby="l-delp">
+      </div>
+      <div class="sw-row">
+        <span class="lbl"><span id="l-delc">Confirmer avant de supprimer</span><span class="hint">Désactivé par « Ne plus me demander » ; réactivez-le ici.</span></span>
+        <input type="checkbox" class="sw" role="switch" data-k="delete_confirm" aria-labelledby="l-delc">
+      </div>
     </section>
 
     <section class="grp" aria-labelledby="g-adv">
@@ -729,6 +739,10 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
           </div>
         </div>
         <p class="hint indent" style="margin-top:6px">Pour un micro trop faible, en plus du volume. Les cris sont arrondis au lieu de grésiller.</p>
+        <div class="sw-row" style="margin-top:16px">
+          <span class="lbl"><span id="l-dn">Réduction de bruit</span><span class="hint">Retire le ventilateur, le souffle et les bruits de fond du micro, comme Discord (RNNoise, calculé sur votre PC). Coût mesuré : environ 0,7 % d'un cœur du processeur pendant que le micro est enregistré (moins de 0,1 % du processeur entier sur un 8 cœurs) ; rien quand le micro est coupé ou absent des pistes.</span></span>
+          <input type="checkbox" class="sw" role="switch" data-k="mic_denoise" aria-labelledby="l-dn">
+        </div>
       </section>
     </div>
   </div>
@@ -756,8 +770,9 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
         <div class="acts"><button class="btn primary" type="submit">Renommer</button><button class="btn ghost" type="button" id="renNo">Annuler</button></div>
       </form>
       <div class="inline" id="delBox" hidden role="alertdialog" aria-labelledby="delT">
-        <p id="delT" style="font-size:13px"><b>Mettre cette vidéo à la corbeille ?</b><br><span class="hint">Vous pourrez la récupérer depuis la corbeille de Windows.</span></p>
-        <div class="acts"><button class="btn danger" type="button" id="delYes"><svg class="i" aria-hidden="true"><use href="#i-trash"/></svg>Mettre à la corbeille</button><button class="btn ghost" type="button" id="delNo">Annuler</button></div>
+        <p id="delT" style="font-size:13px"><b id="delQ">Mettre cette vidéo à la corbeille ?</b><br><span class="hint" id="delH">Vous pourrez la récupérer depuis la corbeille de Windows.</span></p>
+        <label class="chk" style="margin:8px 0 2px"><input type="checkbox" id="delAsk"> Ne plus me demander</label>
+        <div class="acts"><button class="btn danger" type="button" id="delYes"><svg class="i" aria-hidden="true"><use href="#i-trash"/></svg><span id="delB">Mettre à la corbeille</span></button><button class="btn ghost" type="button" id="delNo">Annuler</button></div>
       </div>
     </div>
   </div>
@@ -975,7 +990,7 @@ const val=k=>{const v=get(k);return v===undefined&&k in OV_DEF?OV_DEF[k]:v};
 /* Réglages : en attente jusqu'à « Enregistrer » (une seule relance de la capture). */
 let S=C,pending={},hkSaved=null;
 const NOW=['mic_muted'];
-const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','overlay_graphs','intro','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
+const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','overlay_graphs','intro','delete_permanent','delete_confirm','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
 function setCfg(key,value){
   if(key.includes('.')){const[a,b]=key.split('.');value={...C[a],[b]:value};key=a}
   C={...C,[key]:value};
@@ -1222,9 +1237,15 @@ $('#renNo').onclick=()=>{$('#renForm').hidden=true;$('#vActs').hidden=false};
 $('#renForm').onsubmit=e=>{e.preventDefault();const v=cur();let n=$('#renIn').value.trim().replace(/[\\/:*?"<>|]/g,'');if(!v||!n)return;
   const ext=(v.name.match(/\.[^.]+$/)||[''])[0];if(!n.toLowerCase().endsWith(ext.toLowerCase()))n+=ext;
   vPending=v.path.replace(/[^\\/]+$/,n);send({cmd:'video_action',action:'rename',path:v.path,name:n});$('#renForm').hidden=true;$('#vActs').hidden=false};
-$('#vDel').onclick=()=>{$('#vActs').hidden=true;$('#delBox').hidden=false;$('#delNo').focus()};
+/* Suppression : Corbeille ou définitive (réglage Interface), avec ou sans confirmation (« Ne plus me demander »). */
+function doDelete(){const v=cur();if(!v)return;const vp=$('#vp');vp.pause();vp.removeAttribute('src');vp.load();send({cmd:'video_action',action:'delete',path:v.path});$('#delBox').hidden=true;$('#vActs').hidden=false}
+$('#vDel').onclick=()=>{if(C.delete_confirm===false)return doDelete();const p=!!C.delete_permanent;
+  $('#delQ').textContent=p?'Supprimer définitivement cette vidéo ?':'Mettre cette vidéo à la corbeille ?';
+  $('#delH').textContent=p?'Elle ne passera pas par la Corbeille : impossible de la récupérer.':'Vous pourrez la récupérer depuis la corbeille de Windows.';
+  $('#delB').textContent=p?'Supprimer':'Mettre à la corbeille';$('#delAsk').checked=false;
+  $('#vActs').hidden=true;$('#delBox').hidden=false;$('#delNo').focus()};
 $('#delNo').onclick=()=>{$('#delBox').hidden=true;$('#vActs').hidden=false};
-$('#delYes').onclick=()=>{const v=cur();if(!v)return;const vp=$('#vp');vp.pause();vp.removeAttribute('src');vp.load();send({cmd:'video_action',action:'delete',path:v.path});$('#delBox').hidden=true;$('#vActs').hidden=false};
+$('#delYes').onclick=()=>{if($('#delAsk').checked)setCfg('delete_confirm',false);doDelete()};
 
 /* ---------- pilotes ---------- */
 let drvAsked=false,drv=null;

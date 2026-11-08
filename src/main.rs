@@ -107,7 +107,7 @@ fn explorer(args: &str) {
     let _ = std::process::Command::new("explorer").raw_arg(args).spawn();
 }
 
-/// Corbeille (récupérable), jamais une suppression définitive.
+/// Corbeille (récupérable). La suppression définitive est un réglage à part (delete_permanent).
 fn to_recycle_bin(p: &Path) -> bool {
     use windows_sys::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
     let from: Vec<u16> = p.as_os_str().to_string_lossy().encode_utf16().chain([0, 0]).collect();
@@ -257,6 +257,7 @@ impl App {
             "outputs": devs(wasapi::Direction::Render), "inputs": devs(wasapi::Direction::Capture),
             "hotkeys": {"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay)},
             "hotkey_conflicts": self.keys.conflicts,
+            "overlay_on": self.overlay_visible(),
             "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs()),
             "gpu": self.gpu.as_ref().map(|g| json!({"name": g.name, "driver": g.driver})),
             "elevated": elevate::is_elevated(),
@@ -380,6 +381,7 @@ impl App {
                     w.window.set_fullscreen(on.then_some(tao::window::Fullscreen::Borderless(None)));
                 }
             }
+            "overlay_toggle" => self.toggle_overlay(),
             "clip" => self.clip(),
             "rec" => self.toggle_rec(),
             "open_settings" => self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str)),
@@ -549,7 +551,7 @@ impl App {
     /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
     fn set_many(&mut self, items: &[(String, Value)]) {
         // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
+        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
         let mut restart = false;
         let reprobe = items.iter().any(|(k, _)| k == "monitor");
@@ -578,6 +580,24 @@ impl App {
         }
         overlay::apply(&self.cfg, self.overlay_shown);
         self.push(&json!({"type": "config", "config": self.cfg}));
+        self.push(&json!({"type": "overlay", "on": self.overlay_visible()}));
+    }
+
+    fn overlay_visible(&self) -> bool {
+        self.cfg.overlay_mode == "always" || (self.cfg.overlay_mode == "hotkey" && self.overlay_shown)
+    }
+
+    /// Alt+F et le bouton Stats de la barre : afficher / masquer l'overlay, quel que soit le mode.
+    /// Mode « toujours » ou « masqué » : on repasse en mode raccourci, sinon le raccourci ne ferait plus rien.
+    fn toggle_overlay(&mut self) {
+        let on = !self.overlay_visible();
+        self.overlay_shown = on;
+        if self.cfg.overlay_mode == "hotkey" {
+            overlay::apply(&self.cfg, on);
+            self.push(&json!({"type": "overlay", "on": on}));
+        } else {
+            self.set("overlay_mode", json!("hotkey")); // applique et prévient les fenêtres
+        }
     }
 
     fn video_action(&mut self, action: &str, path: &Path, name: &str) {
@@ -596,7 +616,9 @@ impl App {
             // Lecteur par défaut de Windows.
             "open" => return explorer(&format!("\"{}\"", path.display())),
             "delete" => {
-                if to_recycle_bin(path) {
+                // Réglage « Supprimer définitivement » : le fichier est effacé, sans passer par la Corbeille.
+                let gone = if self.cfg.delete_permanent { std::fs::remove_file(path).is_ok() } else { to_recycle_bin(path) };
+                if gone {
                     let _ = std::fs::remove_file(thumb(path));
                 }
             }
@@ -785,8 +807,7 @@ fn main() {
                         app.open_bar(target);
                     }
                 } else if is(&app.keys.overlay) {
-                    app.overlay_shown = !app.overlay_shown;
-                    overlay::apply(&app.cfg, app.overlay_shown);
+                    app.toggle_overlay();
                 }
             }
             Event::UserEvent(UserEvent::Ipc(kind, body)) => app.ipc(kind, &body, target),
