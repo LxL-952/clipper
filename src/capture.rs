@@ -405,10 +405,6 @@ pub fn rec_start(cfg: &Config, buf: &Buffer) -> Result<(), String> {
     Ok(())
 }
 
-pub fn rec_active(buf: &Buffer) -> bool {
-    buf.rec_from.lock().unwrap().is_some() || buf.rec2.lock().unwrap().is_some()
-}
-
 /// Attend la fin du segment en cours pour ne rien couper, puis assemble.
 pub fn rec_stop(cfg: &Config, buf: &Buffer) -> Result<PathBuf, String> {
     if let Some((mut child, file)) = buf.rec2.lock().unwrap().take() {

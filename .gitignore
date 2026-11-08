@@ -3,3 +3,4 @@
 # Reglages locaux de l outil de dev
 /.claude/
 *.log
+/installer/out/

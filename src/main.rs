@@ -52,23 +52,21 @@ fn kill_children_with_us() {
 fn lower_priority() {
     use windows_sys::Win32::System::Threading::{BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass};
     unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };
+    // EcoQoS : Windows place nos fils sur les cœurs économes, à basse fréquence. ffmpeg n'en hérite pas.
+    use windows_sys::Win32::System::Threading::{PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation};
+    let s = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED };
+    unsafe { SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s as *const _ as _, std::mem::size_of_val(&s) as u32) };
 }
 
-/// Pastille corail 32x32 dessinée en mémoire : pas de fichier d'icône à charger.
+/// Rend au système la RAM froide de notre processus (pas celle des autres).
+fn trim_self() {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    unsafe { windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet(GetCurrentProcess()) };
+}
+
+/// Logo (appareil photo) lié dans l'exe par build.rs, ressource n° 1.
 fn tray_icon_image() -> Icon {
-    let n = 32;
-    let mut px = Vec::with_capacity(n * n * 4);
-    for y in 0..n {
-        for x in 0..n {
-            let (dx, dy) = (x as f32 - 15.5, y as f32 - 15.5);
-            let d = (dx * dx + dy * dy).sqrt();
-            let a = ((14.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
-            let core = d < 5.5;
-            px.extend_from_slice(if core { &[28, 12, 9] } else { &[255, 111, 91] });
-            px.push(a);
-        }
-    }
-    Icon::from_rgba(px, n as u32, n as u32).expect("icône valide")
+    Icon::from_resource(1, None).expect("icône dans l'exe")
 }
 
 /// Journal court dans %APPDATA%\Clipper\log.txt (l'app n'a pas de console).
@@ -536,6 +534,11 @@ fn main() {
 
     overlay::apply(&cfg, false);
     overlay::start();
+    // Une fois les sondes de démarrage finies, leur RAM ne sert plus.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        trim_self();
+    });
     let mut app = App {
         cfg,
         encoders,
@@ -614,6 +617,7 @@ fn main() {
                 // Fenêtre détruite = processus WebView2 libérés.
                 if app.main.as_ref().is_some_and(|w| w.window.id() == window_id) {
                     app.main = None;
+                    trim_self(); // la fenêtre et son WebView2 sont partis
                 } else if app.bar.as_ref().is_some_and(|w| w.window.id() == window_id) {
                     app.bar = None;
                 }

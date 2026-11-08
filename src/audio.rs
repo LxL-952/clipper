@@ -13,10 +13,17 @@ pub const RATE: usize = 48_000;
 const CH: usize = 2;
 /// Au-delà, on jette le plus ancien : la RAM ne grossit jamais (0,5 s max par source).
 const MAX_QUEUE: usize = RATE * CH / 2;
+/// Réserve avant de puiser dans une source (60 ms) : absorbe le décalage entre lecture et mélange,
+/// sans trous dans le son. Reconstituée après chaque coupure (silence du loopback).
+const CUSHION: usize = RATE * CH * 60 / 1000;
+/// Réveils de capture et de mélange : 50 par seconde au lieu d'un par période audio (~100).
+const TICK: Duration = Duration::from_millis(20);
 
 #[derive(Default)]
 pub struct Source {
     queue: Mutex<VecDeque<f32>>,
+    /// Réserve atteinte : le mélangeur puise. Remis à faux dès que la file se vide.
+    primed: AtomicBool,
     /// Crête du dernier paquet, 0..1 en bits f32 : pour le vu-mètre de l'UI.
     pub peak: AtomicU32,
 }
@@ -61,16 +68,22 @@ fn capture(src: Arc<Source>, dir: Direction, id: Option<String>, stop: Arc<Atomi
             // autoconvert : Windows convertit en 48 kHz f32 stéréo, aucun rééchantillonnage chez nous.
             let fmt = WaveFormat::new(32, 32, SampleType::Float, RATE, CH, None);
             let (def, _) = client.get_device_period()?;
-            let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: def };
+            // Interrogation toutes les 20 ms ; tampon de 10 périodes pour ne rien perdre entre deux lectures.
+            let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: def * 10 };
             client.initialize_client(&fmt, Direction::Capture, mode, None)?;
-            let ev = client.set_get_eventhandle()?;
             let cap = client.get_audiocaptureclient()?;
             client.start_stream()?;
             let mut bytes = VecDeque::new();
             while !stop.load(Ordering::Relaxed) {
-                // Loopback silencieux = pas d'événement : le délai rend la main, le mélangeur comble.
-                let _ = ev.wait_for_event(200);
-                cap.read_from_device_to_deque(&mut bytes)?;
+                std::thread::sleep(TICK);
+                // Tous les paquets arrivés depuis la dernière lecture (aucun si le loopback est silencieux).
+                loop {
+                    let before = bytes.len();
+                    cap.read_from_device_to_deque(&mut bytes)?;
+                    if bytes.len() == before {
+                        break;
+                    }
+                }
                 let n = bytes.len() / 4;
                 let mut peak = 0f32;
                 let mut q = src.queue.lock().unwrap();
@@ -115,7 +128,7 @@ impl Audio {
         a
     }
 
-    /// Toutes les 10 ms : envoie exactement le nombre d'échantillons dû selon l'horloge.
+    /// Toutes les 20 ms : envoie exactement le nombre d'échantillons dû selon l'horloge.
     /// Les trous (silence, micro absent) sont comblés par des zéros : l'audio ne dérive jamais.
     /// Le même morceau part vers chaque ffmpeg connecté (buffer et, pendant un REC, la 2e capture).
     fn mix_loop(&self, cfg: &Config) {
@@ -123,7 +136,7 @@ impl Audio {
         let epoch = Instant::now();
         let mut sent = 0usize;
         while !self.stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(TICK);
             let due = (epoch.elapsed().as_secs_f64() * RATE as f64) as usize * CH;
             let n = due.saturating_sub(sent);
             sent = due;
@@ -132,6 +145,15 @@ impl Audio {
             }
             let take = |s: &Source, g: f32| -> Vec<f32> {
                 let mut q = s.queue.lock().unwrap();
+                if !s.primed.load(Ordering::Relaxed) {
+                    if q.len() < CUSHION {
+                        return vec![0.0; n];
+                    }
+                    s.primed.store(true, Ordering::Relaxed);
+                }
+                if q.len() < n {
+                    s.primed.store(false, Ordering::Relaxed); // coupure : on reconstitue la réserve
+                }
                 let k = n.min(q.len());
                 let mut v: Vec<f32> = q.drain(..k).map(|x| x * g).collect();
                 v.resize(n, 0.0);

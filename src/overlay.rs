@@ -26,6 +26,10 @@ static TARGET: AtomicU32 = AtomicU32::new(0);
 /// Horodatages QPC des derniers « Present » du jeu (1 s max).
 static PRESENTS: Mutex<VecDeque<i64>> = Mutex::new(VecDeque::new());
 static ETW_OK: AtomicBool = AtomicBool::new(false);
+/// Fenêtre de l'overlay : apply() lui poste WM_APP pour la réveiller.
+static OV: std::sync::atomic::AtomicPtr<core::ffi::c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// Fils ETW endormis (park) tant que l'overlay est masqué : apply() les réveille.
+static WAKE: Mutex<Vec<std::thread::Thread>> = Mutex::new(Vec::new());
 
 /// Applique les réglages et l'état visible (mode "always", ou raccourci en mode "hotkey").
 pub fn apply(cfg: &Config, shown: bool) {
@@ -37,9 +41,14 @@ pub fn apply(cfg: &Config, shown: bool) {
     });
     let v = cfg.overlay_mode == "always" || (cfg.overlay_mode == "hotkey" && shown);
     VISIBLE.store(v, Ordering::Relaxed);
+    let h = OV.load(Ordering::Relaxed);
+    if !h.is_null() {
+        unsafe { PostMessageW(h, WM_APP, 0, 0) };
+    }
+    WAKE.lock().unwrap().iter().for_each(std::thread::Thread::unpark);
 }
 
-/// Lancé une fois : le fil ne fait rien tant que l'overlay est masqué (un réveil par seconde).
+/// Lancé une fois : les deux fils dorment sans aucun réveil tant que l'overlay est masqué.
 pub fn start() {
     std::thread::spawn(|| unsafe { window_thread() });
     std::thread::spawn(etw_thread);
@@ -332,29 +341,40 @@ unsafe fn window_thread() {
         }
         // Jamais dans les clips ni les REC (ni dans les captures d'écran).
         SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE);
-        let (mut cpu, nv, th) = (Cpu { last: (0, 0) }, Nvml::load(), Thermal::open());
-        cpu.sample();
-        let mut shown = false;
-        loop {
-            let v = VISIBLE.load(Ordering::Relaxed);
-            if v {
-                refresh(&mut cpu, &nv, &th);
-                let look = LOOK.lock().unwrap().clone();
-                if let Some(look) = look {
-                    place(h, TEXT.lock().unwrap().len(), &look);
+        OV.store(h, Ordering::Relaxed);
+        PostMessageW(h, WM_APP, 0, 0); // apply() a pu passer avant la création de la fenêtre
+        // Sondes chargées au premier affichage seulement : sinon nvml.dll et PDH ne sont jamais en mémoire.
+        let mut probes: Option<(Cpu, Option<Nvml>, Option<Thermal>)> = None;
+        let tick = |probes: &mut Option<(Cpu, Option<Nvml>, Option<Thermal>)>| {
+            let (cpu, nv, th) = probes.get_or_insert_with(|| {
+                let mut c = Cpu { last: (0, 0) };
+                c.sample();
+                (c, Nvml::load(), Thermal::open())
+            });
+            refresh(cpu, nv, th);
+            let look = LOOK.lock().unwrap().clone();
+            if let Some(look) = look {
+                place(h, TEXT.lock().unwrap().len(), &look);
+            }
+            InvalidateRect(h, std::ptr::null(), 1);
+        };
+        // Masqué : GetMessageW dort, aucun réveil. Visible : WM_TIMER toutes les 500 ms.
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            match msg.message {
+                WM_APP if VISIBLE.load(Ordering::Relaxed) => {
+                    SetTimer(h, 1, 500, None);
+                    tick(&mut probes);
                 }
-                InvalidateRect(h, std::ptr::null(), 1);
-                shown = true;
-            } else if shown {
-                ShowWindow(h, SW_HIDE);
-                shown = false;
+                WM_APP => {
+                    KillTimer(h, 1);
+                    ShowWindow(h, SW_HIDE);
+                }
+                WM_TIMER => tick(&mut probes),
+                _ => {
+                    DispatchMessageW(&msg);
+                }
             }
-            // Messages en attente (peinture), puis pause : 2 rafraîchissements/s visible, 1 réveil/s masqué.
-            let mut msg: MSG = std::mem::zeroed();
-            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                DispatchMessageW(&msg);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(if v { 500 } else { 1000 }));
         }
     }
 }
@@ -378,12 +398,13 @@ unsafe extern "system" fn on_event(r: *mut windows_sys::Win32::System::Diagnosti
 /// La session ETW ne tourne que quand l'overlay est visible ET que FPS / temps d'image sont choisis.
 fn etw_thread() {
     use windows_sys::Win32::System::Diagnostics::Etw::*;
+    WAKE.lock().unwrap().push(std::thread::current());
     let name: Vec<u16> = "ClipperFps".encode_utf16().chain(Some(0)).collect();
     loop {
         let want = VISIBLE.load(Ordering::Relaxed)
             && LOOK.lock().unwrap().as_ref().is_some_and(|l| l.items.iter().any(|i| i == "fps" || i == "frametime"));
         if !want {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::park(); // réveillé par apply()
             continue;
         }
         unsafe {
@@ -417,9 +438,12 @@ fn etw_thread() {
             // Arrêt de la session quand l'overlay est masqué : ProcessTrace rend alors la main.
             let stop_name = name.clone();
             let watcher = std::thread::spawn(move || {
+                let me = std::thread::current();
+                WAKE.lock().unwrap().push(me.clone());
                 while VISIBLE.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::thread::park();
                 }
+                WAKE.lock().unwrap().retain(|t| t.id() != me.id());
                 let mut b = vec![0u8; size];
                 let p = b.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
                 (*p).Wnode.BufferSize = size as u32;

@@ -132,8 +132,8 @@ pub fn open<T: 'static>(
     proxy: EventLoopProxy<T>,
     on_ipc: fn(Kind, String) -> T,
 ) -> Option<Win> {
-    use tao::platform::windows::WindowBuilderExtWindows;
-    let mut wb = WindowBuilder::new().with_title("Clipper").with_decorations(false);
+    use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
+    let mut wb = WindowBuilder::new().with_title("Clipper").with_decorations(false).with_window_icon(tao::window::Icon::from_resource(1, None).ok());
     wb = match kind {
         Kind::Main => wb.with_inner_size(LogicalSize::new(900.0, 620.0)).with_min_inner_size(LogicalSize::new(760.0, 520.0)),
         Kind::Bar => {
