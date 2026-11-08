@@ -28,6 +28,8 @@ pub struct Config {
     pub mic_device: Option<String>,
     pub game_volume: f32,
     pub mic_volume: f32,
+    /// Boost du micro en dB (0, 6, 12 ou 20), appliqué en plus du volume, avec limiteur doux.
+    pub mic_boost_db: f32,
     pub mic_muted: bool,
     pub key_clip: String,
     pub key_rec: String,
@@ -48,6 +50,8 @@ pub struct Config {
     pub overlay_mode: String,
     pub key_overlay: String,
     pub overlay_items: Vec<String>,
+    /// Mesures de l'overlay accompagnées d'une courbe des 15 dernières secondes.
+    pub overlay_graphs: Vec<String>,
     /// "tl", "tr", "bl" ou "br".
     pub overlay_corner: String,
     /// "s", "m" ou "l".
@@ -56,6 +60,8 @@ pub struct Config {
     pub overlay_opacity: f32,
     /// Mise à jour des statistiques de l'overlay, en ms (250, 500, 1000 ou 2000).
     pub overlay_refresh_ms: u32,
+    /// Animation et son du trombone à l'ouverture de la fenêtre.
+    pub intro: bool,
     /// Lancement via la tâche planifiée « Clipper (administrateur) » : admin sans demande UAC.
     pub admin_mode: bool,
 }
@@ -78,6 +84,7 @@ impl Default for Config {
             mic_device: None,
             game_volume: 1.0,
             mic_volume: 1.0,
+            mic_boost_db: 0.0,
             mic_muted: false,
             key_clip: "Alt+KeyX".into(),
             key_rec: "Alt+KeyR".into(),
@@ -93,10 +100,12 @@ impl Default for Config {
             overlay_mode: "hotkey".into(),
             key_overlay: "Alt+KeyF".into(),
             overlay_items: vec!["fps".into(), "frametime".into(), "cpu".into(), "gpu".into()],
+            overlay_graphs: vec![],
             overlay_corner: "tl".into(),
             overlay_size: "m".into(),
             overlay_opacity: 0.7,
             overlay_refresh_ms: 250,
+            intro: true,
             admin_mode: false,
         }
     }

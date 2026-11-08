@@ -31,12 +31,12 @@ impl Win {
 }
 
 fn mime(p: &str) -> &'static str {
-    match p.rsplit('.').next().unwrap_or("") {
+    match p.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
         "html" => "text/html; charset=utf-8",
         "woff2" => "font/woff2",
         "jpg" => "image/jpeg",
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
+        // MOV = même format que MP4 ; annoncé « quicktime », WebView2 refusait de le lire.
+        "mp4" | "mov" => "video/mp4",
         "mkv" => "video/x-matroska",
         _ => "application/octet-stream",
     }
@@ -142,7 +142,7 @@ pub fn open<T: 'static>(
     use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
     let mut wb = WindowBuilder::new().with_title("Clipper").with_decorations(false).with_window_icon(tao::window::Icon::from_resource(1, None).ok());
     wb = match kind {
-        Kind::Main => wb.with_inner_size(LogicalSize::new(900.0, 620.0)).with_min_inner_size(LogicalSize::new(760.0, 520.0)),
+        Kind::Main => wb.with_inner_size(LogicalSize::new(900.0, 620.0)).with_min_inner_size(LogicalSize::new(760.0, 520.0)).with_visible(false),
         Kind::Bar => {
             // Transparente, au premier plan, hors barre des tâches. Placée et focalisée après création (voir place_bar).
             wb.with_inner_size(LogicalSize::new(900.0, 130.0))
@@ -163,9 +163,8 @@ pub fn open<T: 'static>(
         // Le focus revient au jeu à la fermeture (main.rs, close_bar).
         window.set_focus();
     }
-    if kind == Kind::Main {
-        window.set_visible(true);
-    }
+    // Fenêtre principale : cachée jusqu'à la 1re image de la page (message "ready"), sinon WebView2
+    // affiche un écran blanc avant l'intro. main.rs la montre au plus tard après 1,5 s.
     let page = if kind == Kind::Main { "index.html" } else { "bar.html" };
     let web = WebViewBuilder::new()
         .with_custom_protocol("clipper".into(), move |_, req| protocol(&req, &out_dir))
@@ -176,6 +175,9 @@ pub fn open<T: 'static>(
         .with_transparent(kind == Kind::Bar)
         .with_background_color(if kind == Kind::Bar { (0, 0, 0, 0) } else { (20, 25, 19, 255) })
         .with_devtools(cfg!(debug_assertions))
+        // Son de l'intro sans clic préalable. Même réglage pour les deux fenêtres : elles partagent
+        // l'environnement WebView2, qui refuse des options différentes.
+        .with_autoplay(true)
         .with_url(format!("clipper://localhost/{page}"))
         .build(&window)
         .ok()?;

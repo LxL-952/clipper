@@ -337,12 +337,13 @@ static BUSY_DONE: std::sync::Condvar = std::sync::Condvar::new();
 
 /// Adresse de lecture d'un clip, quel que soit l'encodeur : fichier direct, ou copie H.264
 /// (%APPDATA%\Clipper\preview) créée si besoin. HEVC/AV1 : réencodage rapide en 720p max.
-pub fn preview(cfg: &Config, src: &Path) -> Result<String, String> {
+/// `force` : la lecture directe a échoué dans le lecteur -> copie de lecture quoi qu'il arrive.
+pub fn preview(cfg: &Config, src: &Path, force: bool) -> Result<String, String> {
     let pr = probe(cfg, src);
     if pr.video.is_empty() {
         return Err("Aucune piste vidéo lisible dans ce fichier.".into());
     }
-    if let Some(u) = direct_url(src, &pr) {
+    if let Some(u) = direct_url(src, &pr).filter(|_| !force) {
         return Ok(u);
     }
     {
@@ -429,7 +430,7 @@ pub fn prewarm(cfg: &Config, clips: Vec<PathBuf>, done: impl Fn(PathBuf, String)
             n
         };
         let Some(clip) = next else { return };
-        if let Ok(url) = preview(&cfg, &clip) {
+        if let Ok(url) = preview(&cfg, &clip, false) {
             done(clip, url);
         }
     });
@@ -671,6 +672,18 @@ fn purge_if_format_changed(cfg: &Config, native: (u32, u32), dir: &Path, pipes: 
 }
 
 /// Assemble des segments sans réencodage (`-c copy`).
+/// Restes d'un clip interrompu (Clipper fermé pendant l'assemblage) : « Clip … .mp4.part » sans index,
+/// illisible, et la liste « Clip … .txt ». Au démarrage aucun assemblage ne tourne : on les supprime.
+pub fn clean_leftovers(out_dir: &Path) {
+    let ours = |n: &str| n.starts_with("Clip ") || n.starts_with("REC ");
+    for e in std::fs::read_dir(out_dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if ours(&name) && (name.ends_with(".part") || name.ends_with(".txt")) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 pub fn concat(cfg: &Config, segs: &[PathBuf], out: &Path) -> Result<(), String> {
     if segs.is_empty() {
         return Err("Le buffer est encore vide.".into());

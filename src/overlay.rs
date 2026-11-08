@@ -3,7 +3,7 @@
 //! FPS : événements ETW publics « Present » de DXGI (comme PresentMon). Demande les droits admin
 //! ou le groupe « Utilisateurs du journal de performances » ; sinon la ligne FPS affiche « droits ».
 use crate::config::Config;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::collections::VecDeque;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -13,6 +13,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 #[derive(Clone)]
 struct Look {
     items: Vec<String>,
+    graphs: Vec<String>,
     corner: String,
     size: String,
     opacity: f32,
@@ -21,11 +22,25 @@ struct Look {
 static LOOK: Mutex<Option<Look>> = Mutex::new(None);
 static VISIBLE: AtomicBool = AtomicBool::new(false);
 static TEXT: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Clé de chaque ligne de TEXT (« fps », « cpu »…), dans le même ordre : pour retrouver sa courbe.
+static KEYS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Historique des valeurs par mesure, pour les courbes (NaN = pas de valeur à cet instant).
+static HIST: Mutex<Vec<(String, VecDeque<f32>)>> = Mutex::new(Vec::new());
+/// Points d'une courbe : 60 rafraîchissements (15 s à 0,25 s).
+const HIST_LEN: usize = 60;
+
+/// Premier nombre d'une valeur affichée : « 1,4/8,0 Go » -> 1.4, « 61 » -> 61, « — » -> NaN.
+fn leading_number(s: &str) -> f32 {
+    let n: String = s.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit() || *c == ',' || *c == '.').collect();
+    n.replace(',', ".").parse().unwrap_or(f32::NAN)
+}
 /// PID du jeu au premier plan : seuls ses « Present » sont comptés.
 static TARGET: AtomicU32 = AtomicU32::new(0);
 /// Horodatages QPC des derniers « Present » du jeu (1 s max).
 static PRESENTS: Mutex<VecDeque<i64>> = Mutex::new(VecDeque::new());
 static ETW_OK: AtomicBool = AtomicBool::new(false);
+/// Plus grande largeur affichée depuis le dernier apply() (le cadre ne rétrécit pas en cours de route).
+static WIDTH: AtomicI32 = AtomicI32::new(0);
 static ETW_LOGGED: AtomicBool = AtomicBool::new(false);
 /// Diagnostic : « Present » de tous les processus depuis le début de la session ETW.
 static ALL_PRESENTS: AtomicU32 = AtomicU32::new(0);
@@ -47,6 +62,7 @@ static WAKE: Mutex<Vec<std::thread::Thread>> = Mutex::new(Vec::new());
 pub fn apply(cfg: &Config, shown: bool) {
     *LOOK.lock().unwrap() = Some(Look {
         items: cfg.overlay_items.clone(),
+        graphs: cfg.overlay_graphs.clone(),
         corner: cfg.overlay_corner.clone(),
         size: cfg.overlay_size.clone(),
         opacity: cfg.overlay_opacity.clamp(0.2, 1.0),
@@ -54,6 +70,7 @@ pub fn apply(cfg: &Config, shown: bool) {
     REFRESH_MS.store(cfg.overlay_refresh_ms.clamp(100, 5000), Ordering::Relaxed);
     let v = cfg.overlay_mode == "always" || (cfg.overlay_mode == "hotkey" && shown);
     VISIBLE.store(v, Ordering::Relaxed);
+    WIDTH.store(0, Ordering::Relaxed); // taille, éléments ou visibilité changés : largeur recalculée
     let h = OV.load(Ordering::Relaxed);
     if !h.is_null() {
         unsafe { PostMessageW(h, WM_APP, 0, 0) };
@@ -93,6 +110,21 @@ struct Nvml {
     util: unsafe extern "C" fn(*mut core::ffi::c_void, *mut [u32; 2]) -> i32,
     temp: unsafe extern "C" fn(*mut core::ffi::c_void, u32, *mut u32) -> i32,
     mem: unsafe extern "C" fn(*mut core::ffi::c_void, *mut [u64; 3]) -> i32,
+}
+
+/// Températures GPU (NVML) et CPU (capteur Windows) pour le menu de la zone de notification.
+/// Appelé sur le fil principal, au survol de l'icône : sondes chargées au premier survol seulement.
+pub fn temps() -> (Option<u32>, Option<f64>) {
+    thread_local! {
+        static PROBES: (Option<Nvml>, Option<Thermal>) = (Nvml::load(), Thermal::open());
+    }
+    PROBES.with(|(nv, th)| {
+        let gpu = nv.as_ref().and_then(|n| {
+            let mut t = 0u32;
+            (unsafe { (n.temp)(n.dev, 0, &mut t) } == 0).then_some(t)
+        });
+        (gpu, th.as_ref().and_then(Thermal::celsius))
+    })
 }
 
 impl Nvml {
@@ -376,18 +408,29 @@ fn pm_text() -> FpsText {
     if PM_FOR.load(Ordering::Relaxed) != TARGET.load(Ordering::Relaxed) {
         return FpsText::same("0", "—");
     }
-    // 0,5 s suffit : la moyenne vient des durées d'image, pas du nombre de lignes reçues par paquet.
-    let avg_window = (REFRESH_MS.load(Ordering::Relaxed) as f64 / 1000.0).max(0.5);
-    let recent = |f: &&(std::time::Instant, f64, u32)| now.duration_since(f.0).as_secs_f64() <= avg_window;
+    // PresentMon livre ses lignes par paquets (jusqu'à ~1 s d'écart) : une fenêtre « reçues dans les
+    // dernières 0,5 s » était vide entre deux paquets, d'où « 180, 0, 180, 0 ». On moyenne donc les
+    // dernières images reçues, sur 0,5 s de durée d'image cumulée ; « 0 » seulement après 2 s sans image.
+    const STALE_SECS: f64 = 2.0;
+    let live = |f: &&(std::time::Instant, f64, u32)| now.duration_since(f.0).as_secs_f64() <= STALE_SECS;
     // Plusieurs processus (appli + enfant GPU) : celui qui affiche le plus d'images.
     let mut count = std::collections::HashMap::<u32, usize>::new();
-    q.iter().filter(recent).for_each(|f| *count.entry(f.2).or_default() += 1);
-    let Some((&src, &n)) = count.iter().max_by_key(|(_, n)| **n) else { return FpsText::same("0", "—") };
-    if n < 2 {
+    q.iter().filter(live).for_each(|f| *count.entry(f.2).or_default() += 1);
+    let Some((&src, _)) = count.iter().max_by_key(|(_, n)| **n) else { return FpsText::same("0", "—") };
+    let span_ms = (REFRESH_MS.load(Ordering::Relaxed) as f64).max(500.0);
+    let (mut sum, mut n) = (0.0, 0usize);
+    for f in q.iter().rev().filter(|f| f.2 == src) {
+        sum += f.1;
+        n += 1;
+        if sum >= span_ms {
+            break;
+        }
+    }
+    if n < 2 || sum <= 0.0 {
         return FpsText::same("0", "—");
     }
-    let ft = q.iter().filter(recent).filter(|f| f.2 == src).map(|f| f.1).sum::<f64>() / n as f64;
-    let fps = if ft > 0.0 { 1000.0 / ft } else { n as f64 };
+    let ft = sum / n as f64;
+    let fps = 1000.0 / ft;
     let all: Vec<f64> = q.iter().filter(|f| f.2 == src).map(|f| f.1).collect();
     let low = one_percent_low(&all);
     let t = TARGET.load(Ordering::Relaxed);
@@ -419,16 +462,19 @@ fn fps_text() -> FpsText {
         windows_sys::Win32::System::Performance::QueryPerformanceCounter(&mut now);
     }
     let mut q = PRESENTS.lock().unwrap();
-    // Dernière demi-seconde : chiffre réactif (une fenêtre d'1 s avait 1 s de retard).
-    while q.front().is_some_and(|&t| now - t > freq / 2) {
+    // L'ETW temps réel livre ses événements par paquets (~1 s) : la demi-seconde de calcul se mesure
+    // depuis la dernière image reçue, pas depuis maintenant (sinon « 0 » entre deux paquets).
+    // « 0 » seulement après 2 s sans image ; 1 % low sur ces 2 s.
+    while q.front().is_some_and(|&t| now - t > freq * 2) {
         q.pop_front();
     }
     let n = q.len();
     if n < 2 {
         return FpsText::same("0", "—");
     }
-    let span = (q[n - 1] - q[0]) as f64 / freq as f64;
-    let ft = span * 1000.0 / (n - 1) as f64;
+    let last = q[n - 1];
+    let first = q.iter().position(|&t| last - t <= freq / 2).unwrap_or(0).min(n - 2);
+    let ft = (last - q[first]) as f64 * 1000.0 / freq as f64 / (n - 1 - first) as f64;
     let gaps: Vec<f64> = q.iter().zip(q.iter().skip(1)).map(|(a, b)| (b - a) as f64 * 1000.0 / freq as f64).collect();
     FpsText {
         fps: format!("{:.0}", 1000.0 / ft),
@@ -468,11 +514,13 @@ fn refresh(cpu: &mut Cpu, nv: &Option<Nvml>, th: &Option<Thermal>) {
     let (free, total) = crate::tools::ram();
     // Même unité que le Gestionnaire des tâches (1 Go = 1024³ octets).
     let go = |b: u64| format!("{:.1}", b as f64 / 1_073_741_824.0).replace('.', ",");
-    let f = fps_text();
+    // Bureau ou appli fenêtrée : elles ne redessinent qu'au moindre changement, leurs « FPS » sautent
+    // de 0 à 144 sans rien dire. Chiffres d'images seulement pour une appli plein écran (un jeu).
+    let f = if crate::capture::fullscreen_foreground() { fps_text() } else { FpsText::same("—", "—") };
     let rows = items
         .iter()
         .filter_map(|k| {
-            Some(match k.as_str() {
+            Some((k.clone(), match k.as_str() {
                 "fps" => ("FPS".into(), f.fps.clone()),
                 "low1" => ("1% LOW".into(), f.low.clone()),
                 "frametime" => ("IMAGE".into(), f.ft.clone()),
@@ -483,10 +531,26 @@ fn refresh(cpu: &mut Cpu, nv: &Option<Nvml>, th: &Option<Thermal>) {
                 "vram" => ("VRAM".into(), gm.map_or("—".into(), |(u, t)| format!("{}/{} Go", go(u), go(t)))),
                 "ram" => ("RAM".into(), format!("{}/{} Go", go(total - free), go(total))),
                 _ => return None,
-            })
+            }))
         })
-        .collect();
-    *TEXT.lock().unwrap() = rows;
+        .collect::<Vec<(String, (String, String))>>();
+    // Courbes : un point par rafraîchissement, pour chaque mesure affichée.
+    let mut hist = HIST.lock().unwrap();
+    hist.retain(|(k, _)| rows.iter().any(|(r, _)| r == k));
+    for (k, (_, v)) in &rows {
+        let i = hist.iter().position(|(h, _)| h == k).unwrap_or_else(|| {
+            hist.push((k.clone(), VecDeque::with_capacity(HIST_LEN)));
+            hist.len() - 1
+        });
+        let q = &mut hist[i].1;
+        if q.len() == HIST_LEN {
+            q.pop_front();
+        }
+        q.push_back(leading_number(v));
+    }
+    drop(hist);
+    *KEYS.lock().unwrap() = rows.iter().map(|(k, _)| k.clone()).collect();
+    *TEXT.lock().unwrap() = rows.into_iter().map(|(_, r)| r).collect();
 }
 
 // ---------- Fenêtre ----------
@@ -515,23 +579,72 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             SetBkMode(dc, TRANSPARENT as i32);
             let pad = px / 2;
             let row = px + 6;
+            let graphs = LOOK.lock().unwrap().as_ref().map(|l| l.graphs.clone()).unwrap_or_default();
+            let keys = KEYS.lock().unwrap().clone();
+            let gw = graph_width(px, &keys, &graphs);
+            let hist = HIST.lock().unwrap();
             for (i, (k, v)) in TEXT.lock().unwrap().iter().enumerate() {
                 let y = pad + i as i32 * row;
                 let draw = |s: &str, x: i32, right: bool, color: u32| {
                     let t: Vec<u16> = s.encode_utf16().collect();
                     SetTextColor(dc, color);
-                    let mut rr = RECT { left: x, top: y, right: r.right - pad, bottom: y + row };
+                    let mut rr = RECT { left: x, top: y, right: r.right - pad - gw, bottom: y + row };
                     DrawTextW(dc, t.as_ptr(), t.len() as i32, &mut rr, if right { DT_RIGHT } else { DT_LEFT } | DT_SINGLELINE | DT_NOCLIP);
                 };
                 draw(k, pad, false, 0x0086_978D); // gris-vert
                 draw(v, pad, true, if i == 0 && k == "FPS" { 0x002E_7DFF } else { 0x00E2_ECE9 }); // orange signal / texte
+                let key = keys.get(i).map(String::as_str).unwrap_or("");
+                if gw > 0 && graphs.iter().any(|g| g == key) {
+                    if let Some((_, q)) = hist.iter().find(|(h, _)| h == key) {
+                        let (x1, top) = (r.right - pad, y + 3);
+                        draw_graph(dc, RECT { left: x1 - (gw - px / 2), top, right: x1, bottom: top + row - 7 }, q);
+                    }
+                }
             }
+            drop(hist);
             SelectObject(dc, old);
             DeleteObject(font as _);
             EndPaint(h, &ps);
             return 0;
         }
         DefWindowProcW(h, msg, w, l)
+    }
+}
+
+/// Place réservée aux courbes (écart compris) : 0 si aucune mesure affichée n'en a.
+fn graph_width(px: i32, keys: &[String], graphs: &[String]) -> i32 {
+    if keys.iter().any(|k| graphs.contains(k)) { px * 5 + px / 2 } else { 0 }
+}
+
+/// Courbe façon Afterburner : ligne de base discrète, tracé orange, échelle 0 -> max récent.
+unsafe fn draw_graph(dc: HDC, r: RECT, q: &VecDeque<f32>) {
+    unsafe {
+        let base = CreatePen(PS_SOLID, 1, 0x002E_3A2B);
+        let old = SelectObject(dc, base as _);
+        MoveToEx(dc, r.left, r.bottom, std::ptr::null_mut());
+        LineTo(dc, r.right, r.bottom);
+        let max = q.iter().copied().filter(|v| v.is_finite()).fold(0f32, f32::max).max(1.0) * 1.1;
+        let (w, h) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
+        // Les derniers points à droite : la courbe défile vers la gauche.
+        let x0 = r.right as f32 - w * (q.len().saturating_sub(1)) as f32 / (HIST_LEN - 1) as f32;
+        let pts: Vec<(usize, windows_sys::Win32::Foundation::POINT)> = q
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .map(|(i, v)| (i, windows_sys::Win32::Foundation::POINT { x: (x0 + w * i as f32 / (HIST_LEN - 1) as f32) as i32, y: (r.bottom as f32 - v / max * h) as i32 }))
+            .collect();
+        let line = CreatePen(PS_SOLID, 1, 0x002E_7DFF);
+        SelectObject(dc, line as _);
+        // Un trou (valeur absente) coupe la ligne au lieu de relier deux points éloignés.
+        for seg in pts.chunk_by(|a, b| b.0 == a.0 + 1) {
+            let p: Vec<_> = seg.iter().map(|(_, p)| *p).collect();
+            if p.len() > 1 {
+                Polyline(dc, p.as_ptr(), p.len() as i32);
+            }
+        }
+        SelectObject(dc, old);
+        DeleteObject(base as _);
+        DeleteObject(line as _);
     }
 }
 
@@ -559,7 +672,8 @@ fn measure(h: HWND, px: i32) -> i32 {
         SelectObject(dc, old);
         DeleteObject(font as _);
         ReleaseDC(h, dc);
-        px / 2 * 2 + kl + px + vl
+        let graphs = LOOK.lock().unwrap().as_ref().map(|l| l.graphs.clone()).unwrap_or_default();
+        px / 2 * 2 + kl + px + vl + graph_width(px, &KEYS.lock().unwrap(), &graphs)
     }
 }
 
@@ -567,7 +681,11 @@ fn measure(h: HWND, px: i32) -> i32 {
 fn place(h: HWND, rows: usize, look: &Look) {
     unsafe {
         let px = font_px(&look.size);
-        let (w, hgt) = (measure(h, px), px / 2 * 2 + rows as i32 * (px + 6));
+        // Largeur qui ne rétrécit jamais tant que l'overlay reste affiché avec les mêmes réglages :
+        // « 3 » puis « 144 » ne fait plus sauter le cadre à chaque rafraîchissement.
+        let m = measure(h, px);
+        let w = WIDTH.fetch_max(m, Ordering::Relaxed).max(m);
+        let hgt = px / 2 * 2 + rows as i32 * (px + 6);
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
         GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &mut mi);
@@ -742,6 +860,15 @@ fn etw_thread() {
 
 #[cfg(test)]
 mod presentmon_csv {
+    #[test]
+    fn graph_reads_first_number_of_each_value() {
+        assert_eq!(super::leading_number("1,4/8,0 Go"), 1.4);
+        assert_eq!(super::leading_number("61"), 61.0);
+        assert_eq!(super::leading_number("6,9 ms"), 6.9);
+        assert!(super::leading_number("—").is_nan());
+        assert!(super::leading_number("n/d").is_nan());
+    }
+
     #[test]
     fn one_percent_low_is_mean_of_slowest_frames() {
         // 99 images à 10 ms (100 FPS) et 1 à-coup de 50 ms : 1 % low = 20 FPS.

@@ -7,6 +7,7 @@ mod drivers;
 mod elevate;
 mod overlay;
 mod tools;
+mod tray;
 mod ui;
 
 use config::Config;
@@ -17,13 +18,15 @@ use std::sync::Arc;
 use std::time::Instant;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::menu::MenuEvent;
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
 pub enum UserEvent {
     Hotkey(u32),
     Menu(tray_icon::menu::MenuId),
     TrayClick,
+    /// Souris sur l'icône : températures du menu rafraîchies.
+    TrayHover,
     Ipc(ui::Kind, String),
     /// Message à envoyer à toutes les fenêtres ouvertes (`window.__on`).
     Push(Value),
@@ -287,6 +290,14 @@ impl App {
         if w.is_none() {
             log("WebView2 indisponible : impossible d'ouvrir la fenêtre");
         }
+        if kind == ui::Kind::Main && w.is_some() {
+            // Filet de sécurité : la page n'a pas dit "ready" (WebView2 lent, erreur JS) -> on montre quand même.
+            let p = self.proxy.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let _ = p.send_event(UserEvent::Ipc(ui::Kind::Main, r#"{"cmd":"ready"}"#.into()));
+            });
+        }
         match kind {
             ui::Kind::Main => self.main = w,
             ui::Kind::Bar => self.bar = w,
@@ -353,6 +364,22 @@ impl App {
                 let items: Vec<(String, Value)> = m["values"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect();
                 self.set_many(&items);
             }
+            // 1re image peinte : la fenêtre apparaît directement sur l'intro, sans écran blanc.
+            "ready" => {
+                if let Some(w) = self.main.as_ref().filter(|w| !w.window.is_visible()) {
+                    w.window.set_visible(true);
+                    w.window.set_focus();
+                    // L'intro attend ce signal : sinon elle tournait déjà, fenêtre encore cachée.
+                    w.push(&json!({"type": "shown"}).to_string());
+                }
+            }
+            // Vidéo en grand écran : la fenêtre suit (sinon la vidéo ne remplit que la fenêtre).
+            "fullscreen" => {
+                if let Some(w) = &self.main {
+                    let on = m["on"].as_bool().unwrap_or(false);
+                    w.window.set_fullscreen(on.then_some(tao::window::Fullscreen::Borderless(None)));
+                }
+            }
             "clip" => self.clip(),
             "rec" => self.toggle_rec(),
             "open_settings" => self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str)),
@@ -393,8 +420,8 @@ impl App {
                 if p.parent() != Some(self.cfg.out_dir.as_path()) {
                     return log("lecture refusée hors du dossier de sortie");
                 }
-                let c = self.cfg.clone();
-                self.bg(move |_| match capture::preview(&c, &p) {
+                let (c, force) = (self.cfg.clone(), m["force"].as_bool().unwrap_or(false));
+                self.bg(move |_| match capture::preview(&c, &p, force) {
                     Ok(url) => json!({"type": "preview", "path": p, "url": url}),
                     Err(e) => json!({"type": "preview", "path": p, "error": e}),
                 });
@@ -522,7 +549,7 @@ impl App {
     /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
     fn set_many(&mut self, items: &[(String, Value)]) {
         // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
+        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
         let mut restart = false;
         let reprobe = items.iter().any(|(k, _)| k == "monitor");
@@ -625,6 +652,8 @@ fn main() {
     let native = capture::native_size(&cfg).unwrap_or((1920, 1080));
     let monitors = capture::monitors(&cfg);
     log(&format!("encodeurs {encoders:?}, choisi {}, écran {native:?}", cfg.encoder));
+    // Une seule fois au lancement : jamais pendant qu'un clip s'assemble.
+    capture::clean_leftovers(&cfg.out_dir);
     let (buffer, audio) = App::start_capture(&cfg, native);
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -652,8 +681,24 @@ fn main() {
     }
     let proxy = event_loop.create_proxy();
     TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-        if let TrayIconEvent::DoubleClick { .. } = e {
-            let _ = proxy.send_event(UserEvent::TrayClick);
+        match e {
+            TrayIconEvent::DoubleClick { .. } => drop(proxy.send_event(UserEvent::TrayClick)),
+            TrayIconEvent::Enter { .. } => {
+                let _ = proxy.send_event(UserEvent::TrayHover);
+                // Menu peut-être ouvert : températures relues chaque seconde pendant 20 s, puis plus rien.
+                static TICKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !TICKING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let p = proxy.clone();
+                    std::thread::spawn(move || {
+                        for _ in 0..20 {
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                            let _ = p.send_event(UserEvent::TrayHover);
+                        }
+                        TICKING.store(false, std::sync::atomic::Ordering::Relaxed);
+                    });
+                }
+            }
+            _ => {}
         }
     }));
 
@@ -708,10 +753,9 @@ fn main() {
         proxy: event_loop.create_proxy(),
     };
 
-    let open = MenuItem::new("Ouvrir", true, None);
-    let quit = MenuItem::new("Quitter", true, None);
-    let menu = Menu::new();
-    menu.append_items(&[&open, &quit]).expect("menu");
+    let label = |k: &Option<HotKey>| k.as_ref().map(pretty).unwrap_or_default();
+    let tm = tray::TrayMenu::new(&label(&app.keys.clip), &label(&app.keys.rec));
+    let mut shown_rec = false;
     let mut tray = None;
 
     event_loop.run(move |event, target, flow| {
@@ -721,7 +765,7 @@ fn main() {
                 tray = TrayIconBuilder::new()
                     .with_tooltip("Clipper")
                     .with_icon(tray_icon_image())
-                    .with_menu(Box::new(menu.clone()))
+                    .with_menu(Box::new(tm.menu.clone()))
                     .build()
                     .ok();
                 if !tray_start {
@@ -785,11 +829,19 @@ fn main() {
                 }
             }
             Event::UserEvent(UserEvent::TrayClick) => app.open(ui::Kind::Main, target, None),
+            Event::UserEvent(UserEvent::TrayHover) => tm.refresh_temps(),
             Event::UserEvent(UserEvent::Menu(m)) => {
-                if m == quit.id() {
+                if m == *tm.quit.id() {
                     let _ = app.proxy.send_event(UserEvent::Quit);
-                } else if m == open.id() {
+                } else if m == *tm.open.id() {
                     app.open(ui::Kind::Main, target, None);
+                } else if m == *tm.clip.id() {
+                    app.clip();
+                } else if m == *tm.rec.id() {
+                    app.toggle_rec();
+                } else if m == *tm.ram.id() {
+                    // Même chemin que le bouton de l'onglet Outils (autorisation administrateur demandée).
+                    let _ = app.proxy.send_event(UserEvent::Ipc(ui::Kind::Main, r#"{"cmd":"ram_clean"}"#.into()));
                 }
             }
             Event::UserEvent(UserEvent::Quit) => {
@@ -802,6 +854,10 @@ fn main() {
                 *flow = ControlFlow::Exit;
             }
             _ => {}
+        }
+        if app.recording.is_some() != shown_rec {
+            shown_rec = app.recording.is_some();
+            tm.set_recording(shown_rec);
         }
     });
 }

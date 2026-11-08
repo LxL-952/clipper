@@ -132,7 +132,9 @@ impl Audio {
     /// Les trous (silence, micro absent) sont comblés par des zéros : l'audio ne dérive jamais.
     /// Le même morceau part vers chaque ffmpeg connecté (buffer et, pendant un REC, la 2e capture).
     fn mix_loop(&self, cfg: &Config) {
-        let (gv, mv) = (cfg.game_volume, if cfg.mic_muted { 0.0 } else { cfg.mic_volume });
+        // Boost du micro en dB, en plus du volume (+6 dB = x2, +20 dB = x10).
+        let boost = 10f32.powf(cfg.mic_boost_db.clamp(0.0, 30.0) / 20.0);
+        let (gv, mv) = (cfg.game_volume, if cfg.mic_muted { 0.0 } else { cfg.mic_volume * boost });
         let epoch = Instant::now();
         let mut sent = 0usize;
         while !self.stop.load(Ordering::Relaxed) {
@@ -159,7 +161,10 @@ impl Audio {
                 v.resize(n, 0.0);
                 v
             };
-            let (g, m) = (take(&self.game, gv), take(&self.mic, mv));
+            let (g, mut m) = (take(&self.game, gv), take(&self.mic, mv));
+            if boost > 1.0 {
+                m.iter_mut().for_each(|s| *s = soft_limit(*s));
+            }
             let bytes = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
             let mut slots = self.slots.lock().unwrap();
             if slots.iter().all(Vec::is_empty) {
@@ -219,6 +224,14 @@ impl Audio {
         });
         names
     }
+}
+
+/// Limiteur doux pour le micro boosté : intact jusqu'à 0,9, puis les crêtes sont arrondies vers 1,0
+/// au lieu d'être écrêtées net (pas de grésillement quand on crie).
+fn soft_limit(s: f32) -> f32 {
+    const KNEE: f32 = 0.9;
+    let a = s.abs();
+    if a <= KNEE { s } else { s.signum() * (KNEE + (1.0 - KNEE) * ((a - KNEE) / (1.0 - KNEE)).tanh()) }
 }
 
 fn create_pipe(name: &str) -> Option<windows_sys::Win32::Foundation::HANDLE> {
@@ -283,4 +296,17 @@ pub fn tracks(cfg: &Config) -> Vec<Track> {
 
 pub fn pipe_count(cfg: &Config) -> usize {
     tracks(cfg).len()
+}
+
+#[cfg(test)]
+mod boost {
+    #[test]
+    fn soft_limit_keeps_quiet_samples_and_never_clips() {
+        assert_eq!(super::soft_limit(0.5), 0.5);
+        assert_eq!(super::soft_limit(-0.9), -0.9);
+        for s in [1.0f32, 2.0, 10.0, -5.0] {
+            let y = super::soft_limit(s);
+            assert!(y.abs() <= 1.0 && y.abs() > 0.9 && y.signum() == s.signum());
+        }
+    }
 }

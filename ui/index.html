@@ -121,8 +121,12 @@ svg.i{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .ro .sc{letter-spacing:.11em}
 .ro .val{font-family:var(--mono);font-size:15px;font-weight:500;color:var(--text);text-align:right}
 .ro .val small{font-size:11px;color:var(--text-3)}
-.sw-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
-.sw-row+.sw-row{margin-top:16px}
+/* Rangée à interrupteur : texte à gauche, interrupteur calé sur le titre (pas sur le milieu du bloc,
+   qui varie avec la longueur de la description), filet entre deux rangées. */
+.sw-row{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}
+.sw-row>.sw{margin:-3px 0 0}
+.sw-row+.sw-row{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.sw-row~details.more:first-of-type{margin-top:18px}
 .sw-row .lbl{display:grid;gap:2px}
 .sw-row .lbl>span:first-child{font-size:13px;font-weight:500}
 
@@ -266,6 +270,7 @@ kbd{font:600 10px/1 var(--sans);letter-spacing:.06em;color:var(--text-3);padding
 /* stats */
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{position:relative;display:inline-flex;align-items:center;gap:7px;min-height:32px;padding:0 10px;border:1px solid var(--line-2);border-radius:5px;font-size:12.5px;color:var(--text-2);cursor:pointer}
+.chip.off{opacity:.4;cursor:default}
 .chip input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
 .chip::before{content:"";width:10px;height:10px;border-radius:2px;border:1px solid var(--line-2);background:var(--well);flex:none}
 .chip:has(input:checked){color:var(--text);border-color:#56634f;background:var(--raise)}
@@ -385,20 +390,22 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
   :not(#intro,#intro *),:not(#intro *)::before,:not(#intro *)::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
 /* ---------- intro : le trombone se clipse sur la page ---------- */
-#intro{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:var(--ground);animation:in-out .35s var(--ease) 1.05s forwards;cursor:pointer}
+#intro{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:var(--ground);animation:in-out .5s var(--ease) 2.2s forwards;cursor:pointer}
 #intro .stage{position:relative;width:150px;height:190px}
-#intro .sheet{position:absolute;inset:34px 0 0;border-radius:10px;background:var(--panel);border:1px solid var(--line-2);box-shadow:0 18px 40px rgba(0,0,0,.45);transform-origin:50% 0;animation:in-sheet .5s var(--ease) both,in-press .25s ease-out .52s}
+#intro .sheet{position:absolute;inset:34px 0 0;border-radius:10px;background:var(--panel);border:1px solid var(--line-2);box-shadow:0 18px 40px rgba(0,0,0,.45);transform-origin:50% 0;animation:in-sheet .8s var(--ease) both,in-press .35s ease-out 1.09s}
 #intro .sheet i{display:block;height:6px;margin:18px 18px 0;border-radius:3px;background:var(--raise)}
 #intro .sheet i+i{margin-top:10px;width:58%}
 #intro .sheet i+i+i{width:72%}
-#intro .clip{position:absolute;left:50%;top:0;width:64px;height:64px;margin-left:-32px;overflow:visible;transform-origin:50% 60%;animation:in-clip .62s cubic-bezier(.3,1.5,.5,1) .12s both}
-#intro .flash{position:absolute;left:50%;top:34px;width:90px;height:90px;margin:-45px 0 0 -45px;border-radius:50%;border:2px solid var(--signal);opacity:0;animation:in-flash .45s ease-out .55s}
-#intro .word{position:absolute;left:0;right:0;bottom:-44px;text-align:center;font-weight:700;font-size:20px;letter-spacing:-.01em;opacity:0;animation:in-word .4s var(--ease) .62s forwards}
+#intro .clip{position:absolute;left:50%;top:0;width:64px;height:64px;margin-left:-32px;overflow:visible;transform-origin:50% 60%;animation:in-clip 1.2s cubic-bezier(.3,1.5,.5,1) .25s both}
+#intro .flash{position:absolute;left:50%;top:34px;width:90px;height:90px;margin:-45px 0 0 -45px;border-radius:50%;border:2px solid var(--signal);opacity:0;animation:in-flash .7s ease-out 1.09s}
+#intro .word{position:absolute;left:0;right:0;bottom:-44px;text-align:center;font-weight:700;font-size:20px;letter-spacing:-.01em;opacity:0;animation:in-word .6s var(--ease) 1.3s forwards}
 @keyframes in-sheet{from{opacity:0;transform:translateY(16px) scale(.96)}}
 @keyframes in-press{50%{transform:scaleY(.985)}}
 @keyframes in-clip{0%{opacity:0;transform:translateY(-120px) rotate(-22deg);clip-path:polygon(0 0,100% 0,100% 100%,66% 100%,66% 100%,34% 100%,34% 100%,0 100%)}35%{opacity:1}62%{clip-path:polygon(0 0,100% 0,100% 100%,66% 100%,66% 100%,34% 100%,34% 100%,0 100%)}70%,100%{transform:none;clip-path:polygon(0 0,100% 0,100% 100%,66% 100%,66% 53%,34% 53%,34% 100%,0 100%)}}
 @keyframes in-flash{0%{opacity:.9;transform:scale(.3)}100%{opacity:0;transform:scale(1.4)}}
 @keyframes in-word{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+/* En pause tant que la fenêtre n'est pas visible (classe .go posée au message "shown"). */
+#intro:not(.go),#intro:not(.go) *{animation-play-state:paused}
 @keyframes in-out{to{opacity:0;visibility:hidden;transform:scale(1.03)}}
 </style>
 </head>
@@ -589,7 +596,11 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
       </div>
       <p class="hint indent" id="ovHint" style="margin-top:6px"></p>
       <div class="stack" id="ovSub" style="margin-top:12px;gap:12px">
-        <div class="chips" role="group" aria-label="Mesures affichées" id="chips"></div>
+        <div class="f"><span class="lab" id="msL">Mesures</span>
+          <div class="chips" role="group" aria-labelledby="msL" id="chips"></div></div>
+        <div class="f"><span class="lab" id="grL">Graphique</span>
+          <div class="chips" role="group" aria-labelledby="grL" id="gchips"></div></div>
+        <p class="hint indent" style="margin-top:-4px">Courbe des 15 dernières secondes à côté de la valeur, comme Afterburner.</p>
         <div class="f"><span class="lab" id="cnL">Coin</span>
           <div class="corners" role="radiogroup" aria-labelledby="cnL">
             <label style="--jx:start;--jy:start"><input type="radio" name="overlay_corner" data-k="overlay_corner" value="tl" aria-label="En haut à gauche"></label>
@@ -615,6 +626,14 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
           <div class="fader"><div class="fader-w"><input type="range" id="op" data-k="overlay_opacity" data-t="n" data-div="100" min="0" max="100" step="5"><div class="ruler" aria-hidden="true"></div></div><output for="op" id="opo"></output></div></div>
         <p class="note"><svg class="i" aria-hidden="true"><use href="#i-lock"/></svg><span><b>FPS et temps d'image demandent les droits administrateur</b> (ou le groupe « Utilisateurs du journal de performances »). Sans eux, seuls CPU, GPU, températures et mémoire s'affichent.</span></p>
         <p class="hint">Fenêtre Windows séparée, rien n'est injecté dans le jeu. Invisible en plein écran exclusif. Pas incrustée dans les clips.</p>
+      </div>
+    </section>
+
+    <section class="grp" aria-labelledby="g-ui">
+      <h3 id="g-ui"><span class="sc">Interface</span></h3>
+      <div class="sw-row">
+        <span class="lbl"><span id="l-intro">Intro à l'ouverture</span><span class="hint">Le trombone se clipse sur la page, avec son bruitage (environ 3 s, un clic la passe).</span></span>
+        <input type="checkbox" class="sw" role="switch" data-k="intro" aria-labelledby="l-intro">
       </div>
     </section>
 
@@ -700,6 +719,16 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
         <div class="f"><label class="lab" for="micDev"><span class="lab-i"><svg class="i" aria-hidden="true"><use href="#i-mic"/></svg>Entrée</span></label><select class="sel" id="micDev" data-k="mic_device" data-t="null"></select></div>
         <div class="f"><label class="lab" for="mv">Volume</label>
           <div class="fader"><div class="fader-w"><input type="range" id="mv" data-k="mic_volume" data-t="n" data-div="100" min="0" max="100" step="1"><div class="ruler" aria-hidden="true"></div></div><output for="mv" id="mvo"></output></div></div>
+        <div class="f">
+          <span class="lab" id="mbL">Boost</span>
+          <div class="seg" role="radiogroup" aria-labelledby="mbL">
+            <label><input type="radio" name="mic_boost_db" data-k="mic_boost_db" data-t="n" value="0">Aucun</label>
+            <label><input type="radio" name="mic_boost_db" data-k="mic_boost_db" data-t="n" value="6">+6 dB</label>
+            <label><input type="radio" name="mic_boost_db" data-k="mic_boost_db" data-t="n" value="12">+12 dB</label>
+            <label><input type="radio" name="mic_boost_db" data-k="mic_boost_db" data-t="n" value="20">+20 dB</label>
+          </div>
+        </div>
+        <p class="hint indent" style="margin-top:6px">Pour un micro trop faible, en plus du volume. Les cris sont arrondis au lieu de grésiller.</p>
       </section>
     </div>
   </div>
@@ -853,7 +882,35 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 
 <script>
 /* ---------- intro : retirée à la fin (ou au clic), jamais rejouée dans la même fenêtre ---------- */
-(()=>{const n=document.getElementById('intro');if(!n)return;const done=()=>n.remove();n.addEventListener('animationend',e=>{if(e.animationName==='in-out')done()});n.addEventListener('click',done);setTimeout(done,1800)})();
+/* Page prête : la fenêtre (cachée jusque-là) s'affiche directement sur l'intro, sans écran blanc. */
+const ready=()=>{try{window.ipc.postMessage('{"cmd":"ready"}')}catch(e){}};
+document.readyState==='loading'?document.addEventListener('DOMContentLoaded',ready):ready();
+(()=>{const n=document.getElementById('intro');if(!n)return;
+  if(((window.__INIT__||{}).config||{}).intro===false){n.remove();return}   // réglage Avancé > Intro
+  const done=()=>n.remove();n.addEventListener('animationend',e=>{if(e.animationName==='in-out')done()});n.addEventListener('click',done);
+  // Départ quand Clipper a rendu la fenêtre visible (message "shown") : animation et son ensemble.
+  window.__introGo=()=>{if(n.classList.contains('go'))return;n.classList.add('go');introSound();setTimeout(done,3200)};
+  setTimeout(window.__introGo,3000);   // filet : jamais bloqué sur le trombone
+})();
+/* Son de l'intro, synthétisé (aucun fichier) et calé sur l'animation :
+   0,25 s chute du trombone (souffle qui monte), 1,09 s il se clipse (claquement + tintement métallique),
+   1,3 s le nom apparaît (deux notes douces). */
+function introSound(){try{
+  const A=new AudioContext(),t0=A.currentTime+.02,out=A.createGain();out.gain.value=.55;out.connect(A.destination);
+  const noise=d=>{const b=A.createBuffer(1,Math.ceil(A.sampleRate*d),A.sampleRate),c=b.getChannelData(0);for(let i=0;i<c.length;i++)c[i]=Math.random()*2-1;const s=A.createBufferSource();s.buffer=b;return s};
+  {const s=noise(.9),f=A.createBiquadFilter(),g=A.createGain();f.type='bandpass';f.Q.value=1.2;
+   f.frequency.setValueAtTime(400,t0+.25);f.frequency.exponentialRampToValueAtTime(2600,t0+1.05);
+   g.gain.setValueAtTime(0,t0+.25);g.gain.linearRampToValueAtTime(.16,t0+.9);g.gain.exponentialRampToValueAtTime(.001,t0+1.1);
+   s.connect(f).connect(g).connect(out);s.start(t0+.25);s.stop(t0+1.15)}
+  {const s=noise(.04),f=A.createBiquadFilter(),g=A.createGain();f.type='highpass';f.frequency.value=2500;
+   g.gain.setValueAtTime(.8,t0+1.09);g.gain.exponentialRampToValueAtTime(.001,t0+1.125);s.connect(f).connect(g).connect(out);s.start(t0+1.09)}
+  [[2350,.2],[3720,.11],[5100,.05]].forEach(([hz,v])=>{const o=A.createOscillator(),g=A.createGain();o.frequency.value=hz;
+   g.gain.setValueAtTime(v,t0+1.09);g.gain.exponentialRampToValueAtTime(.001,t0+1.34);o.connect(g).connect(out);o.start(t0+1.09);o.stop(t0+1.36)});
+  [[660,0],[990,.07]].forEach(([hz,dt])=>{const o=A.createOscillator(),g=A.createGain(),t=t0+1.3+dt;o.frequency.value=hz;
+   g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.07,t+.02);g.gain.exponentialRampToValueAtTime(.001,t+.6);o.connect(g).connect(out);o.start(t);o.stop(t+.65)});
+  setTimeout(()=>A.close(),3200);
+}catch(e){}}
+
 (()=>{
 'use strict';
 /* ---------- mode démo (navigateur, sans Rust) ---------- */
@@ -918,7 +975,7 @@ const val=k=>{const v=get(k);return v===undefined&&k in OV_DEF?OV_DEF[k]:v};
 /* Réglages : en attente jusqu'à « Enregistrer » (une seule relance de la capture). */
 let S=C,pending={},hkSaved=null;
 const NOW=['mic_muted'];
-const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
+const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','overlay_graphs','intro','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
 function setCfg(key,value){
   if(key.includes('.')){const[a,b]=key.split('.');value={...C[a],[b]:value};key=a}
   C={...C,[key]:value};
@@ -977,6 +1034,7 @@ $('#chipNote').hidden=GPUS.length<2;
 const ITEMS=[["fps","FPS"],["low1","1% low"],["frametime","Temps d'image"],["cpu","CPU"],["gpu","GPU"],["cpu_temp","Temp. CPU"],["gpu_temp","Temp. GPU"],["vram","VRAM"],["ram","RAM"]];
 const OVV={fps:["FPS","142",1],low1:["1% LOW","98"],frametime:["IMAGE","7,0 ms"],cpu:["CPU","23 %"],gpu:["GPU","87 %"],cpu_temp:["CPU °C","68"],gpu_temp:["GPU °C","71"],vram:["VRAM","5,1/8 Go"],ram:["RAM","11/16 Go"]};
 $('#chips').innerHTML=ITEMS.map(([k,l])=>`<label class="chip"><input type="checkbox" data-item="${k}">${l}</label>`).join('');
+$('#gchips').innerHTML=ITEMS.map(([k,l])=>`<label class="chip"><input type="checkbox" data-graph="${k}">${l}</label>`).join('');
 if(I.cpu_temp===false){const x=$('[data-item=cpu_temp]');x.parentElement.title='Capteur absent : ce processeur ne donne pas sa température à Windows sans pilote spécial (Clipper n\'en installe aucun).'}
 $('#autoSw').checked=!!I.autostart;
 
@@ -1003,6 +1061,7 @@ addEventListener('keydown',e=>{if(!hkWait)return;e.preventDefault();
 /* ---------- liaison des contrôles ---------- */
 document.addEventListener('change',e=>{const t=e.target;
   if(t.dataset.item){setCfg('overlay_items',$$('[data-item]').filter(x=>x.checked).map(x=>x.dataset.item));return}
+  if(t.dataset.graph){setCfg('overlay_graphs',$$('[data-graph]').filter(x=>x.checked).map(x=>x.dataset.graph));return}
   if(t.dataset.track){const on=new Set(C.audio_tracks||[]);t.checked?on.add(t.dataset.track):on.delete(t.dataset.track);setCfg('audio_tracks',TRACKS.filter(x=>on.has(x)));return}
   if(t.id==='autoSw'){send({cmd:'autostart',value:t.checked});return}
   if(t.dataset.chip){const id=t.dataset.chip;setCfg('encode_chip',id);
@@ -1043,6 +1102,7 @@ function render(){
     else if(el.type==='range'){if(document.activeElement!==el){el.value=v*(+el.dataset.div||1);paint(el);outputs(el)}}
     else if(el.tagName==='SELECT')el.value=v==null?'':String(v)});
   $$('[data-item]').forEach(x=>x.checked=(C.overlay_items||[]).includes(x.dataset.item));
+  $$('[data-graph]').forEach(x=>{x.checked=(C.overlay_graphs||[]).includes(x.dataset.graph);x.disabled=!(C.overlay_items||[]).includes(x.dataset.graph);x.parentElement.classList.toggle('off',x.disabled)});
   if(I.cpu_temp===false){const x=$('[data-item=cpu_temp]');x.disabled=!x.checked}
   $$('input[name=driver_branch]').forEach(x=>x.checked=x.value===C.driver_branch);
   calc();
@@ -1142,7 +1202,15 @@ function onPreview(m){
   if(m.url)showV(m.url);
   else{$('#vph').textContent='';$('#vErrT').textContent=m.error||'';$('#vErr').hidden=false}
 }
-$('#vp').addEventListener('error',()=>{if($('#vp').getAttribute('src')){$('#vErrT').textContent='';$('#vErr').hidden=false}});
+/* Lecture directe ratée (ancien format, fichier particulier) : on demande une copie de lecture, une fois. */
+const vRetried=new Set();
+$('#vp').addEventListener('error',()=>{const vp=$('#vp'),u=vp.getAttribute('src');if(!u)return;
+  if(u.startsWith('/video?')&&vSel&&!vRetried.has(vSel)){vRetried.add(vSel);delete vSrc[vSel];vp.removeAttribute('src');vp.load();vp.hidden=true;$('#vph').hidden=false;$('#vph').textContent='Préparation d\'une copie lisible…';send({cmd:'video_preview',path:vSel,force:true});return}
+  $('#vErrT').textContent='';$('#vErr').hidden=false});
+/* Grand écran : double-clic sur la vidéo (ou bouton du lecteur) ; la fenêtre de Clipper passe en plein écran avec. */
+$('#vp').addEventListener('dblclick',()=>{document.fullscreenElement?document.exitFullscreen():$('#vp').requestFullscreen().catch(()=>{})});
+document.addEventListener('fullscreenchange',()=>send({cmd:'fullscreen',on:!!document.fullscreenElement}));
+
 $('#vSide').addEventListener('click',e=>{const b=e.target.closest('[data-va]');if(b&&vSel)send({cmd:'video_action',action:b.dataset.va,path:vSel})});
 $('[data-va-empty]').onclick=()=>send({cmd:'video_action',action:'open_folder',path:C.out_dir});
 $('#vRefresh').onclick=()=>send({cmd:'videos'});
@@ -1216,6 +1284,7 @@ function toast(m){const t=document.createElement('div');t.className='toast';t.se
 
 /* ---------- messages de Rust ---------- */
 window.__on=m=>{switch(m&&m.type){
+  case'shown':window.__introGo&&window.__introGo();break;
   case'config':S=m.config;C={...m.config,...pending};render();askFree();adminUi();break;
   case'state':recOn=!!m.recording;recS=+m.rec_secs||0;recUi();break;
   case'toast':toast(m);if(tab==='videos'&&m.kind!=='error')send({cmd:'videos'});break;
