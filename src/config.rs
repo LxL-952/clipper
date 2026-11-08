@@ -62,6 +62,8 @@ pub struct Config {
     pub overlay_refresh_ms: u32,
     /// Animation et son du trombone à l'ouverture de la fenêtre.
     pub intro: bool,
+    /// Sons de confirmation : début et fin de REC, clip enregistré, erreur.
+    pub sounds: bool,
     /// Au lancement, demander à GitHub s'il existe une version plus récente (une requête).
     pub update_check: bool,
     /// Vidéos supprimées définitivement (sans Corbeille).
@@ -114,6 +116,7 @@ impl Default for Config {
             overlay_opacity: 0.7,
             overlay_refresh_ms: 250,
             intro: true,
+            sounds: true,
             update_check: true,
             delete_permanent: false,
             delete_confirm: true,
