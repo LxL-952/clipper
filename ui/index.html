@@ -368,7 +368,9 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 .ci input{width:16px;height:16px;margin:0;accent-color:var(--signal);grid-row:1/3;cursor:pointer}
 .ci .nm{font-size:13px;font-weight:500;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ci .sz{font-family:var(--mono);font-size:13px;text-align:right}
-.ci .sub{grid-column:2/4;font-size:12px;color:var(--text-3)}
+.ci .sub{grid-column:2/4;font-size:12px;color:var(--text-3);display:flex;align-items:center;justify-content:space-between;gap:10px}
+.btn.sm{min-height:24px;padding:0 8px;font-size:12px;gap:5px}
+.btn.sm .i{width:13px;height:13px}
 .ci .w{grid-column:2/4;font-size:12px;color:var(--warn);display:flex;gap:7px;align-items:start}
 .ci .w .i{width:14px;height:14px;margin-top:2px}
 .tag{font:600 10px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;padding:3px 5px 2px;border-radius:3px;border:1px solid var(--line-2);color:var(--text-2)}
@@ -685,7 +687,7 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
             <label><input type="radio" name="stretch" data-k="stretch" value="16:10">Étirer en 16:10</label>
           </div>
           <p class="hint">Si vous jouez en <span class="n">1440×1080</span> étiré, le clip est élargi pour ressembler à ce que vous voyez. Lisible partout (Discord, YouTube).</p>
-          <p class="note" id="strWarn" hidden><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span><b>Coût processeur.</b> L'étirement redimensionne chaque image sur le processeur.</span></p>
+          <p class="note" id="strWarn" hidden><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span><b>Sans coût, sans perte.</b> L'image garde tous ses pixels ; le fichier est marqué 16:9 et les lecteurs (VLC, Premiere, navigateur, Discord) l'étirent à l'affichage.</span></p>
         </div>
       </details>
       <details class="more">
@@ -1151,7 +1153,7 @@ function render(){
   $('#natTxt').innerHTML=above.length?`${above.map(c=>c+'p').join(' et ')} ${above.length>1?'sont grisés : ils dépassent':'est grisé : il dépasse'} votre écran (<span class="n">${NAT[0]}×${NAT[1]}</span>). Agrandir n'ajoute aucun détail. ${nativeClass}p garde le format de l'écran, soit <span class="n">${outDims(nativeClass).join('×')}</span> natif, sans copie GPU.`:`Toutes les résolutions tiennent dans votre écran (<span class="n">${NAT[0]}×${NAT[1]}</span>). ${nativeClass}p = taille native, sans copie GPU.`;
   const scaled=C.clip.height!==nativeClass;
   $('#scaleWarn').hidden=!scaled;
-  $('#scaleTxt').innerHTML='<b>Redimensionnement sur le processeur.</b> Une résolution autre que '+nativeClass+'p (taille de l\'écran) fait passer chaque image par le processeur : quelques % de CPU en plus.';
+  $('#scaleTxt').innerHTML='<b>Passage par le processeur.</b> À '+nativeClass+'p (taille de l\'écran), l\'image reste sur la carte graphique du début à la fin. Une autre résolution oblige à copier chaque image vers le processeur pour la réduire : quelques % de CPU en plus.';
   $('#encWarn').hidden=C.encoder!=='libx264';
   const m=Math.floor(C.buffer_secs/60),s=C.buffer_secs%60;
   $('#tlv').textContent=s?(m?m+' min ':'')+s+' s':m+' min';
@@ -1291,6 +1293,7 @@ $('#dlNo').onclick=()=>{$('#dlConfirm').hidden=true;$('#dlTop').hidden=false};
 $('#dlYes').onclick=()=>{$('#dlConfirm').hidden=true;$('#dlProg').hidden=false;prog({done:0,total:drv&&drv.bytes||0,phase:'download'});send({cmd:'driver_install'})};
 function prog(p){
   const ph={download:0,verify:1,install:2,done:3}[p.phase];
+  if(p.phase==='done')setTimeout(checkDriver,800);   // version installée relue : l'onglet passe à « à jour »
   if(p.phase==='error'){$('#dlProg').hidden=true;$('#dlTop').hidden=false;$('#dErr').hidden=false;$('#dErrT').textContent='Installation interrompue : '+(p.error||'erreur inconnue')+'. ';$('#dLed').className='led rec';return}
   const r=p.total?Math.min(1,p.done/p.total):0,m=$('#meter');
   m.style.setProperty('--pr',ph>0?1:r);m.setAttribute('aria-valuenow',Math.round((ph>0?1:r)*100));
@@ -1307,11 +1310,15 @@ function initGpu(){const g=I.gpu;$('#noGpu').hidden=!!g;$('#drvMain').hidden=!g;
 let clItems=[];
 $('#clScan').onclick=$('#clRescan').onclick=()=>{$('#clWait').hidden=false;$('#clScan').disabled=true;$('#clRescan').disabled=true;$('#clDone').hidden=true;send({cmd:'clean_scan'})};
 function renderClean(items){clItems=items||[];$('#clWait').hidden=true;$('#clScan').disabled=false;$('#clRescan').disabled=false;$('#clStart').hidden=true;$('#clRes').hidden=false;$('#clConfirm').hidden=true;
-  $('#clList').innerHTML=clItems.map(it=>`<label class="ci"><input type="checkbox" value="${esc(it.id)}"${it.default?' checked':''}${it.bytes?'':' disabled'}><span class="nm">${esc(it.name)}${it.admin?' <span class="tag" title="Windows demandera l\'autorisation">admin</span>':''}</span><span class="sz">${bytes(it.bytes)}</span><span class="sub n">${(+it.files||0).toLocaleString('fr-FR')} fichiers</span>${it.warn?`<span class="w"><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span>${esc(it.warn)}</span></span>`:''}</label>`).join('');
+  $('#clList').innerHTML=clItems.map(it=>`<label class="ci"><input type="checkbox" value="${esc(it.id)}"${it.default?' checked':''}${it.bytes?'':' disabled'}><span class="nm">${esc(it.name)}${it.admin?' <span class="tag" title="Windows demandera l\'autorisation">admin</span>':''}</span><span class="sz">${bytes(it.bytes)}</span><span class="sub"><span class="n">${(+it.files||0).toLocaleString('fr-FR')} fichiers</span><button class="btn ghost sm" type="button" data-open="${esc(it.id)}" title="Voir ces fichiers dans l'Explorateur"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>Ouvrir</button></span>${it.warn?`<span class="w"><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span>${esc(it.warn)}</span></span>`:''}</label>`).join('');
   clTotal()}
 const clSel=()=>$$('#clList input:checked').map(i=>i.value);
 function clTotal(){const ids=clSel(),t=clItems.filter(i=>ids.includes(i.id)).reduce((a,i)=>a+(+i.bytes||0),0);$('#clTot').textContent=bytes(t);$('#clGo').disabled=!ids.length;return t}
+/* Ctrl+R / F5 : Clipper rouvre la fenêtre avec les réglages actuels, sur le même onglet. */
+document.addEventListener('keydown',e=>{if(e.key==='F5'||(e.ctrlKey&&(e.key==='r'||e.key==='R'))){e.preventDefault();send({cmd:'reload',tab})}});
 $('#clList').addEventListener('change',clTotal);
+/* « Ouvrir » : dossiers de la catégorie dans l'Explorateur (sans cocher la case de la ligne). */
+$('#clList').addEventListener('click',e=>{const b=e.target.closest('[data-open]');if(!b)return;e.preventDefault();send({cmd:'clean_open',id:b.dataset.open})});
 $('#clGo').onclick=()=>{const ids=clSel();$('#clCV').textContent=bytes(clTotal());const adm=clItems.some(i=>i.admin&&ids.includes(i.id));
   $('#clCN').textContent=(adm?'Windows demandera l\'autorisation administrateur. ':'')+'Les fichiers supprimés ne passent pas par la corbeille. Les fichiers en cours d\'utilisation sont ignorés.';$('#clConfirm').hidden=false;$('#clNo').focus()};
 $('#clNo').onclick=()=>{$('#clConfirm').hidden=true};

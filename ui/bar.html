@@ -77,6 +77,7 @@ if(dev){
     hotkeys:{clip:"Alt+X",rec:"Ctrl+Alt+R",bar:"Alt+Maj+Z",overlay:"Alt+F"}};
   window.ipc={postMessage(s){const m=JSON.parse(s);console.log("ipc",m);
     if(m.cmd==="clip")setTimeout(()=>window.__on({type:"toast",kind:"clip",text:"Clip enregistré · 3 min",path:"C:\\Users\\Vous\\Videos\\Clipper\\Clip 2026-11-07 21-14-03.mp4"}),300);
+    if(m.cmd==="overlay_toggle")setTimeout(()=>window.__on({type:"overlay",on:!I.overlay_on}),50);
     if(m.cmd==="rec"){I.recording=!I.recording;I.rec_secs=0;window.__on({type:"state",recording:I.recording,rec_secs:0})}
     if(m.cmd==="set_many"){for(const[k,v]of Object.entries(m.values))I.config=setPath(I.config,k,v);setTimeout(()=>window.__on({type:"config",config:I.config}),300)}}};
 }
@@ -125,7 +126,7 @@ $("b-set").onclick=()=>send({cmd:"open_settings"});
 $("t-see").onclick=()=>send({cmd:"open_settings",tab:"videos"});
 
 // Pas de fermeture automatique : la barre reste jusqu'à Alt+Z ou Échap.
-function close(){flush();$("bar").classList.replace("in","out");setTimeout(()=>send({cmd:"close"}),220)}
+function close(){flush();$("bar").classList.replace("in","out");setTimeout(()=>send({cmd:"close",gen:I.bar_gen}),220)}
 document.addEventListener("keydown",e=>{if(e.key==="Escape")close()});
 
 let toastT=null;

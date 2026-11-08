@@ -80,7 +80,13 @@ fn log(msg: &str) {
     use std::io::Write;
     let _ = std::fs::create_dir_all(config::dir());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(config::dir().join("log.txt")) {
-        let _ = writeln!(f, "{msg}");
+        // Heure locale : un bug signalé se retrouve dans le journal à la seconde près.
+        let t = unsafe {
+            let mut t = std::mem::zeroed();
+            windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t);
+            t
+        };
+        let _ = writeln!(f, "{:02}/{:02} {:02}:{:02}:{:02} {msg}", t.wDay, t.wMonth, t.wHour, t.wMinute, t.wSecond);
     }
 }
 
@@ -220,6 +226,8 @@ struct App {
     bar: Option<ui::Win>,
     /// Fenêtre au premier plan (le jeu) quand la barre s'est ouverte : elle reprend le focus à la fermeture.
     bar_prev: isize,
+    /// Numéro de la barre ouverte : un « close » tardif d'une ancienne barre ne ferme pas la nouvelle.
+    bar_gen: u64,
     keys: Keys,
     gpu: Option<drivers::Gpu>,
     driver_url: Option<String>,
@@ -263,6 +271,7 @@ impl App {
             "hotkeys": {"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay)},
             "hotkey_conflicts": self.keys.conflicts,
             "overlay_on": self.overlay_visible(),
+            "bar_gen": self.bar_gen,
             "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs()),
             "gpu": self.gpu.as_ref().map(|g| json!({"name": g.name, "driver": g.driver})),
             "elevated": elevate::is_elevated(),
@@ -313,6 +322,7 @@ impl App {
     /// Barre Alt+Z : mémorise le jeu, puis ouvre (la barre prend le focus : le jeu rend la souris).
     fn open_bar(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
         self.bar_prev = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as isize;
+        self.bar_gen += 1;
         self.open(ui::Kind::Bar, target, None);
     }
 
@@ -387,6 +397,24 @@ impl App {
                 }
             }
             "overlay_toggle" => self.toggle_overlay(),
+            // Outils > « Ouvrir » : les dossiers d'une catégorie de nettoyage dans l'Explorateur (lecture seule).
+            "clean_open" => {
+                let id = s("id");
+                if id == "recycle" {
+                    return explorer("shell:RecycleBinFolder");
+                }
+                // Au plus 4 fenêtres (les navigateurs ont un dossier par profil).
+                for d in tools::roots(&id).into_iter().filter(|d| d.is_dir()).take(4) {
+                    explorer(&format!("\"{}\"", d.display()));
+                }
+            }
+            // Ctrl+R / F5 dans la fenêtre : rouverte avec les réglages actuels (sinon la page rechargée
+            // reprend ceux de l'ouverture, ex. l'intro désactivée revenait).
+            "reload" => {
+                if self.main.take().is_some() {
+                    self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str));
+                }
+            }
             "update_found" => {
                 self.update = m["version"].as_str().map(String::from);
                 self.push(&json!({"type": "update", "version": self.update}));
@@ -434,7 +462,10 @@ impl App {
             "open_settings" => self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str)),
             "close" => match kind {
                 ui::Kind::Main => self.main = None,
-                ui::Kind::Bar => self.close_bar(),
+                // Échap : la barre demande sa fermeture 220 ms plus tard (animation). Si Alt+Z a entre-temps
+                // fermé puis rouvert une barre, ce message vise l'ancienne : on l'ignore.
+                ui::Kind::Bar if m["gen"].as_u64().is_none_or(|g| g == self.bar_gen) => self.close_bar(),
+                ui::Kind::Bar => {}
             },
             "minimize" => {
                 if let Some(w) = &self.main {
@@ -483,6 +514,9 @@ impl App {
             "driver_check" => {
                 let studio = s("branch") == "studio";
                 self.set("driver_branch", json!(if studio { "studio" } else { "game_ready" }));
+                // Version installée relue à chaque vérification (nvidia-smi) : après une installation,
+                // l'onglet ne propose plus de réinstaller le même pilote.
+                self.gpu = drivers::installed().or(self.gpu.take());
                 let Some(g) = &self.gpu else {
                     self.push(&json!({"type": "driver", "status": "error", "error": "Aucun GPU NVIDIA détecté."}));
                     return;
@@ -500,6 +534,7 @@ impl App {
             }
             "driver_install" => {
                 let Some(url) = self.driver_url.clone() else { return };
+                let before = self.gpu.as_ref().map(|g| g.driver.clone()).unwrap_or_default();
                 self.bg(move |p| {
                     let name = url.rsplit('/').next().unwrap_or("nvidia-driver.exe").to_string();
                     let dest = std::env::temp_dir().join("Clipper").join("driver").join(name);
@@ -512,8 +547,13 @@ impl App {
                         let _ = std::fs::remove_file(&exe);
                         r
                     });
+                    // L'installateur a fini : on vérifie que la version a vraiment changé avant de dire « installé ».
+                    let after = drivers::installed().map(|g| g.driver).unwrap_or_default();
+                    log(&format!("pilote : {before} -> {after} ({r:?})"));
                     match r {
-                        Ok(()) => json!({"type": "driver_progress", "phase": "done", "done": 0, "total": 0}),
+                        Ok(()) if after != before => json!({"type": "driver_progress", "phase": "done", "done": 0, "total": 0, "installed": after}),
+                        Ok(()) => json!({"type": "driver_progress", "phase": "error", "done": 0, "total": 0,
+                                         "error": format!("L'installateur NVIDIA s'est terminé mais le pilote est toujours en {before}. Redémarrez le PC puis vérifiez à nouveau ; sinon relancez l'installation.")}),
                         Err(e) => json!({"type": "driver_progress", "phase": "error", "error": e, "done": 0, "total": 0}),
                     }
                 });
@@ -819,6 +859,7 @@ fn main() {
         main: None,
         bar: None,
         bar_prev: 0,
+        bar_gen: 0,
         keys,
         gpu: drivers::installed(),
         driver_url: None,
@@ -896,8 +937,14 @@ fn main() {
                     prewarm(&app.cfg, vec![p.clone()], &app.proxy); // lisible dans l'app dès l'ouverture
                 }
                 let msg = match &r {
-                    Ok(p) => json!({"type": "toast", "kind": kind, "path": p,
-                        "text": if kind == "clip" { "Clip enregistré" } else { "REC enregistré" }}),
+                    Ok(p) => {
+                        // Durée réelle du fichier (pas celle du réglage) : un clip trop court se voit tout de suite.
+                        let secs = capture::probe(&app.cfg, p).secs.round() as u64;
+                        let len = if secs >= 60 { format!("{} min {:02} s", secs / 60, secs % 60) } else { format!("{secs} s") };
+                        log(&format!("{kind} : {len}"));
+                        json!({"type": "toast", "kind": kind, "path": p,
+                            "text": format!("{} enregistré · {len}", if kind == "clip" { "Clip" } else { "REC" })})
+                    }
                     Err(e) => json!({"type": "toast", "kind": "error", "text": e}),
                 };
                 app.push(&msg);
@@ -932,6 +979,7 @@ fn main() {
                 }
             }
             Event::UserEvent(UserEvent::Quit) => {
+                overlay::shutdown();
                 app.buffer.stop();
                 if let Some(a) = &app.audio {
                     a.stop();

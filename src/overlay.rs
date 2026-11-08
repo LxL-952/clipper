@@ -308,19 +308,14 @@ fn run_presentmon() -> bool {
     let watcher = std::thread::spawn(move || {
         let w = std::thread::current();
         WAKE.lock().unwrap().push(w.clone());
-        // Masqué : PresentMon reste 30 s de plus. Un Alt+F rapide réaffiche les FPS tout de suite au lieu
-        // d'attendre ~1 s qu'il redémarre (coût : ~1 % de CPU pendant ces 30 s, puis plus rien).
-        let mut hidden_since: Option<std::time::Instant> = None;
-        while matches!(c.lock().unwrap().try_wait(), Ok(None)) {
-            if VISIBLE.load(Ordering::Relaxed) {
-                hidden_since = None;
-            } else if hidden_since.get_or_insert_with(std::time::Instant::now).elapsed().as_secs() >= 30 {
-                break;
-            }
+        // PresentMon tourne tant que l'overlay est activé avec des mesures d'images, affiché ou non : Alt+F
+        // montre des FPS à jour tout de suite (avant : arrêt / relance à chaque fois, « 0 » pendant ~1 s).
+        while matches!(c.lock().unwrap().try_wait(), Ok(None)) && fps_wanted() {
             std::thread::park_timeout(std::time::Duration::from_secs(1));
         }
         WAKE.lock().unwrap().retain(|t| t.id() != w.id());
         let _ = c.lock().unwrap().kill();
+        stop_session("ClipperPresentMon"); // tué, PresentMon ne ferme pas sa session ETW : on la ferme
         me.unpark();
     });
     let started = std::time::Instant::now();
@@ -703,10 +698,18 @@ fn place(h: HWND, rows: usize, look: &Look) {
         let m = measure(h, px);
         let w = WIDTH.fetch_max(m, Ordering::Relaxed).max(m);
         let hgt = px / 2 * 2 + rows as i32 * (px + 6);
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &mut mi);
-        let m = mi.rcMonitor;
+        // Écran du jeu : celui de l'appli plein écran au premier plan. Sans jeu plein écran (clic sur
+        // l'autre écran, fenêtre de Clipper…), l'overlay reste où il était au lieu de sauter d'écran.
+        static SCREEN: Mutex<Option<RECT>> = Mutex::new(None);
+        let mut screen = SCREEN.lock().unwrap();
+        if crate::capture::fullscreen_foreground() || screen.is_none() {
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &mut mi);
+            *screen = Some(mi.rcMonitor);
+        }
+        let m = screen.unwrap();
+        drop(screen);
         let margin = 12;
         let x = if look.corner.ends_with('r') { m.right - w - margin } else { m.left + margin };
         let y = if look.corner.starts_with('b') { m.bottom - hgt - margin } else { m.top + margin };
@@ -799,14 +802,38 @@ unsafe extern "system" fn on_event(r: *mut windows_sys::Win32::System::Diagnosti
 }
 
 /// La session ETW ne tourne que quand l'overlay est visible ET que FPS / temps d'image sont choisis.
+/// Ferme une session ETW par son nom (PresentMon tué, ou Clipper qui quitte) : sinon Windows la garde
+/// ouverte, avec ses tampons, jusqu'au prochain lancement.
+fn stop_session(name: &str) {
+    use windows_sys::Win32::System::Diagnostics::Etw::*;
+    let n: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let size = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + n.len() * 2;
+    let mut b = vec![0u8; size];
+    let p = b.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
+    unsafe {
+        (*p).Wnode.BufferSize = size as u32;
+        (*p).LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+        ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, n.as_ptr(), p, EVENT_TRACE_CONTROL_STOP);
+    }
+}
+
+/// À la fermeture de Clipper : sessions de mesure des FPS fermées.
+pub fn shutdown() {
+    stop_session("ClipperPresentMon");
+    stop_session("ClipperFps");
+}
+
+/// Mesure des images active : overlay activé (raccourci ou toujours) avec FPS, temps d'image ou 1 % low.
+fn fps_wanted() -> bool {
+    ENABLED.load(Ordering::Relaxed) && LOOK.lock().unwrap().as_ref().is_some_and(|l| l.items.iter().any(|i| i == "fps" || i == "frametime" || i == "low1"))
+}
+
 fn etw_thread() {
     use windows_sys::Win32::System::Diagnostics::Etw::*;
     WAKE.lock().unwrap().push(std::thread::current());
     let name: Vec<u16> = "ClipperFps".encode_utf16().chain(Some(0)).collect();
     loop {
-        let want = VISIBLE.load(Ordering::Relaxed)
-            && LOOK.lock().unwrap().as_ref().is_some_and(|l| l.items.iter().any(|i| i == "fps" || i == "frametime" || i == "low1"));
-        if !want {
+        if !fps_wanted() {
             std::thread::park(); // réveillé par apply()
             continue;
         }
@@ -864,7 +891,7 @@ fn etw_thread() {
             let watcher = std::thread::spawn(move || {
                 let me = std::thread::current();
                 WAKE.lock().unwrap().push(me.clone());
-                while VISIBLE.load(Ordering::Relaxed) {
+                while fps_wanted() {
                     std::thread::park();
                 }
                 WAKE.lock().unwrap().retain(|t| t.id() != me.id());

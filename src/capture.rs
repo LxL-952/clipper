@@ -524,15 +524,20 @@ pub fn buffer_args(cfg: &Config, native: (u32, u32), dir: &Path, start: u64, pip
 
 /// Entrées (écran + audio) et encodage pour la qualité `q`, sans la sortie.
 fn capture_args(cfg: &Config, q: crate::config::Quality, native: (u32, u32), pipes: &[String]) -> Vec<String> {
-    let (w, h) = final_size(cfg, q, native);
+    // Vrais pixels : seulement la classe de résolution (720p…). L'étirement (4:3 -> 16:9) n'est plus un
+    // agrandissement CPU (flou, coûteux) : le fichier déclare un format d'affichage 16:9 et les lecteurs
+    // étirent eux-mêmes. Vérifié : 1920x1200 + -aspect 16:9 -> MP4 « 16:9 » après segments et assemblage.
+    let (w, h) = output_size(q.height, native).unwrap_or(native);
+    let shown = final_size(cfg, q, native);
     let mut vf = format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1", cfg.monitor, q.fps);
     // Les images de ddagrab vivent sur la carte NVIDIA : AMF/QSV/x264 doivent passer par la mémoire.
     let off_gpu = !cfg.encoder.ends_with("_nvenc");
     if (w, h) != native || off_gpu {
-        // Seul cas où l'image quitte le GPU : redimensionnement CPU rapide (ou simple copie).
+        // Image hors du GPU : changement de résolution (720p…) ou encodeur non NVIDIA. scale_d3d11 (sur
+        // la carte) échoue sur les portables AMD + NVIDIA : redimensionnement processeur, filtre bilinéaire.
         vf += ",hwdownload,format=bgra";
         if (w, h) != native {
-            vf += &format!(",scale={w}:{h}:flags=fast_bilinear");
+            vf += &format!(",scale={w}:{h}:flags=bilinear");
         }
         vf += &format!(",format=nv12,fps={}", q.fps);
     }
@@ -543,6 +548,9 @@ fn capture_args(cfg: &Config, q: crate::config::Quality, native: (u32, u32), pip
     a.extend(crate::audio::output_args(if kinds.len() == pipes.len() { &kinds } else { &[] }));
     a.extend(["-c:v".into(), cfg.encoder.clone()]);
     a.extend(preset_args(&cfg.encoder, cfg.quality).iter().map(|s| s.to_string()));
+    if shown != (w, h) {
+        a.extend(["-aspect".into(), format!("{}:{}", shown.0, shown.1)]);
+    }
     let target = if constant_quality(&cfg.encoder) { "0".to_string() } else { format!("{kb}k") };
     if cfg.encoder == "libx264" {
         a.extend(["-crf".into(), "22".into()]);
@@ -806,8 +814,18 @@ fn save(cfg: &Config, segs: &[PathBuf], kind: &str) -> Result<PathBuf, String> {
 }
 
 pub fn save_clip(cfg: &Config, dir: &Path) -> Result<PathBuf, String> {
-    let segs = segments(dir);
+    let segs = recent(segments(dir), cfg.buffer_secs, std::time::SystemTime::now());
     save(cfg, pick_segments(&segs, cfg.buffer_secs), "Clip")
+}
+
+/// Segments écrits pendant la durée du buffer, à l'horloge. Après une relance de Clipper ou une pause de la
+/// capture, les vieux segments restés dans le dossier n'entrent plus dans le clip (on clippait 3 min d'il y a
+/// 20 min au lieu des 3 dernières).
+fn recent(segs: Vec<PathBuf>, secs: u32, now: std::time::SystemTime) -> Vec<PathBuf> {
+    let max = std::time::Duration::from_secs(u64::from(secs + 2 * SEG_SECS));
+    segs.into_iter()
+        .filter(|p| std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|t| now.duration_since(t).unwrap_or_default() <= max))
+        .collect()
 }
 
 /// REC aux mêmes réglages que le Clip : on garde les segments du buffer (zéro coût en plus).
@@ -876,6 +894,15 @@ mod tests {
     }
 
     #[test]
+    fn stretch_is_display_aspect_not_cpu_scaling() {
+        let mut c = Config::default();
+        (c.encoder, c.stretch) = ("hevc_nvenc".into(), "16:9".into());
+        let a = capture_args(&c, crate::config::Quality { height: 1080, fps: 60 }, (1280, 960), &[]).join(" ");
+        assert!(!a.contains("hwdownload") && !a.contains("scale="), "l'image ne doit pas quitter le GPU : {a}");
+        assert!(a.contains("-aspect 1706:960"), "{a}");
+    }
+
+    #[test]
     fn encoders_follow_chosen_chip() {
         let ok = ["h264_nvenc", "hevc_nvenc", "h264_amf", "hevc_amf", "libx264"];
         let gpus = vec![Gpu { id: "nvidia".into(), name: "RTX".into() }, Gpu { id: "amd".into(), name: "Radeon".into() }];
@@ -908,6 +935,27 @@ mod tests {
         assert_eq!(bitrate_kbps(1080, 30, "h264_nvenc", 1.0), 13_000);
         assert_eq!(bitrate_kbps(2160, 60, "hevc_nvenc", 1.0), 49_000);
         assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 2.0), 40_000); // plafond du curseur
+    }
+
+    /// Vieux segments d'avant une relance (30 min) : jamais dans le clip, même s'il en manque pour 3 min.
+    #[test]
+    fn clip_ignores_segments_older_than_buffer() {
+        let dir = std::env::temp_dir().join(format!("clipper-recent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = std::time::SystemTime::now();
+        let segs: Vec<PathBuf> = (0..10u64)
+            .map(|i| {
+                let p = dir.join(format!("{i:010}.ts"));
+                let f = std::fs::File::create(&p).unwrap();
+                let age = if i < 5 { 30 * 60 } else { (10 - i) * 2 };
+                f.set_modified(now - std::time::Duration::from_secs(age)).unwrap();
+                p
+            })
+            .collect();
+        let kept = recent(segs, 180, now);
+        assert_eq!(kept.len(), 5);
+        assert!(kept.iter().all(|p| seg_number(p) >= 5));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
