@@ -6,7 +6,7 @@
 #ifndef Bin
   #define Bin "..\target\release"
 #endif
-#define AppVersion "1.2.1"
+#define AppVersion "1.2.2"
 
 [Setup]
 AppId={{6B1E3F52-8C0A-4C1D-9E57-3A1C2F0B7D41}
@@ -60,6 +60,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 Filename: "winget.exe"; Parameters: "install -e --id Gyan.FFmpeg --scope user --accept-package-agreements --accept-source-agreements"; StatusMsg: "Installation de FFmpeg…"; Flags: runhidden waituntilterminated; Tasks: ffmpeg
 Filename: "{app}\clipper.exe"; Description: "Lancer Clipper"; Flags: nowait postinstall skipifsilent
+; Mise à jour depuis Clipper (mode silencieux) : relancé tout seul, réduit dans la zone de notification.
+Filename: "{app}\clipper.exe"; Parameters: "--tray"; Flags: nowait; Check: WizardSilent
 
 [UninstallDelete]
 ; Réglages et journal. Les clips (dossier Vidéos) ne sont jamais touchés.

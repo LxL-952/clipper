@@ -271,6 +271,10 @@ kbd{font:600 10px/1 var(--sans);letter-spacing:.06em;color:var(--text-3);padding
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{position:relative;display:inline-flex;align-items:center;gap:7px;min-height:32px;padding:0 10px;border:1px solid var(--line-2);border-radius:5px;font-size:12.5px;color:var(--text-2);cursor:pointer}
 .chip.off{opacity:.4;cursor:default}
+/* Bandeau de mise à jour, dans la barre de titre. */
+.upd{display:flex;align-items:center;gap:7px;height:28px;padding:0 11px;margin-right:6px;border:1px solid var(--signal);border-radius:6px;background:var(--signal-soft);color:var(--text);font:600 12px/1 var(--sans);cursor:pointer}
+.upd:hover{background:var(--signal);color:var(--signal-ink)}
+.upd:disabled{opacity:.6;cursor:default}
 .chk{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2);cursor:pointer}
 .chk input{accent-color:var(--signal);width:14px;height:14px;margin:0}
 .chip input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
@@ -467,6 +471,7 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
     <button class="tab" role="tab" id="t-tools" data-tab="tools" aria-controls="p-tools" aria-selected="false" tabindex="-1">Outils</button>
   </div>
   <span class="tb-sp" data-drag></span>
+  <button class="upd" type="button" id="upd" hidden><svg class="i" aria-hidden="true"><use href="#i-dl"/></svg><span id="updT"></span></button>
   <span class="recind" id="recInd" hidden><span class="led rec" aria-hidden="true"></span>REC <span class="n" id="recT">00:00</span></span>
   <button class="wbtn" type="button" id="wMin" aria-label="Réduire"><svg class="i"><use href="#i-min"/></svg></button>
   <button class="wbtn x" type="button" id="wClose" aria-label="Fermer (Clipper reste dans la zone de notification)" title="Fermer : Clipper continue dans la zone de notification"><svg class="i"><use href="#i-x"/></svg></button>
@@ -506,6 +511,7 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
   </div>
 
   <div class="set-col" id="setCol">
+    <p class="note err" id="ffMiss" hidden style="margin:14px 0 4px"><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span><b>FFmpeg est introuvable.</b> Clipper s'en sert pour lister les encodeurs et les écrans, et pour enregistrer : sans lui, ces listes restent vides et aucun clip n'est possible.<span class="acts"><button class="btn primary" type="button" id="ffInst"><svg class="i" aria-hidden="true"><use href="#i-dl"/></svg>Installer FFmpeg</button><span class="hint" id="ffWait" hidden>Installation par winget… la fenêtre se rouvrira toute seule.</span></span></span></p>
     <section class="grp" aria-labelledby="g-cap">
       <h3 id="g-cap"><span class="sc">Capture</span></h3>
       <div class="ch" role="group" aria-labelledby="ch-clip">
@@ -636,6 +642,10 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
       <div class="sw-row">
         <span class="lbl"><span id="l-intro">Intro à l'ouverture</span><span class="hint">Le trombone se clipse sur la page, avec son bruitage (environ 3 s, un clic la passe).</span></span>
         <input type="checkbox" class="sw" role="switch" data-k="intro" aria-labelledby="l-intro">
+      </div>
+      <div class="sw-row">
+        <span class="lbl"><span id="l-upd">Vérifier les mises à jour</span><span class="hint">Au lancement, une seule question à GitHub. Une nouvelle version s'installe en un clic, réglages conservés.</span></span>
+        <input type="checkbox" class="sw" role="switch" data-k="update_check" aria-labelledby="l-upd">
       </div>
       <div class="sw-row">
         <span class="lbl"><span id="l-delp">Supprimer définitivement</span><span class="hint">Les vidéos supprimées ne passent pas par la Corbeille : elles ne peuvent pas être récupérées.</span></span>
@@ -904,14 +914,19 @@ document.readyState==='loading'?document.addEventListener('DOMContentLoaded',rea
   if(((window.__INIT__||{}).config||{}).intro===false){n.remove();return}   // réglage Avancé > Intro
   const done=()=>n.remove();n.addEventListener('animationend',e=>{if(e.animationName==='in-out')done()});n.addEventListener('click',done);
   // Départ quand Clipper a rendu la fenêtre visible (message "shown") : animation et son ensemble.
-  window.__introGo=()=>{if(n.classList.contains('go'))return;n.classList.add('go');introSound();setTimeout(done,3200)};
+  // Son et image calés : le son est programmé dans 60 ms, l'animation démarre quand il sort vraiment
+  // des haut-parleurs (latence de sortie de Windows mesurée par l'AudioContext, souvent 30 à 100 ms).
+  let started=false;
+  window.__introGo=async()=>{if(started)return;started=true;let lead=0;
+    try{const A=new AudioContext();await Promise.race([A.resume(),new Promise(r=>setTimeout(r,300))]);const t0=A.currentTime+.06;introSound(A,t0);lead=(.06+(A.outputLatency||A.baseLatency||0))*1000}catch(e){}
+    setTimeout(()=>n.classList.add('go'),lead);setTimeout(done,3200+lead)};
   setTimeout(window.__introGo,3000);   // filet : jamais bloqué sur le trombone
 })();
 /* Son de l'intro, synthétisé (aucun fichier) et calé sur l'animation :
    0,25 s chute du trombone (souffle qui monte), 1,09 s il se clipse (claquement + tintement métallique),
    1,3 s le nom apparaît (deux notes douces). */
-function introSound(){try{
-  const A=new AudioContext(),t0=A.currentTime+.02,out=A.createGain();out.gain.value=.55;out.connect(A.destination);
+function introSound(A,t0){try{
+  const out=A.createGain();out.gain.value=.55;out.connect(A.destination);
   const noise=d=>{const b=A.createBuffer(1,Math.ceil(A.sampleRate*d),A.sampleRate),c=b.getChannelData(0);for(let i=0;i<c.length;i++)c[i]=Math.random()*2-1;const s=A.createBufferSource();s.buffer=b;return s};
   {const s=noise(.9),f=A.createBiquadFilter(),g=A.createGain();f.type='bandpass';f.Q.value=1.2;
    f.frequency.setValueAtTime(400,t0+.25);f.frequency.exponentialRampToValueAtTime(2600,t0+1.05);
@@ -978,6 +993,12 @@ if(!window.__INIT__){
 /* ---------- état ---------- */
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const I=window.__INIT__;let C=I.config;const NAT=I.native||[1920,1080];
+/* FFmpeg absent : message et installation en un clic (winget), au lieu de listes vides sans explication. */
+/* Mise à jour trouvée au lancement : un clic télécharge, vérifie l'empreinte et installe. */
+function showUpd(v){if(!v)return;$('#updT').textContent='Nouvelle version '+v+' · Installer';$('#upd').hidden=false}
+showUpd(I.update);
+$('#upd').onclick=()=>{$('#upd').disabled=true;$('#updT').textContent='Téléchargement et vérification…';send({cmd:'update_install'})};
+if(I.ffmpeg_ok===false){$('#ffMiss').hidden=false;$('#ffInst').onclick=()=>{$('#ffInst').disabled=true;$('#ffWait').hidden=false;send({cmd:'install_ffmpeg'})}}
 const send=m=>window.ipc.postMessage(JSON.stringify(m));
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fr=(v,d=1)=>(+v).toLocaleString('fr-FR',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -990,7 +1011,7 @@ const val=k=>{const v=get(k);return v===undefined&&k in OV_DEF?OV_DEF[k]:v};
 /* Réglages : en attente jusqu'à « Enregistrer » (une seule relance de la capture). */
 let S=C,pending={},hkSaved=null;
 const NOW=['mic_muted'];
-const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','overlay_graphs','intro','delete_permanent','delete_confirm','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
+const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','overlay_graphs','intro','update_check','delete_permanent','delete_confirm','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
 function setCfg(key,value){
   if(key.includes('.')){const[a,b]=key.split('.');value={...C[a],[b]:value};key=a}
   C={...C,[key]:value};
@@ -1308,6 +1329,7 @@ function toast(m){const t=document.createElement('div');t.className='toast';t.se
 
 /* ---------- messages de Rust ---------- */
 window.__on=m=>{switch(m&&m.type){
+  case'update':showUpd(m.version);break;
   case'shown':window.__introGo&&window.__introGo();break;
   case'config':S=m.config;C={...m.config,...pending};render();askFree();adminUi();break;
   case'state':recOn=!!m.recording;recS=+m.rec_secs||0;recUi();break;

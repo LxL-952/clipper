@@ -8,6 +8,7 @@ mod elevate;
 mod overlay;
 mod tools;
 mod tray;
+mod update;
 mod ui;
 
 use config::Config;
@@ -198,6 +199,10 @@ fn pretty(k: &HotKey) -> String {
 struct App {
     cfg: Config,
     encoders: Vec<&'static str>,
+    /// FFmpeg lancé avec succès au démarrage (sinon : aucun encodeur, aucun écran, message dans l'UI).
+    ffmpeg_ok: bool,
+    /// Version plus récente trouvée sur GitHub (bandeau « Nouvelle version »).
+    update: Option<String>,
     gpus: Vec<capture::Gpu>,
     /// Capteur de température CPU lisible par Windows (souvent absent sur PC de bureau).
     cpu_temp: bool,
@@ -252,7 +257,7 @@ impl App {
         let devs = |d| audio::devices(d).into_iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>();
         let k = |k: &Option<HotKey>| k.as_ref().map(pretty);
         json!({
-            "page": page, "tab": tab, "config": self.cfg, "encoders": self.encoders,
+            "page": page, "tab": tab, "config": self.cfg, "encoders": self.encoders, "ffmpeg_ok": self.ffmpeg_ok, "update": self.update,
             "native": [self.native.0, self.native.1], "monitors": self.monitors,
             "outputs": devs(wasapi::Direction::Render), "inputs": devs(wasapi::Direction::Capture),
             "hotkeys": {"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay)},
@@ -382,6 +387,48 @@ impl App {
                 }
             }
             "overlay_toggle" => self.toggle_overlay(),
+            "update_found" => {
+                self.update = m["version"].as_str().map(String::from);
+                self.push(&json!({"type": "update", "version": self.update}));
+            }
+            // Bouton « Installer » du bandeau : téléchargement vérifié puis installateur silencieux,
+            // qui ferme Clipper et le relance à jour.
+            "update_install" => self.bg(|_| {
+                let r = update::FOUND.lock().unwrap().take();
+                let res = r.ok_or("Aucune mise à jour en attente.".to_string()).and_then(|r| update::download(&r)).and_then(|p| update::install(&p));
+                match res {
+                    Ok(()) => json!({"type": "toast", "kind": "ok", "text": "Installation de la mise à jour… Clipper va redémarrer."}),
+                    Err(e) => json!({"type": "toast", "kind": "error", "text": format!("Mise à jour impossible : {e}")}),
+                }
+            }),
+            // Bouton « Installer FFmpeg » : winget dans une fenêtre visible, puis Clipper se met à jour seul.
+            "install_ffmpeg" => {
+                let p = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let ok = std::process::Command::new("winget")
+                        .args(["install", "-e", "--id", "Gyan.FFmpeg", "--scope", "user", "--accept-package-agreements", "--accept-source-agreements"])
+                        .status()
+                        .is_ok_and(|s| s.success());
+                    let _ = p.send_event(UserEvent::Ipc(ui::Kind::Main, json!({"cmd": "ffmpeg_installed", "ok": ok}).to_string()));
+                });
+            }
+            "ffmpeg_installed" => {
+                self.ffmpeg_ok = capture::locate_ffmpeg(&self.cfg);
+                if self.ffmpeg_ok {
+                    self.encoders = capture::probe_encoders(&self.cfg);
+                    self.cfg.encoder = capture::resolve_encoder(&self.cfg, &self.encoders, &self.gpus);
+                    self.native = capture::native_size(&self.cfg).unwrap_or((1920, 1080));
+                    self.monitors = capture::monitors(&self.cfg);
+                    self.restart_capture(false);
+                    self.push(&json!({"type": "toast", "kind": "ok", "text": "FFmpeg installé : Clipper enregistre."}));
+                } else {
+                    self.push(&json!({"type": "toast", "kind": "error", "text": "FFmpeg n'a pas pu être installé (winget)."}));
+                }
+                // Fenêtre rouverte : elle reçoit les nouveaux encodeurs et écrans.
+                if self.main.take().is_some() {
+                    self.open(ui::Kind::Main, target, None);
+                }
+            }
             "clip" => self.clip(),
             "rec" => self.toggle_rec(),
             "open_settings" => self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str)),
@@ -551,7 +598,7 @@ impl App {
     /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
     fn set_many(&mut self, items: &[(String, Value)]) {
         // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
+        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
         let mut restart = false;
         let reprobe = items.iter().any(|(k, _)| k == "monitor");
@@ -668,6 +715,7 @@ fn main() {
     let ev = ev as usize;
     lower_priority();
     let mut cfg = Config::load();
+    let ffmpeg_ok = capture::locate_ffmpeg(&cfg);
     let encoders = capture::probe_encoders(&cfg);
     let gpus = capture::gpus();
     cfg.encoder = capture::resolve_encoder(&cfg, &encoders, &gpus);
@@ -756,6 +804,8 @@ fn main() {
     let mut app = App {
         cfg,
         encoders,
+        ffmpeg_ok,
+        update: None,
         gpus,
         cpu_temp: overlay::cpu_temp_available(),
         native,
@@ -784,6 +834,22 @@ fn main() {
         *flow = ControlFlow::Wait;
         match event {
             Event::NewEvents(StartCause::Init) => {
+                // Mises à jour : une requête GitHub, 10 s après le lancement (rien pendant le démarrage).
+                if app.cfg.update_check {
+                    let p = app.proxy.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                        match update::check() {
+                            Ok(Some(r)) => {
+                                let v = r.version.clone();
+                                *update::FOUND.lock().unwrap() = Some(r);
+                                let _ = p.send_event(UserEvent::Ipc(ui::Kind::Main, json!({"cmd": "update_found", "version": v}).to_string()));
+                            }
+                            Ok(None) => {}
+                            Err(e) => log(&format!("mise à jour : {e}")),
+                        }
+                    });
+                }
                 tray = TrayIconBuilder::new()
                     .with_tooltip("Clipper")
                     .with_icon(tray_icon_image())

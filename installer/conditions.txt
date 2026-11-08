@@ -24,7 +24,7 @@ Les outils de nettoyage suppriment des fichiers temporaires et des caches. Les f
 Clipper utilise FFmpeg, un programme séparé distribué sous sa propre licence (GPL). FFmpeg n'est pas inclus dans cet installateur ; il peut être installé avec winget.
 
 8. DONNÉES PERSONNELLES
-Clipper ne collecte aucune donnée et n'envoie rien à l'auteur. Les seules connexions réseau sont celles vers NVIDIA, quand vous cherchez un pilote.
+Clipper ne collecte aucune donnée et n'envoie rien à l'auteur. Les seules connexions réseau sont celles vers NVIDIA, quand vous cherchez un pilote, et vers GitHub au lancement pour savoir si une nouvelle version existe (désactivable dans Interface ; une mise à jour n'est installée que si vous cliquez sur « Installer », après vérification de son empreinte SHA-256).
 
 ---------------------------------------------------------------------------
 

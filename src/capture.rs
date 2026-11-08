@@ -21,6 +21,59 @@ fn ffmpeg(cfg: &Config) -> Command {
 }
 
 /// Encodeurs qui encodent vraiment une image sur cette machine (pas seulement compilés).
+/// FFmpeg utilisable ? S'il manque au PATH de Clipper (cas typique : installé par winget juste avant
+/// le lancement, PATH du processus pas encore relu), on le cherche dans le PATH à jour du registre et
+/// dans les dossiers de WinGet, puis on ajoute son dossier au PATH du processus. Avant tout autre fil.
+pub fn locate_ffmpeg(cfg: &Config) -> bool {
+    let works = || {
+        Command::new(&cfg.ffmpeg)
+            .creation_flags(CREATE_NO_WINDOW)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if works() || cfg.ffmpeg != "ffmpeg" {
+        return works(); // déjà trouvé, ou chemin choisi par l'utilisateur : on n'y touche pas
+    }
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = registry_path().split(';').filter(|d| !d.is_empty()).map(PathBuf::from).collect();
+    dirs.push(PathBuf::from(&local).join(r"Microsoft\WinGet\Links"));
+    // Paquets WinGet « …FFmpeg… » : le bin est un ou deux niveaux plus bas.
+    for pkg in std::fs::read_dir(PathBuf::from(&local).join(r"Microsoft\WinGet\Packages")).into_iter().flatten().flatten() {
+        if pkg.file_name().to_string_lossy().to_ascii_lowercase().contains("ffmpeg") {
+            for sub in std::fs::read_dir(pkg.path()).into_iter().flatten().flatten() {
+                dirs.push(sub.path().join("bin"));
+            }
+            dirs.push(pkg.path().join("bin"));
+        }
+    }
+    dirs.extend([r"C:\ffmpeg\bin", r"C:\Program Files\ffmpeg\bin"].map(PathBuf::from));
+    let Some(found) = dirs.into_iter().find(|d| d.join("ffmpeg.exe").is_file() && d.join("ffprobe.exe").is_file()) else {
+        crate::log("FFmpeg introuvable (PATH, WinGet, C:\\ffmpeg)");
+        return false;
+    };
+    let path = format!("{};{}", found.display(), std::env::var("PATH").unwrap_or_default());
+    // Sûr : appelé au démarrage, avant le lancement des autres fils.
+    unsafe { std::env::set_var("PATH", path) };
+    crate::log(&format!("FFmpeg trouvé hors du PATH : {}", found.display()));
+    works()
+}
+
+/// PATH utilisateur + machine tel qu'il est dans le registre maintenant (variables développées).
+fn registry_path() -> String {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW};
+    let read = |root, key: &str| -> String {
+        let (k, v): (Vec<u16>, Vec<u16>) = (key.encode_utf16().chain(Some(0)).collect(), "Path".encode_utf16().chain(Some(0)).collect());
+        let mut buf = vec![0u16; 32 * 1024];
+        let mut len = (buf.len() * 2) as u32;
+        let ok = unsafe { RegGetValueW(root, k.as_ptr(), v.as_ptr(), RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as _, &mut len) } == 0;
+        if ok { String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]) } else { String::new() }
+    };
+    format!("{};{}", read(HKEY_CURRENT_USER, "Environment"), read(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"))
+}
+
 pub fn probe_encoders(cfg: &Config) -> Vec<&'static str> {
     // Pas d'AV1 : dans les segments MPEG-TS, ffmpeg l'écrit en flux de données (« bin_data ») et les clips sont illisibles.
     const ALL: [&str; 6] = ["h264_nvenc", "hevc_nvenc", "h264_amf", "hevc_amf", "h264_qsv", "libx264"];
