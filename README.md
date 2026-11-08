@@ -12,7 +12,7 @@ Application Windows légère : enregistrement de clips de jeu (type Instant Repl
 Aucune injection, aucun hook, aucune lecture de la mémoire d'un jeu. Capture par Desktop Duplication, audio par WASAPI, raccourcis par `RegisterHotKey`, FPS par les événements ETW publics (comme PresentMon). Détails : [SPEC.md](SPEC.md).
 
 ## Installer
-Télécharger `Clipper-Setup-<version>.exe` (assistant : contrat de licence, dossier, démarrage avec Windows, FFmpeg via winget). Installation pour l'utilisateur seul, sans droits administrateur.
+Télécharger `Clipper-Setup-<version>.exe` (assistant : contrat de licence, dossier, démarrage avec Windows, FFmpeg via winget ; PresentMon d'Intel inclus pour les FPS). Installation pour l'utilisateur seul, sans droits administrateur.
 
 ## Prérequis
 - Windows 10/11, WebView2 (installé avec Windows 11).

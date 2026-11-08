@@ -1,12 +1,12 @@
 ; Assistant d'installation de Clipper (Inno Setup 6).
-; Compiler : cargo build --release, puis
+; Compiler : cargo build --release, une fois powershell -File installer\fetch-presentmon.ps1, puis
 ;   ISCC.exe /DBin=D:\ct\release installer\clipper.iss
 ; Résultat : installer\out\Clipper-Setup-<version>.exe
 
 #ifndef Bin
   #define Bin "..\target\release"
 #endif
-#define AppVersion "1.1.0"
+#define AppVersion "1.1.1"
 
 [Setup]
 AppId={{6B1E3F52-8C0A-4C1D-9E57-3A1C2F0B7D41}
@@ -41,11 +41,13 @@ Name: "fr"; MessagesFile: "compiler:Languages\French.isl"
 Name: "desktop"; Description: "Créer une icône sur le Bureau"; GroupDescription: "Raccourcis :"
 Name: "startup"; Description: "Lancer Clipper au démarrage de Windows (dans la zone de notification)"; GroupDescription: "Démarrage :"
 Name: "ffmpeg"; Description: "Installer FFmpeg avec winget (nécessaire pour enregistrer)"; GroupDescription: "Composants :"; Check: NeedsFfmpeg
-Name: "presentmon"; Description: "Installer PresentMon d'Intel avec winget (FPS de l'overlay pour DirectX, Vulkan et OpenGL)"; GroupDescription: "Composants :"; Check: NeedsPresentMon
 
 [Files]
 Source: "{#Bin}\clipper.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"
+; PresentMon d'Intel (licence MIT) : FPS de l'overlay pour DirectX, Vulkan et OpenGL. Voir fetch-presentmon.ps1.
+Source: "vendor\presentmon.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "third-party\PresentMon-LICENSE.txt"; DestDir: "{app}\third-party"
 
 [Icons]
 Name: "{group}\Clipper"; Filename: "{app}\clipper.exe"
@@ -57,7 +59,6 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "winget.exe"; Parameters: "install -e --id Gyan.FFmpeg --scope user --accept-package-agreements --accept-source-agreements"; StatusMsg: "Installation de FFmpeg…"; Flags: runhidden waituntilterminated; Tasks: ffmpeg
-Filename: "winget.exe"; Parameters: "install -e --id Intel.PresentMon.Console --accept-package-agreements --accept-source-agreements"; StatusMsg: "Installation de PresentMon…"; Flags: runhidden waituntilterminated; Tasks: presentmon
 Filename: "{app}\clipper.exe"; Description: "Lancer Clipper"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -74,9 +75,28 @@ begin
   Result := not (Exec(ExpandConstant('{cmd}'), '/c where ffmpeg >nul 2>nul', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0));
 end;
 
-function NeedsPresentMon: Boolean;
+{ Clipper vit dans la zone de notification, sans fenêtre : Inno ne sait pas le fermer seul.
+  On lui demande de quitter (--quit), puis on laisse ffmpeg et PresentMon s'arrêter avec lui. }
+procedure QuitClipper(Exe: String);
 var
   Code: Integer;
 begin
-  Result := not (Exec(ExpandConstant('{cmd}'), '/c where presentmon >nul 2>nul', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0));
+  if FileExists(Exe) then
+  begin
+    Exec(Exe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    if Code = 0 then
+      Sleep(2000);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  QuitClipper(ExpandConstant('{app}\clipper.exe'));
+  Result := '';
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  QuitClipper(ExpandConstant('{app}\clipper.exe'));
+  Result := True;
 end;

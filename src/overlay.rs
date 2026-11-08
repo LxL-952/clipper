@@ -244,7 +244,9 @@ fn pm_row(line: &str, (pid, ms): (usize, usize)) -> Option<(u32, f64)> {
 fn run_presentmon() -> bool {
     use std::io::BufRead;
     use std::os::windows::process::CommandExt;
-    let mut cmd = std::process::Command::new("presentmon");
+    // Celui livré par l'installateur, à côté de clipper.exe ; sinon celui du PATH (winget).
+    let bundled = std::env::current_exe().ok().map(|e| e.with_file_name("presentmon.exe")).filter(|p| p.is_file());
+    let mut cmd = std::process::Command::new(bundled.as_deref().unwrap_or("presentmon".as_ref()));
     cmd.creation_flags(0x0800_0000 | 0x0000_4000) // sans fenêtre, priorité sous la normale
         .args(["--output_stdout", "--no_console_stats", "--v1_metrics", "--session_name", "ClipperPresentMon", "--stop_existing_session"])
         // Suivi jusqu'à l'affichage indispensable : en plein écran (flip indépendant), une image n'est « terminée »
