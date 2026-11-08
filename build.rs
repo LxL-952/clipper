@@ -144,6 +144,8 @@ fn res_entry(out: &mut Vec<u8>, kind: u16, id: u16, flags: u16, data: &[u8]) {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // include_dir! ne prévient pas Cargo : sans ça, une interface modifiée n'entre pas dans l'exe.
+    println!("cargo:rerun-if-changed=ui");
     let images: Vec<(usize, Vec<u8>)> = SIZES.iter().map(|&n| (n, dib(n, &draw(n)))).collect();
 
     let mut ico = vec![0, 0, 1, 0];
