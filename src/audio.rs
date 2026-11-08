@@ -266,7 +266,7 @@ impl Track {
     pub fn title(self) -> &'static str {
         match self {
             Track::Mix => "Tout",
-            Track::Game => "PC",
+            Track::Game => "Environnement",
             Track::Mic => "Micro",
         }
     }

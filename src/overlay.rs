@@ -364,7 +364,7 @@ fn one_percent_low(frametimes_ms: &[f64]) -> Option<f64> {
     (worst > 0.0).then(|| 1000.0 / worst)
 }
 
-/// FPS et temps d'image moyens sur la période de rafraîchissement (1 s minimum : PresentMon envoie
+/// FPS et temps d'image moyens sur la période de rafraîchissement (0,5 s minimum : PresentMon envoie
 /// ses lignes par paquets), 1 % low sur les 10 dernières secondes.
 fn pm_text() -> FpsText {
     let now = std::time::Instant::now();
@@ -376,7 +376,8 @@ fn pm_text() -> FpsText {
     if PM_FOR.load(Ordering::Relaxed) != TARGET.load(Ordering::Relaxed) {
         return FpsText::same("0", "—");
     }
-    let avg_window = (REFRESH_MS.load(Ordering::Relaxed) as f64 / 1000.0).max(1.0);
+    // 0,5 s suffit : la moyenne vient des durées d'image, pas du nombre de lignes reçues par paquet.
+    let avg_window = (REFRESH_MS.load(Ordering::Relaxed) as f64 / 1000.0).max(0.5);
     let recent = |f: &&(std::time::Instant, f64, u32)| now.duration_since(f.0).as_secs_f64() <= avg_window;
     // Plusieurs processus (appli + enfant GPU) : celui qui affiche le plus d'images.
     let mut count = std::collections::HashMap::<u32, usize>::new();
@@ -418,7 +419,8 @@ fn fps_text() -> FpsText {
         windows_sys::Win32::System::Performance::QueryPerformanceCounter(&mut now);
     }
     let mut q = PRESENTS.lock().unwrap();
-    while q.front().is_some_and(|&t| now - t > freq) {
+    // Dernière demi-seconde : chiffre réactif (une fenêtre d'1 s avait 1 s de retard).
+    while q.front().is_some_and(|&t| now - t > freq / 2) {
         q.pop_front();
     }
     let n = q.len();
@@ -429,7 +431,7 @@ fn fps_text() -> FpsText {
     let ft = span * 1000.0 / (n - 1) as f64;
     let gaps: Vec<f64> = q.iter().zip(q.iter().skip(1)).map(|(a, b)| (b - a) as f64 * 1000.0 / freq as f64).collect();
     FpsText {
-        fps: format!("{n}"),
+        fps: format!("{:.0}", 1000.0 / ft),
         ft: format!("{ft:.1} ms").replace('.', ","),
         low: one_percent_low(&gaps).map_or("—".into(), |l| format!("{l:.0}")),
     }

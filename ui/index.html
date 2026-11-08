@@ -10,18 +10,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Clipper</title>
 <style>
-@font-face{font-family:"Archivo";font-weight:400;font-display:swap;src:url(fonts/archivo-latin-400-normal.woff2) format("woff2")}
-@font-face{font-family:"Archivo";font-weight:500;font-display:swap;src:url(fonts/archivo-latin-500-normal.woff2) format("woff2")}
-@font-face{font-family:"Archivo";font-weight:600;font-display:swap;src:url(fonts/archivo-latin-600-normal.woff2) format("woff2")}
-@font-face{font-family:"JetBrains Mono";font-weight:400;font-display:swap;src:url(fonts/jetbrains-mono-latin-400-normal.woff2) format("woff2")}
-@font-face{font-family:"JetBrains Mono";font-weight:500;font-display:swap;src:url(fonts/jetbrains-mono-latin-500-normal.woff2) format("woff2")}
+@font-face{font-family:"Geist";font-weight:400;font-display:swap;src:url(fonts/geist-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"Geist";font-weight:500;font-display:swap;src:url(fonts/geist-latin-500-normal.woff2) format("woff2")}
+@font-face{font-family:"Geist";font-weight:600;font-display:swap;src:url(fonts/geist-latin-600-normal.woff2) format("woff2")}
+@font-face{font-family:"Geist";font-weight:700;font-display:swap;src:url(fonts/geist-latin-700-normal.woff2) format("woff2")}
+@font-face{font-family:"Geist Mono";font-weight:400;font-display:swap;src:url(fonts/geist-mono-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"Geist Mono";font-weight:500;font-display:swap;src:url(fonts/geist-mono-latin-500-normal.woff2) format("woff2")}
 :root{
   --ground:#0a0d0a;--body:#141913;--panel:#192018;--well:#0d110c;--raise:#222a20;--raise-h:#2a3327;
   --line:#2b3429;--line-2:#3c4739;--text:#e9ece2;--text-2:#b3bba9;--text-3:#8d9786;--off:#7a8572;
   --signal:#ff7d2e;--signal-ink:#1d0e03;--signal-soft:rgba(255,125,46,.16);
   --rec:#ff4a3d;--ok:#9ed672;--warn:#ebc85e;--warn-soft:rgba(235,200,94,.08);--err-soft:rgba(255,74,61,.08);
   --r:10px;--r-k:5px;--ease:cubic-bezier(.16,1,.3,1);
-  --sans:"Archivo",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;
+  --sans:"Geist",system-ui,sans-serif;--mono:"Geist Mono",ui-monospace,monospace;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -118,10 +119,10 @@ svg.i{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .readouts{display:grid;border-top:1px solid var(--line)}
 .ro{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
 .ro .sc{letter-spacing:.11em}
-.ro .val{font-family:var(--mono);font-size:13px;color:var(--text);text-align:right}
-.ro .val.big{font-size:20px;font-weight:500;letter-spacing:-.01em}
+.ro .val{font-family:var(--mono);font-size:15px;font-weight:500;color:var(--text);text-align:right}
 .ro .val small{font-size:11px;color:var(--text-3)}
-.sw-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.sw-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.sw-row+.sw-row{margin-top:16px}
 .sw-row .lbl{display:grid;gap:2px}
 .sw-row .lbl>span:first-child{font-size:13px;font-weight:500}
 
@@ -130,7 +131,7 @@ svg.i{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .grp:last-child{border-bottom:0}
 .grp>h3{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .grp>h3::after{content:"";flex:1;height:1px;background:var(--line)}
-.grp>h3 .sc{color:var(--text-2)}
+.grp>h3 .sc,h3.sc{font-weight:700;color:var(--text);letter-spacing:.1em}
 .grp>h3.fold::after{display:none}
 .grp>h3.fold{margin-bottom:14px}
 .gt{display:flex;flex:1;align-items:center;gap:10px;min-height:28px;padding:0;background:none;border:0;color:inherit;font:inherit;text-align:left;cursor:pointer;border-radius:5px}
@@ -380,11 +381,36 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 .toast .wbtn{grid-row:1/3;grid-column:3;width:28px;height:28px}
 
 @media (prefers-reduced-motion:reduce){
-  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+  /* L'intro est demandée explicitement : elle garde son animation. */
+  :not(#intro,#intro *),:not(#intro *)::before,:not(#intro *)::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+/* ---------- intro : le trombone se clipse sur la page ---------- */
+#intro{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:var(--ground);animation:in-out .35s var(--ease) 1.05s forwards;cursor:pointer}
+#intro .stage{position:relative;width:150px;height:190px}
+#intro .sheet{position:absolute;inset:34px 0 0;border-radius:10px;background:var(--panel);border:1px solid var(--line-2);box-shadow:0 18px 40px rgba(0,0,0,.45);transform-origin:50% 0;animation:in-sheet .5s var(--ease) both,in-press .25s ease-out .52s}
+#intro .sheet i{display:block;height:6px;margin:18px 18px 0;border-radius:3px;background:var(--raise)}
+#intro .sheet i+i{margin-top:10px;width:58%}
+#intro .sheet i+i+i{width:72%}
+#intro .clip{position:absolute;left:50%;top:0;width:64px;height:64px;margin-left:-32px;overflow:visible;transform-origin:50% 60%;animation:in-clip .62s cubic-bezier(.3,1.5,.5,1) .12s both}
+#intro .flash{position:absolute;left:50%;top:34px;width:90px;height:90px;margin:-45px 0 0 -45px;border-radius:50%;border:2px solid var(--signal);opacity:0;animation:in-flash .45s ease-out .55s}
+#intro .word{position:absolute;left:0;right:0;bottom:-44px;text-align:center;font-weight:700;font-size:20px;letter-spacing:-.01em;opacity:0;animation:in-word .4s var(--ease) .62s forwards}
+@keyframes in-sheet{from{opacity:0;transform:translateY(16px) scale(.96)}}
+@keyframes in-press{50%{transform:scaleY(.985)}}
+@keyframes in-clip{0%{opacity:0;transform:translateY(-120px) rotate(-22deg);clip-path:polygon(0 0,100% 0,100% 100%,66% 100%,66% 100%,34% 100%,34% 100%,0 100%)}35%{opacity:1}62%{clip-path:polygon(0 0,100% 0,100% 100%,66% 100%,66% 100%,34% 100%,34% 100%,0 100%)}70%,100%{transform:none;clip-path:polygon(0 0,100% 0,100% 100%,66% 100%,66% 53%,34% 53%,34% 100%,0 100%)}}
+@keyframes in-flash{0%{opacity:.9;transform:scale(.3)}100%{opacity:0;transform:scale(1.4)}}
+@keyframes in-word{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes in-out{to{opacity:0;visibility:hidden;transform:scale(1.03)}}
 </style>
 </head>
 <body>
+<div id="intro" aria-hidden="true">
+  <div class="stage">
+    <div class="sheet"><i></i><i></i><i></i></div>
+    <span class="flash"></span>
+    <svg class="clip" viewBox="0 0 24 24"><defs><linearGradient id="intro-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffb46a"/><stop offset=".55" stop-color="#ff7d2e"/><stop offset="1" stop-color="#c44a06"/></linearGradient></defs><path d="M10 8V15A2 2 0 0 0 14 15V6A4 4 0 0 0 6 6V16A6 6 0 0 0 18 16V7" fill="none" stroke="url(#intro-g)" stroke-width="2.1" stroke-linecap="round"/></svg>
+    <span class="word">Clipper</span>
+  </div>
+</div>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#121c1d"/><stop offset=".55" stop-color="#2a3330"/><stop offset=".78" stop-color="#4b3d32"/></linearGradient>
@@ -645,7 +671,7 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
   <div class="mon-col">
     <h3 class="sc" style="color:var(--text-2)">Niveaux en direct</h3>
     <div id="audioLv" class="stack" style="gap:0">
-      <div class="f"><span class="lab" id="lvG">Jeu</span><div class="vu" id="vuG" role="meter" aria-labelledby="lvG" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div>
+      <div class="f"><span class="lab" id="lvG">Environnement</span><div class="vu" id="vuG" role="meter" aria-labelledby="lvG" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div>
       <div class="f"><span class="lab" id="lvM">Micro</span>
         <div class="vu-row"><div class="vu" id="vuM" role="meter" aria-labelledby="lvM" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
         <button class="btn mute" id="mute" type="button" aria-pressed="false"><svg class="i" aria-hidden="true"><use href="#i-mic"/></svg><span>Couper</span></button></div></div>
@@ -657,14 +683,14 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
     <section class="grp" aria-labelledby="g-a" id="gAudio">
       <h3 id="g-a"><span class="sc">Pistes</span></h3>
       <div class="tracks">
-        <label class="trk"><span class="nm" id="l-tmix">Tout le son</span><input type="checkbox" class="sw" role="switch" data-track="mix" aria-labelledby="l-tmix"><span class="hint">PC et micro mélangés, prêt à partager.</span></label>
-        <label class="trk"><span class="nm" id="l-tgame">Son du PC</span><input type="checkbox" class="sw" role="switch" data-track="game" aria-labelledby="l-tgame"><span class="hint">Jeu, Discord, musique.</span></label>
+        <label class="trk"><span class="nm" id="l-tmix">Tout le son</span><input type="checkbox" class="sw" role="switch" data-track="mix" aria-labelledby="l-tmix"><span class="hint">Environnement et micro mélangés, prêt à partager.</span></label>
+        <label class="trk"><span class="nm" id="l-tgame">Environnement</span><input type="checkbox" class="sw" role="switch" data-track="game" aria-labelledby="l-tgame"><span class="hint">Tout le son du PC : jeux, Discord, musique.</span></label>
         <label class="trk"><span class="nm" id="l-tmic">Micro</span><input type="checkbox" class="sw" role="switch" data-track="mic" aria-labelledby="l-tmic"><span class="hint">Votre voix seule.</span></label>
       </div>
     </section>
     <div id="audioSub">
       <section class="grp" aria-labelledby="g-ag">
-        <h3 id="g-ag"><span class="sc">Son du jeu</span></h3>
+        <h3 id="g-ag"><span class="sc">Environnement</span></h3>
         <div class="f"><label class="lab" for="outDev"><span class="lab-i"><svg class="i" aria-hidden="true"><use href="#i-spk"/></svg>Sortie écoutée</span></label><select class="sel" id="outDev" data-k="out_device" data-t="null"></select></div>
         <div class="f"><label class="lab" for="gv">Volume</label>
           <div class="fader"><div class="fader-w"><input type="range" id="gv" data-k="game_volume" data-t="n" data-div="100" min="0" max="100" step="1"><div class="ruler" aria-hidden="true"></div></div><output for="gv" id="gvo"></output></div></div>
@@ -826,6 +852,8 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 </div>
 
 <script>
+/* ---------- intro : retirée à la fin (ou au clic), jamais rejouée dans la même fenêtre ---------- */
+(()=>{const n=document.getElementById('intro');if(!n)return;const done=()=>n.remove();n.addEventListener('animationend',e=>{if(e.animationName==='in-out')done()});n.addEventListener('click',done);setTimeout(done,1800)})();
 (()=>{
 'use strict';
 /* ---------- mode démo (navigateur, sans Rust) ---------- */
@@ -1032,7 +1060,7 @@ function render(){
   $('#monFmt').textContent=cw+'×'+ch+' · '+C.clip.fps;
   $('#h-desk').textContent=C.desktop_capture?'Activée : le buffer tourne en permanence, même sur le bureau.':'Désactivée : le buffer ne tourne que pendant un jeu plein écran. 0 % GPU sur le bureau.';
   const at=C.audio_tracks||[];$$('[data-track]').forEach(x=>x.checked=at.includes(x.dataset.track));
-  $('#amHint').textContent=at.length?at.length+' piste'+(at.length>1?'s':'')+' audio dans chaque clip, dans l\'ordre : '+TRACKS.filter(t=>at.includes(t)).map(t=>({mix:'Tout',game:'PC',mic:'Micro'})[t]).join(', ')+'.':'Clips muets : activez au moins une piste.';
+  $('#amHint').textContent=at.length?at.length+' piste'+(at.length>1?'s':'')+' audio dans chaque clip, dans l\'ordre : '+TRACKS.filter(t=>at.includes(t)).map(t=>({mix:'Tout',game:'Environnement',mic:'Micro'})[t]).join(', ')+'.':'Clips muets : activez au moins une piste.';
   $('#audioSub').hidden=$('#audioLv').hidden=!at.length;
   const mu=$('#mute');mu.setAttribute('aria-pressed',!!C.mic_muted);mu.querySelector('span').textContent=C.mic_muted?'Coupé':'Couper';mu.querySelector('use').setAttribute('href',C.mic_muted?'#i-micoff':'#i-mic');$('#vuM').classList.toggle('muted',!!C.mic_muted);
   const ovk=hkLive.overlay||pretty(C.key_overlay);

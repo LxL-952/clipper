@@ -678,14 +678,26 @@ pub fn concat(cfg: &Config, segs: &[PathBuf], out: &Path) -> Result<(), String> 
     let list = out.with_extension("txt");
     let body: String = segs.iter().map(|p| format!("file '{}'\n", p.display().to_string().replace('\'', "'\\''"))).collect();
     std::fs::write(&list, body).map_err(|e| e.to_string())?;
+    // Écrit sous un nom .part puis renommé : l'onglet Vidéos ne voit jamais un clip à moitié écrit.
+    let part = out.with_extension(format!("{}.part", cfg.container));
+    let format = match cfg.container.as_str() {
+        "mkv" => "matroska",
+        "mov" => "mov",
+        _ => "mp4",
+    };
     let mut c = ffmpeg(cfg);
     c.args(["-loglevel", "error", "-f", "concat", "-safe", "0", "-i"]).arg(&list).args(["-map", "0", "-c", "copy"]);
     if cfg.container != "mkv" {
         c.args(["-movflags", "+faststart"]);
     }
-    let ok = c.arg("-y").arg(out).status().is_ok_and(|s| s.success());
+    let ok = c.args(["-f", format, "-y"]).arg(&part).status().is_ok_and(|s| s.success()) && std::fs::rename(&part, out).is_ok();
     let _ = std::fs::remove_file(&list);
-    if ok { Ok(()) } else { Err("ffmpeg n'a pas pu assembler le clip.".into()) }
+    if ok {
+        Ok(())
+    } else {
+        let _ = std::fs::remove_file(&part);
+        Err("ffmpeg n'a pas pu assembler le clip.".into())
+    }
 }
 
 /// "2026-11-07 21-14-03" en heure locale.

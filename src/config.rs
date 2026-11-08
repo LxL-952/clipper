@@ -96,7 +96,7 @@ impl Default for Config {
             overlay_corner: "tl".into(),
             overlay_size: "m".into(),
             overlay_opacity: 0.7,
-            overlay_refresh_ms: 500,
+            overlay_refresh_ms: 250,
             admin_mode: false,
         }
     }

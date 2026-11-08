@@ -144,7 +144,7 @@ pub fn open<T: 'static>(
     wb = match kind {
         Kind::Main => wb.with_inner_size(LogicalSize::new(900.0, 620.0)).with_min_inner_size(LogicalSize::new(760.0, 520.0)),
         Kind::Bar => {
-            // Transparente, au premier plan, sans focus, hors barre des tâches. Placée après création (voir place_bar).
+            // Transparente, au premier plan, hors barre des tâches. Placée et focalisée après création (voir place_bar).
             wb.with_inner_size(LogicalSize::new(900.0, 130.0))
                 .with_visible(false)
                 .with_transparent(true)
@@ -157,8 +157,11 @@ pub fn open<T: 'static>(
     };
     let window = wb.build(target).ok()?;
     if kind == Kind::Bar {
-        no_activate(&window);
+        tool_window(&window);
         place_bar(&window);
+        // Focus pris : le jeu rend la souris (curseur visible, plus bloqué), et Échap ferme la barre.
+        // Le focus revient au jeu à la fermeture (main.rs, close_bar).
+        window.set_focus();
     }
     if kind == Kind::Main {
         window.set_visible(true);
@@ -179,14 +182,14 @@ pub fn open<T: 'static>(
     Some(Win { window, web })
 }
 
-/// WS_EX_NOACTIVATE : la barre ne vole jamais le focus du jeu.
-fn no_activate(w: &Window) {
+/// WS_EX_TOOLWINDOW : ni barre des tâches ni Alt+Tab. La barre peut prendre le focus (souris rendue par le jeu).
+fn tool_window(w: &Window) {
     use tao::platform::windows::WindowExtWindows;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_TOOLWINDOW};
     let h = w.hwnd() as _;
     unsafe {
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW as isize);
     }
 }
 

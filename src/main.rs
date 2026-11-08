@@ -210,6 +210,8 @@ struct App {
     overlay_shown: bool,
     main: Option<ui::Win>,
     bar: Option<ui::Win>,
+    /// Fenêtre au premier plan (le jeu) quand la barre s'est ouverte : elle reprend le focus à la fermeture.
+    bar_prev: isize,
     keys: Keys,
     gpu: Option<drivers::Gpu>,
     driver_url: Option<String>,
@@ -291,6 +293,22 @@ impl App {
         }
     }
 
+    /// Barre Alt+Z : mémorise le jeu, puis ouvre (la barre prend le focus : le jeu rend la souris).
+    fn open_bar(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.bar_prev = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as isize;
+        self.open(ui::Kind::Bar, target, None);
+    }
+
+    /// Ferme la barre et rend le focus au jeu (simple changement de fenêtre, comme Alt+Tab).
+    fn close_bar(&mut self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+        self.bar = None;
+        let h = std::mem::take(&mut self.bar_prev) as windows_sys::Win32::Foundation::HWND;
+        if !h.is_null() && unsafe { IsWindow(h) } != 0 {
+            unsafe { SetForegroundWindow(h) };
+        }
+    }
+
     fn clip(&self) {
         let (c, b, p) = (self.cfg.clone(), self.buffer.clone(), self.proxy.clone());
         std::thread::spawn(move || {
@@ -340,7 +358,7 @@ impl App {
             "open_settings" => self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str)),
             "close" => match kind {
                 ui::Kind::Main => self.main = None,
-                ui::Kind::Bar => self.bar = None,
+                ui::Kind::Bar => self.close_bar(),
             },
             "minimize" => {
                 if let Some(w) = &self.main {
@@ -683,6 +701,7 @@ fn main() {
         overlay_shown: false,
         main: None,
         bar: None,
+        bar_prev: 0,
         keys,
         gpu: drivers::installed(),
         driver_url: None,
@@ -716,8 +735,10 @@ fn main() {
                 } else if is(&app.keys.rec) {
                     app.toggle_rec();
                 } else if is(&app.keys.bar) {
-                    if app.bar.take().is_none() {
-                        app.open(ui::Kind::Bar, target, None);
+                    if app.bar.is_some() {
+                        app.close_bar();
+                    } else {
+                        app.open_bar(target);
                     }
                 } else if is(&app.keys.overlay) {
                     app.overlay_shown = !app.overlay_shown;
