@@ -537,12 +537,12 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
       </div>
       <p class="note indent-note" id="encWarn" hidden style="margin-top:10px"><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span><b>x264 encode sur le processeur.</b> En jeu, il prend des cœurs au jeu et peut faire chuter les FPS. À réserver aux PC sans encodeur matériel.</span></p>
       <div class="f">
-        <label class="lab" for="q">Qualité<small>débit</small></label>
+        <label class="lab" for="q">Qualité<small>débit max</small></label>
         <div class="fader">
           <div class="fader-w">
-            <input type="range" id="q" data-k="quality" data-t="n" min="0.5" max="1.5" step="0.05" aria-describedby="qout">
+            <input type="range" id="q" data-k="quality" data-t="n" min="0.5" max="2" step="0.05" aria-describedby="qout">
             <div class="ruler" aria-hidden="true"></div>
-            <div class="ruler-l" aria-hidden="true"><span>×0,5</span><span>×1</span><span>×1,5</span></div>
+            <div class="ruler-l" aria-hidden="true"><span>×0,5</span><span>×1,25</span><span>×2</span></div>
           </div>
           <output id="qout" for="q"></output>
         </div>
@@ -1081,17 +1081,20 @@ function outputs(t){const o=document.querySelector(`output[for=${t.id}]`);if(o&&
 
 /* ---------- calcul ---------- */
 const BASE={720:10,1080:20,1440:35,2160:70};
-function mbps(q){let b=(BASE[q.height]||20)*(q.fps<=30?.65:1)*Math.min(1.5,Math.max(.5,+C.quality||1));if(/^(hevc|av1)/.test(C.encoder))b*=.7;return b}
+function mbps(q){let b=(BASE[q.height]||20)*(q.fps<=30?.65:1)*Math.min(2,Math.max(.5,+C.quality||1));if(/^(hevc|av1)/.test(C.encoder))b*=.7;return b}
+/* NVENC / x264 en qualité constante : le débit est un plafond. Mesuré sur du jeu : 27 à 36 % du plafond ;
+   on affiche 40 % (prudent), le plafond restant la taille maximale. AMF / QSV : débit constant. */
+const typical=()=>/_nvenc$|^libx264$/.test(C.encoder)?.4:1;
 const TRACKS=['mix','game','mic'];
 const tracks=()=>(C.audio_tracks||[]).length;
 function calc(){
-  const a=tracks()*.16,cb=mbps(C.clip),rb=mbps(C.rec),buf=C.buffer_secs;
-  $('#roClip').textContent='≈ '+Math.round((cb+a)*buf/8).toLocaleString('fr-FR')+' Mo';
-  $('#roRec').innerHTML='≈ '+Math.round((rb+a)*60/8).toLocaleString('fr-FR')+' Mo<small>/min</small>';
-  const gh=(cb+a)*3600/8/1000;
+  const a=tracks()*.16,cb=mbps(C.clip),rb=mbps(C.rec),buf=C.buffer_secs,k=typical(),mo=n=>Math.round(n).toLocaleString('fr-FR');
+  $('#roClip').innerHTML='≈ '+mo((cb*k+a)*buf/8)+' Mo'+(k<1?'<small> · max '+mo((cb+a)*buf/8)+'</small>':'');
+  $('#roRec').innerHTML='≈ '+mo((rb*k+a)*60/8)+' Mo<small>/min</small>';
+  const gh=(cb*k+a)*3600/8/1000;
   $('#roW').innerHTML='≈ '+fr(gh)+' Go<small>/h</small>';
   $('#hintW').textContent='≈ '+fr(gh)+' Go/h';$('#limW').textContent=fr(gh)+' Go par heure';
-  $('#qout').innerHTML='×'+fr(C.quality,2)+' · '+fr(cb,0)+' <small>Mb/s</small>';
+  $('#qout').innerHTML='×'+fr(C.quality,2)+' · '+(k<1?'max ':'')+fr(cb,0)+' <small>Mb/s</small>';
 }
 
 /* ---------- rendu ---------- */

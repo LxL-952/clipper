@@ -57,16 +57,25 @@ pub fn bitrate_kbps(h: u32, fps: u32, encoder: &str, quality: f32) -> u32 {
     };
     let fps_k = if fps <= 30 { 0.65 } else { 1.0 };
     let codec_k = if encoder.starts_with("hevc") || encoder.starts_with("av1") { 0.7 } else { 1.0 };
-    (base * fps_k * codec_k * quality.clamp(0.5, 1.5)) as u32
+    (base * fps_k * codec_k * quality.clamp(0.5, 2.0)) as u32
+}
+
+/// NVENC et x264 : qualité constante plafonnée (le débit calculé est un maximum, pas une dépense fixe).
+fn constant_quality(encoder: &str) -> bool {
+    encoder.ends_with("_nvenc") || encoder == "libx264"
 }
 
 /// Preset le plus léger compatible avec la qualité visée.
 fn preset_args(encoder: &str, quality: f32) -> Vec<&'static str> {
     if encoder.ends_with("_nvenc") {
-        // Mesuré à 1200p60 : p1 = 7 % NVENC, p3 = 14 %. À débit CBR égal, l'écart de qualité est faible.
-        let p = if quality <= 1.0 { "p1" } else if quality <= 1.3 { "p2" } else { "p4" };
-        vec!["-preset", p, "-tune", "ll", "-rc", "cbr"]
+        // Mesuré à 1200p60 : p1 = 7 % NVENC, p3 = 14 %. Au-delà de x1, p2 (un peu plus de GPU) ; jamais plus.
+        let p = if quality <= 1.0 { "p1" } else { "p2" };
+        // Qualité constante : mesuré sur 60 s de jeu, CBR 14 Mb/s HEVC = 94 Mo VMAF 97,4 ; CQ 24 = 34 Mo
+        // VMAF 97,0 (H.264 : 143 Mo -> 38 Mo, CQ 23). Même travail GPU, l'action garde le débit max.
+        let cq = if encoder.starts_with("h264") { "23" } else if encoder.starts_with("hevc") { "24" } else { "30" };
+        vec!["-preset", p, "-tune", "ll", "-rc", "vbr", "-cq", cq]
     } else if encoder.ends_with("_amf") {
+        // AMF reste en CBR : son mode qualité (QVBR 23) tombait à VMAF 85, visible.
         vec!["-quality", "speed", "-rc", "cbr"]
     } else if encoder.ends_with("_qsv") {
         vec!["-preset", "veryfast"]
@@ -481,8 +490,12 @@ fn capture_args(cfg: &Config, q: crate::config::Quality, native: (u32, u32), pip
     a.extend(crate::audio::output_args(if kinds.len() == pipes.len() { &kinds } else { &[] }));
     a.extend(["-c:v".into(), cfg.encoder.clone()]);
     a.extend(preset_args(&cfg.encoder, cfg.quality).iter().map(|s| s.to_string()));
+    let target = if constant_quality(&cfg.encoder) { "0".to_string() } else { format!("{kb}k") };
+    if cfg.encoder == "libx264" {
+        a.extend(["-crf".into(), "22".into()]);
+    }
     for s in [
-        "-b:v".into(), format!("{kb}k"), "-maxrate".into(), format!("{kb}k"), "-bufsize".into(), format!("{kb}k"),
+        "-b:v".into(), target, "-maxrate".into(), format!("{kb}k"), "-bufsize".into(), format!("{}k", kb * 2),
         "-g".into(), (q.fps * SEG_SECS).to_string(), "-forced-idr".into(), "1".into(),
     ] {
         a.push(s);
@@ -841,6 +854,7 @@ mod tests {
         assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 1.0), 20_000);
         assert_eq!(bitrate_kbps(1080, 30, "h264_nvenc", 1.0), 13_000);
         assert_eq!(bitrate_kbps(2160, 60, "hevc_nvenc", 1.0), 49_000);
+        assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 2.0), 40_000); // plafond du curseur
     }
 
     #[test]

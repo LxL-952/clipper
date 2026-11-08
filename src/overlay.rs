@@ -21,6 +21,8 @@ struct Look {
 
 static LOOK: Mutex<Option<Look>> = Mutex::new(None);
 static VISIBLE: AtomicBool = AtomicBool::new(false);
+/// Overlay utilisable (mode raccourci ou toujours) : ses sondes sont préchargées.
+static ENABLED: AtomicBool = AtomicBool::new(false);
 static TEXT: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// Clé de chaque ligne de TEXT (« fps », « cpu »…), dans le même ordre : pour retrouver sa courbe.
 static KEYS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -68,6 +70,7 @@ pub fn apply(cfg: &Config, shown: bool) {
         opacity: cfg.overlay_opacity.clamp(0.2, 1.0),
     });
     REFRESH_MS.store(cfg.overlay_refresh_ms.clamp(100, 5000), Ordering::Relaxed);
+    ENABLED.store(cfg.overlay_mode == "always" || cfg.overlay_mode == "hotkey", Ordering::Relaxed);
     let v = cfg.overlay_mode == "always" || (cfg.overlay_mode == "hotkey" && shown);
     VISIBLE.store(v, Ordering::Relaxed);
     WIDTH.store(0, Ordering::Relaxed); // taille, éléments ou visibilité changés : largeur recalculée
@@ -299,7 +302,15 @@ fn run_presentmon() -> bool {
     let watcher = std::thread::spawn(move || {
         let w = std::thread::current();
         WAKE.lock().unwrap().push(w.clone());
-        while VISIBLE.load(Ordering::Relaxed) && matches!(c.lock().unwrap().try_wait(), Ok(None)) {
+        // Masqué : PresentMon reste 30 s de plus. Un Alt+F rapide réaffiche les FPS tout de suite au lieu
+        // d'attendre ~1 s qu'il redémarre (coût : ~1 % de CPU pendant ces 30 s, puis plus rien).
+        let mut hidden_since: Option<std::time::Instant> = None;
+        while matches!(c.lock().unwrap().try_wait(), Ok(None)) {
+            if VISIBLE.load(Ordering::Relaxed) {
+                hidden_since = None;
+            } else if hidden_since.get_or_insert_with(std::time::Instant::now).elapsed().as_secs() >= 30 {
+                break;
+            }
             std::thread::park_timeout(std::time::Duration::from_secs(1));
         }
         WAKE.lock().unwrap().retain(|t| t.id() != w.id());
@@ -718,14 +729,16 @@ unsafe fn window_thread() {
         SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE);
         OV.store(h, Ordering::Relaxed);
         PostMessageW(h, WM_APP, 0, 0); // apply() a pu passer avant la création de la fenêtre
-        // Sondes chargées au premier affichage seulement : sinon nvml.dll et PDH ne sont jamais en mémoire.
-        let mut probes: Option<(Cpu, Option<Nvml>, Option<Thermal>)> = None;
+        let load = || {
+            let mut c = Cpu { last: (0, 0) };
+            c.sample();
+            (c, Nvml::load(), Thermal::open())
+        };
+        // Overlay activé (raccourci ou toujours) : sondes chargées dès le lancement, l'overlay s'affiche
+        // sans les ~0,4 s de chargement. Mode « masqué » : jamais chargées (nvml.dll et PDH hors mémoire).
+        let mut probes: Option<(Cpu, Option<Nvml>, Option<Thermal>)> = ENABLED.load(Ordering::Relaxed).then(load);
         let tick = |probes: &mut Option<(Cpu, Option<Nvml>, Option<Thermal>)>| {
-            let (cpu, nv, th) = probes.get_or_insert_with(|| {
-                let mut c = Cpu { last: (0, 0) };
-                c.sample();
-                (c, Nvml::load(), Thermal::open())
-            });
+            let (cpu, nv, th) = probes.get_or_insert_with(load);
             refresh(cpu, nv, th);
             let look = LOOK.lock().unwrap().clone();
             if let Some(look) = look {
