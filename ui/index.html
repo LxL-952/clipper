@@ -131,6 +131,36 @@ svg.i{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .grp>h3{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .grp>h3::after{content:"";flex:1;height:1px;background:var(--line)}
 .grp>h3 .sc{color:var(--text-2)}
+.grp>h3.fold::after{display:none}
+.grp>h3.fold{margin-bottom:14px}
+.gt{display:flex;flex:1;align-items:center;gap:10px;min-height:28px;padding:0;background:none;border:0;color:inherit;font:inherit;text-align:left;cursor:pointer;border-radius:5px}
+.gt .chev{order:2;margin-left:auto;width:14px;height:14px;color:var(--text-3);transition:transform .2s var(--ease)}
+.gt:hover .chev,.gt:focus-visible .chev{color:var(--text)}
+.gt[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.grp.closed{padding-bottom:18px}
+.grp.closed>h3.fold{margin-bottom:0}
+.grp.closed>:not(h3){display:none!important}
+.savebar{position:fixed;right:16px;bottom:16px;z-index:60;display:flex;align-items:center;gap:8px;max-width:calc(100% - 32px);padding:8px 8px 8px 14px;background:var(--raise);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.45);animation:sbIn .18s var(--ease)}
+.savebar[hidden]{display:none}
+.savebar .sb-t{display:grid;gap:2px;margin-right:6px;font-size:13px;min-width:0}
+.savebar .sb-t .hint{font-size:12px}
+.ctx{position:fixed;z-index:70;min-width:210px;padding:4px;background:var(--raise);border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
+.ctx[hidden]{display:none}
+.ctx button{display:flex;align-items:center;gap:10px;width:100%;min-height:32px;padding:0 10px;background:none;border:0;border-radius:5px;color:var(--text);font:inherit;font-size:13px;text-align:left;cursor:pointer}
+.ctx button .i{width:15px;height:15px;color:var(--text-3)}
+.ctx button:hover,.ctx button:focus-visible{background:var(--raise-h);outline:none}
+.ctx .danger,.ctx .danger .i{color:#ff8f7d}
+.ctx hr{border:0;height:1px;background:var(--line);margin:4px 2px}
+.q2{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:12px}
+@media (max-width:640px){.q2{grid-template-columns:1fr}}
+.tracks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.trk{display:grid;align-content:start;gap:8px;padding:12px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.012);cursor:pointer}
+.trk:has(input:checked){border-color:var(--signal-soft);background:rgba(255,125,46,.05)}
+.trk .nm{font-size:13px;font-weight:600}
+.trk .hint{font-size:11.5px;line-height:1.35}
+.trk .sw{justify-self:start}
+.chip:has(input:disabled){opacity:.45;cursor:not-allowed}
+@keyframes sbIn{from{opacity:0;transform:translateY(8px)}}
 .f{display:grid;grid-template-columns:118px minmax(0,1fr);align-items:center;gap:10px 14px;min-height:34px}
 .f+.f{margin-top:10px}
 .f>.lab{font-size:13px;color:var(--text-2)}
@@ -443,35 +473,23 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
   <div class="set-col" id="setCol">
     <section class="grp" aria-labelledby="g-cap">
       <h3 id="g-cap"><span class="sc">Capture</span></h3>
-      <div class="chans">
-        <div class="ch" role="group" aria-labelledby="ch-clip">
-          <div class="ch-h"><span class="nm" id="ch-clip"><svg class="i" aria-hidden="true"><use href="#i-clip"/></svg>Clip</span><span class="n" data-hk="clip"></span></div>
-          <span class="sc" id="cr">Résolution</span>
-          <div class="seg fill" role="radiogroup" aria-labelledby="cr" data-res="clip"></div>
-          <span class="sc" id="cf">Images/s</span>
-          <div class="seg fill" role="radiogroup" aria-labelledby="cf">
-            <label><input type="radio" name="clip_fps" data-k="clip.fps" data-t="n" value="30"><span class="n">30</span></label>
-            <label><input type="radio" name="clip_fps" data-k="clip.fps" data-t="n" value="60"><span class="n">60</span></label>
-          </div>
-          <span class="out n" id="outClip"></span>
+      <div class="ch" role="group" aria-labelledby="ch-clip">
+        <div class="ch-h"><span class="nm" id="ch-clip"><svg class="i" aria-hidden="true"><use href="#i-clip"/></svg>Clip et <span class="led rec" aria-hidden="true"></span>REC</span><span class="n"><span data-hk="clip"></span> · <span data-hk="rec"></span></span></div>
+        <div class="q2">
+          <div class="stack" style="gap:8px"><span class="sc" id="cr">Résolution</span>
+            <div class="seg fill" role="radiogroup" aria-labelledby="cr" data-res="clip"></div></div>
+          <div class="stack" style="gap:8px"><span class="sc" id="cf">Images/s</span>
+            <div class="seg fill" role="radiogroup" aria-labelledby="cf">
+              <label><input type="radio" name="clip_fps" data-k="clip.fps" data-t="n" value="30"><span class="n">30</span></label>
+              <label><input type="radio" name="clip_fps" data-k="clip.fps" data-t="n" value="60"><span class="n">60</span></label>
+            </div></div>
         </div>
-        <div class="ch" role="group" aria-labelledby="ch-rec">
-          <div class="ch-h"><span class="nm" id="ch-rec"><span class="led rec" aria-hidden="true"></span>REC</span><span class="n" data-hk="rec"></span></div>
-          <span class="sc" id="rr">Résolution</span>
-          <div class="seg fill" role="radiogroup" aria-labelledby="rr" data-res="rec"></div>
-          <span class="sc" id="rf">Images/s</span>
-          <div class="seg fill" role="radiogroup" aria-labelledby="rf">
-            <label><input type="radio" name="rec_fps" data-k="rec.fps" data-t="n" value="30"><span class="n">30</span></label>
-            <label><input type="radio" name="rec_fps" data-k="rec.fps" data-t="n" value="60"><span class="n">60</span></label>
-          </div>
-          <span class="out n" id="outRec"></span>
-        </div>
+        <span class="out n" id="outClip"></span>
+        <span class="hint">Même qualité pour le Clip et le REC : le REC réutilise le buffer, sans 2<sup>e</sup> capture ni coût en plus.</span>
       </div>
       <div class="stack" style="margin-top:12px">
         <p class="note info" id="natNote"><svg class="i" aria-hidden="true"><use href="#i-info"/></svg><span id="natTxt"></span></p>
-        <p class="note" id="scaleWarn" hidden><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span id="scaleTxt"></span></p>
-        <p class="note" id="recWarn" hidden><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span><b>REC différent du buffer.</b> Pendant un REC, une 2<sup>e</sup> capture tourne en parallèle (coût GPU en plus). Donnez au REC la même résolution et les mêmes images/s que le Clip pour qu'il réutilise le buffer sans coût.</span></p>
-      </div>
+        <p class="note" id="scaleWarn" hidden><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span id="scaleTxt"></span></p>      </div>
       <div class="f" style="margin-top:14px">
         <label class="lab" for="mon">Écran capturé</label>
         <select class="sel" id="mon" data-k="monitor" data-t="n"></select>
@@ -559,6 +577,14 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
             <label><input type="radio" name="overlay_size" data-k="overlay_size" value="m">Moyenne</label>
             <label><input type="radio" name="overlay_size" data-k="overlay_size" value="l">Grande</label>
           </div></div>
+        <div class="f"><span class="lab" id="rfL">Mise à jour<small>des chiffres</small></span>
+          <div class="seg" role="radiogroup" aria-labelledby="rfL">
+            <label><input type="radio" name="overlay_refresh_ms" data-k="overlay_refresh_ms" data-t="n" value="250"><span class="n">0,25 s</span></label>
+            <label><input type="radio" name="overlay_refresh_ms" data-k="overlay_refresh_ms" data-t="n" value="500"><span class="n">0,5 s</span></label>
+            <label><input type="radio" name="overlay_refresh_ms" data-k="overlay_refresh_ms" data-t="n" value="1000"><span class="n">1 s</span></label>
+            <label><input type="radio" name="overlay_refresh_ms" data-k="overlay_refresh_ms" data-t="n" value="2000"><span class="n">2 s</span></label>
+          </div></div>
+        <p class="hint indent">Le 1 % low est calculé sur les 10 dernières secondes : la moyenne des 1 % d'images les plus lentes, comme Afterburner et CapFrameX.</p>
         <div class="f"><label class="lab" for="op">Opacité du fond</label>
           <div class="fader"><div class="fader-w"><input type="range" id="op" data-k="overlay_opacity" data-t="n" data-div="100" min="0" max="100" step="5"><div class="ruler" aria-hidden="true"></div></div><output for="op" id="opo"></output></div></div>
         <p class="note"><svg class="i" aria-hidden="true"><use href="#i-lock"/></svg><span><b>FPS et temps d'image demandent les droits administrateur</b> (ou le groupe « Utilisateurs du journal de performances »). Sans eux, seuls CPU, GPU, températures et mémoire s'affichent.</span></p>
@@ -568,16 +594,21 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 
     <section class="grp" aria-labelledby="g-adv">
       <h3 id="g-adv"><span class="sc">Avancé</span></h3>
+      <div class="sw-row">
+        <span class="lbl"><span id="l-auto">Ouvrir au démarrage</span><span class="hint">Clipper se lance avec Windows, réduit dans la zone de notification.</span></span>
+        <input type="checkbox" class="sw" role="switch" id="autoSw" aria-labelledby="l-auto">
+      </div>
+      <div class="sw-row">
+        <span class="lbl"><span id="l-admin">Démarrer en administrateur</span><span class="hint" id="h-admin"></span></span>
+        <input type="checkbox" class="sw" role="switch" id="adminSw" aria-labelledby="l-admin" aria-describedby="h-admin">
+      </div>
+      <div class="acts" id="adminRel" hidden style="margin:8px 0 12px"><button class="btn" type="button" id="adminRelBtn"><svg class="i" aria-hidden="true"><use href="#i-refresh"/></svg>Relancer en administrateur</button></div>
       <details class="more">
         <summary><svg class="i" aria-hidden="true"><use href="#i-chev"/></svg>Puce d'encodage<span class="s" id="chipS"></span></summary>
         <div class="in">
-          <div class="seg" role="radiogroup" aria-label="Puce d'encodage">
-            <label><input type="radio" name="encode_chip" data-k="encode_chip" value="auto">Automatique</label>
-            <label><input type="radio" name="encode_chip" data-k="encode_chip" value="dgpu">Carte graphique</label>
-            <label id="igpuL"><input type="radio" name="encode_chip" data-k="encode_chip" value="igpu">Puce intégrée</label>
-          </div>
-          <p class="hint" id="igpuNo" hidden>Puce intégrée indisponible : aucun encodeur AMF (AMD) ou QSV (Intel) n'a passé le test sur ce PC.</p>
-          <p class="note info"><svg class="i" aria-hidden="true"><use href="#i-info"/></svg><span>Automatique = carte graphique. NVENC est déjà une puce séparée des cœurs qui font tourner le jeu (impact typique <span class="n">1–3 %</span> de FPS). La puce intégrée libère NVENC mais coûte environ <span class="n">6 %</span> de processeur et de la bande passante mémoire. <b>Si votre jeu est limité par le processeur, restez sur la carte graphique.</b></span></p>
+          <div class="seg" role="radiogroup" aria-label="Puce d'encodage" id="chipSeg"></div>
+          <p class="hint">Les encodeurs des autres puces sont grisés dans « Encodeur ». x264 (processeur) reste toujours possible.</p>
+          <p class="note info" id="chipNote"><svg class="i" aria-hidden="true"><use href="#i-info"/></svg><span>NVENC est déjà une puce séparée des cœurs qui font tourner le jeu (impact typique <span class="n">1–3 %</span> de FPS). La puce intégrée libère NVENC mais coûte environ <span class="n">6 %</span> de processeur et de la bande passante mémoire. <b>Si votre jeu est limité par le processeur, restez sur la carte graphique.</b></span></p>
         </div>
       </details>
       <details class="more">
@@ -625,13 +656,10 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
   <div class="set-col">
     <section class="grp" aria-labelledby="g-a" id="gAudio">
       <h3 id="g-a"><span class="sc">Pistes</span></h3>
-      <div class="f">
-        <span class="lab" id="amL">Enregistrer</span>
-        <div class="seg" role="radiogroup" aria-labelledby="amL">
-          <label><input type="radio" name="audio_mode" data-k="audio_mode" value="none">Aucune</label>
-          <label><input type="radio" name="audio_mode" data-k="audio_mode" value="mixed">1 piste mixée</label>
-          <label><input type="radio" name="audio_mode" data-k="audio_mode" value="split">2 pistes</label>
-        </div>
+      <div class="tracks">
+        <label class="trk"><span class="nm" id="l-tmix">Tout le son</span><input type="checkbox" class="sw" role="switch" data-track="mix" aria-labelledby="l-tmix"><span class="hint">PC et micro mélangés, prêt à partager.</span></label>
+        <label class="trk"><span class="nm" id="l-tgame">Son du PC</span><input type="checkbox" class="sw" role="switch" data-track="game" aria-labelledby="l-tgame"><span class="hint">Jeu, Discord, musique.</span></label>
+        <label class="trk"><span class="nm" id="l-tmic">Micro</span><input type="checkbox" class="sw" role="switch" data-track="mic" aria-labelledby="l-tmic"><span class="hint">Votre voix seule.</span></label>
       </div>
     </section>
     <div id="audioSub">
@@ -661,7 +689,7 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
     <div id="vInfo" class="stack" hidden>
       <p class="vname sel-text" id="vName"></p>
       <p class="vmeta" id="vMeta"></p>
-      <p class="note err" id="vErr" hidden><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span><b>Lecture impossible ici.</b> Si la vidéo est en HEVC, Windows a besoin de l'extension « Vidéo HEVC » (Microsoft Store). Le fichier n'est pas abîmé : ouvrez-le avec le lecteur de votre choix.<span class="acts"><button class="btn" type="button" data-va="open_folder"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>Ouvrir le dossier</button></span></span></p>
+      <p class="note err" id="vErr" hidden><svg class="i" aria-hidden="true"><use href="#i-warn"/></svg><span><b>Lecture impossible ici.</b> <span id="vErrT"></span> Le fichier est peut-être incomplet ou abîmé : essayez-le avec le lecteur de votre choix.<span class="acts"><button class="btn" type="button" data-va="open_folder"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>Ouvrir le dossier</button></span></span></p>
       <div class="acts" id="vActs">
         <button class="btn" type="button" id="vRen"><svg class="i" aria-hidden="true"><use href="#i-pen"/></svg>Renommer</button>
         <button class="btn" type="button" data-va="open_folder"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>Ouvrir le dossier</button>
@@ -783,6 +811,19 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 </div>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="ctx" id="ctx" role="menu" aria-label="Actions du clip" hidden>
+  <button type="button" role="menuitem" data-ctx="play"><svg class="i" aria-hidden="true"><use href="#i-clip"/></svg>Lire ici</button>
+  <button type="button" role="menuitem" data-ctx="open"><svg class="i" aria-hidden="true"><use href="#i-arrow"/></svg>Ouvrir avec le lecteur</button>
+  <button type="button" role="menuitem" data-ctx="open_folder"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>Ouvrir le dossier</button>
+  <button type="button" role="menuitem" data-ctx="rename"><svg class="i" aria-hidden="true"><use href="#i-pen"/></svg>Renommer</button>
+  <hr>
+  <button type="button" role="menuitem" class="danger" data-ctx="delete"><svg class="i" aria-hidden="true"><use href="#i-trash"/></svg>Supprimer</button>
+</div>
+<div class="savebar" id="saveBar" role="region" aria-label="Modifications non enregistrées" hidden>
+  <span class="sb-t"><b>Modifications non enregistrées</b><span class="hint" id="saveHint"></span></span>
+  <button class="btn ghost" type="button" id="saveReset">Annuler</button>
+  <button class="btn primary" type="button" id="saveGo">Enregistrer</button>
+</div>
 
 <script>
 (()=>{
@@ -791,8 +832,9 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 if(!window.__INIT__){
   window.__DEV__=true;
   const nogpu=/nogpu/.test(location.hash), novid=/vide/.test(location.hash);
-  const C0={buffer_secs:180,clip:{height:1080,fps:60},rec:{height:1080,fps:30},encoder:"h264_nvenc",quality:1,container:"mp4",audio_mode:"split",out_device:null,mic_device:"{0.0.1.00000000}.{b2c1}",game_volume:1,mic_volume:.8,mic_muted:false,key_clip:"Alt+KeyX",key_rec:"Alt+KeyR",key_bar:"Alt+KeyZ",out_dir:"C:\\Users\\Kurero\\Videos\\Clipper",ffmpeg:"ffmpeg",driver_branch:"game_ready",encode_chip:"auto",monitor:0,stretch:"off",desktop_capture:true,buffer_dir:"C:\\Users\\Kurero\\AppData\\Local\\Temp\\Clipper\\buf",overlay_mode:"hotkey",key_overlay:"Alt+KeyF",overlay_items:["fps","frametime","cpu","gpu"]};
+  const C0={buffer_secs:180,clip:{height:1080,fps:60},rec:{height:1080,fps:30},encoder:"h264_nvenc",quality:1,container:"mp4",audio_mode:"split",audio_tracks:["game","mic"],out_device:null,mic_device:"{0.0.1.00000000}.{b2c1}",game_volume:1,mic_volume:.8,mic_muted:false,key_clip:"Alt+KeyX",key_rec:"Alt+KeyR",key_bar:"Alt+KeyZ",out_dir:"C:\\Users\\Kurero\\Videos\\Clipper",ffmpeg:"ffmpeg",driver_branch:"game_ready",encode_chip:"auto",monitor:0,stretch:"off",desktop_capture:true,buffer_dir:"C:\\Users\\Kurero\\AppData\\Local\\Temp\\Clipper\\buf",overlay_mode:"hotkey",key_overlay:"Alt+KeyF",overlay_items:["fps","frametime","cpu","gpu"]};
   window.__INIT__={page:"index",config:C0,encoders:["h264_nvenc","hevc_nvenc","av1_nvenc","h264_amf","hevc_amf","libx264"],native:[1920,1200],
+    gpus:[{id:"nvidia",name:"NVIDIA GeForce RTX 4060 Laptop GPU"},{id:"amd",name:"AMD Radeon(TM) 780M"}],
     monitors:[{idx:0,w:1920,h:1200,name:"Écran 1 (interne)"},{idx:1,w:1920,h:1080,name:"Écran 2"}],
     outputs:[{id:"{0.0.0.00000000}.{a1}",name:"Haut-parleurs (Realtek(R) Audio)"},{id:"{0.0.0.00000000}.{a2}",name:"Casque (HyperX Cloud III S)"}],
     inputs:[{id:"{0.0.1.00000000}.{b2c1}",name:"Micro (HyperX Cloud III S)"},{id:"{0.0.1.00000000}.{b2c2}",name:"Réseau de micros (Realtek(R) Audio)"}],
@@ -845,10 +887,24 @@ const durWords=s=>s<60?s+' secondes':s%60?Math.floor(s/60)+' min '+s%60+' s':(s/
 const get=k=>k.split('.').reduce((o,p)=>o==null?o:o[p],C);
 const OV_DEF={overlay_corner:"tl",overlay_size:"m",overlay_opacity:.7};
 const val=k=>{const v=get(k);return v===undefined&&k in OV_DEF?OV_DEF[k]:v};
+/* Réglages : en attente jusqu'à « Enregistrer » (une seule relance de la capture). */
+let S=C,pending={},hkSaved=null;
+const NOW=['mic_muted'];
+const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
 function setCfg(key,value){
   if(key.includes('.')){const[a,b]=key.split('.');value={...C[a],[b]:value};key=a}
-  C={...C,[key]:value};send({cmd:'set',key,value});render();
+  C={...C,[key]:value};
+  if(key==='clip'){C={...C,rec:value};pending.rec=value}
+  if(NOW.includes(key))send({cmd:'set',key,value});
+  else{if(key.startsWith('key_')&&!hkSaved)hkSaved={...hkLive};pending[key]=value;saveUi()}
+  render();
 }
+function saveUi(){
+  const ks=Object.keys(pending);$('#saveBar').hidden=!ks.length;
+  $('#saveHint').textContent=ks.some(k=>!LIVE.includes(k))?'La capture redémarre : le buffer repart de zéro.':'Appliqué sans couper la capture.';
+}
+function saveGo(){if(!Object.keys(pending).length)return;send({cmd:'set_many',values:pending});S={...S,...pending};pending={};hkSaved=null;saveUi()}
+function saveReset(){C=S;pending={};if(hkSaved){Object.assign(hkLive,hkSaved);hkSaved=null}render();saveUi()}
 const pretty=k=>String(k||'').replace(/Key([A-Z])/g,'$1').replace(/Digit(\d)/g,'$1').replace(/Shift/g,'Maj').replace(/Control/g,'Ctrl');
 
 /* ---------- barre de titre ---------- */
@@ -882,11 +938,19 @@ $('#enc').innerHTML=encs.map(e=>`<option value="${esc(e)}">${esc(ENC[e]||e)}</op
 $('#mon').innerHTML=(I.monitors||[]).map(m=>`<option value="${m.idx}">${esc(m.name)} · ${m.w}×${m.h}</option>`).join('');
 const devOpts=l=>'<option value="">Par défaut (Windows)</option>'+(l||[]).map(d=>`<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('');
 $('#outDev').innerHTML=devOpts(I.outputs);$('#micDev').innerHTML=devOpts(I.inputs);
-const hasIgpu=encs.some(e=>/_(amf|qsv)$/.test(e));
-$('#igpuL input').disabled=!hasIgpu;$('#igpuNo').hidden=hasIgpu;
-const ITEMS=[["fps","FPS"],["frametime","Temps d'image"],["cpu","CPU"],["gpu","GPU"],["cpu_temp","Temp. CPU"],["gpu_temp","Temp. GPU"],["vram","VRAM"],["ram","RAM"]];
-const OVV={fps:["FPS","142",1],frametime:["IMAGE","7,0 ms"],cpu:["CPU","23 %"],gpu:["GPU","87 %"],cpu_temp:["CPU °C","68"],gpu_temp:["GPU °C","71"],vram:["VRAM","5,1/8 Go"],ram:["RAM","11/16 Go"]};
+/* puce d'encodage : une option par processeur graphique réel */
+const GPUS=I.gpus||[];
+const VEND=e=>/_nvenc$/.test(e)?'nvidia':/_amf$/.test(e)?'amd':/_qsv$/.test(e)?'intel':null;
+const hasG=id=>GPUS.some(g=>g.id===id);
+function chipEff(){const c=C.encode_chip;if(hasG(c))return c;if(c==='igpu'){const i=['amd','intel'].find(hasG);if(i)return i}return hasG('nvidia')?'nvidia':(GPUS[0]||{}).id||null}
+const encOk=e=>{const v=VEND(e),c=chipEff();return!v||!c||v===c};
+$('#chipSeg').innerHTML=GPUS.length?GPUS.map(g=>`<label><input type="radio" name="encode_chip" data-chip="${esc(g.id)}">${esc(g.name)}</label>`).join(''):'<label><input type="radio" checked disabled>Processeur</label>';
+$('#chipNote').hidden=GPUS.length<2;
+const ITEMS=[["fps","FPS"],["low1","1% low"],["frametime","Temps d'image"],["cpu","CPU"],["gpu","GPU"],["cpu_temp","Temp. CPU"],["gpu_temp","Temp. GPU"],["vram","VRAM"],["ram","RAM"]];
+const OVV={fps:["FPS","142",1],low1:["1% LOW","98"],frametime:["IMAGE","7,0 ms"],cpu:["CPU","23 %"],gpu:["GPU","87 %"],cpu_temp:["CPU °C","68"],gpu_temp:["GPU °C","71"],vram:["VRAM","5,1/8 Go"],ram:["RAM","11/16 Go"]};
 $('#chips').innerHTML=ITEMS.map(([k,l])=>`<label class="chip"><input type="checkbox" data-item="${k}">${l}</label>`).join('');
+if(I.cpu_temp===false){const x=$('[data-item=cpu_temp]');x.parentElement.title='Capteur absent : ce processeur ne donne pas sa température à Windows sans pilote spécial (Clipper n\'en installe aucun).'}
+$('#autoSw').checked=!!I.autostart;
 
 /* raccourcis */
 const HK=[["clip","key_clip","Enregistrer un clip"],["rec","key_rec","Démarrer / arrêter le REC"],["bar","key_bar","Ouvrir la barre"],["overlay","key_overlay","Afficher les statistiques"]];
@@ -911,6 +975,10 @@ addEventListener('keydown',e=>{if(!hkWait)return;e.preventDefault();
 /* ---------- liaison des contrôles ---------- */
 document.addEventListener('change',e=>{const t=e.target;
   if(t.dataset.item){setCfg('overlay_items',$$('[data-item]').filter(x=>x.checked).map(x=>x.dataset.item));return}
+  if(t.dataset.track){const on=new Set(C.audio_tracks||[]);t.checked?on.add(t.dataset.track):on.delete(t.dataset.track);setCfg('audio_tracks',TRACKS.filter(x=>on.has(x)));return}
+  if(t.id==='autoSw'){send({cmd:'autostart',value:t.checked});return}
+  if(t.dataset.chip){const id=t.dataset.chip;setCfg('encode_chip',id);
+    if(!encOk(C.encoder)){const e=encs.find(e=>VEND(e)===id&&/^h264/.test(e))||encs.find(encOk);if(e)setCfg('encoder',e)}return}
   if(t.name==='driver_branch'){C={...C,driver_branch:t.value};send({cmd:'set',key:'driver_branch',value:t.value});checkDriver();return}
   const k=t.dataset.k;if(!k)return;
   let v=t.type==='checkbox'?t.checked:t.value;
@@ -927,7 +995,8 @@ function outputs(t){const o=document.querySelector(`output[for=${t.id}]`);if(o&&
 /* ---------- calcul ---------- */
 const BASE={720:10,1080:20,1440:35,2160:70};
 function mbps(q){let b=(BASE[q.height]||20)*(q.fps<=30?.65:1)*Math.min(1.5,Math.max(.5,+C.quality||1));if(/^(hevc|av1)/.test(C.encoder))b*=.7;return b}
-const tracks=()=>({none:0,mixed:1,split:2})[C.audio_mode]||0;
+const TRACKS=['mix','game','mic'];
+const tracks=()=>(C.audio_tracks||[]).length;
 function calc(){
   const a=tracks()*.16,cb=mbps(C.clip),rb=mbps(C.rec),buf=C.buffer_secs;
   $('#roClip').textContent='≈ '+Math.round((cb+a)*buf/8).toLocaleString('fr-FR')+' Mo';
@@ -946,25 +1015,25 @@ function render(){
     else if(el.type==='range'){if(document.activeElement!==el){el.value=v*(+el.dataset.div||1);paint(el);outputs(el)}}
     else if(el.tagName==='SELECT')el.value=v==null?'':String(v)});
   $$('[data-item]').forEach(x=>x.checked=(C.overlay_items||[]).includes(x.dataset.item));
+  if(I.cpu_temp===false){const x=$('[data-item=cpu_temp]');x.disabled=!x.checked}
   $$('input[name=driver_branch]').forEach(x=>x.checked=x.value===C.driver_branch);
   calc();
-  const[cw,ch]=outDims(C.clip.height),[rw,rh]=outDims(C.rec.height);
+  const[cw,ch]=outDims(C.clip.height);
   $('#outClip').textContent=cw+'×'+ch+(C.clip.height===nativeClass?' · natif':'');
-  $('#outRec').textContent=rw+'×'+rh+(C.rec.height===nativeClass?' · natif':'');
   const above=CLASSES.filter(c=>!avail(c));
   $('#natTxt').innerHTML=above.length?`${above.map(c=>c+'p').join(' et ')} ${above.length>1?'sont grisés : ils dépassent':'est grisé : il dépasse'} votre écran (<span class="n">${NAT[0]}×${NAT[1]}</span>). Agrandir n'ajoute aucun détail. ${nativeClass}p garde le format de l'écran, soit <span class="n">${outDims(nativeClass).join('×')}</span> natif, sans copie GPU.`:`Toutes les résolutions tiennent dans votre écran (<span class="n">${NAT[0]}×${NAT[1]}</span>). ${nativeClass}p = taille native, sans copie GPU.`;
-  const scaled=[C.clip.height,C.rec.height].some(h=>h!==nativeClass);
+  const scaled=C.clip.height!==nativeClass;
   $('#scaleWarn').hidden=!scaled;
   $('#scaleTxt').innerHTML='<b>Redimensionnement sur le processeur.</b> Une résolution autre que '+nativeClass+'p (taille de l\'écran) fait passer chaque image par le processeur : quelques % de CPU en plus.';
-  $('#recWarn').hidden=C.clip.height===C.rec.height&&C.clip.fps===C.rec.fps;
   $('#encWarn').hidden=C.encoder!=='libx264';
   const m=Math.floor(C.buffer_secs/60),s=C.buffer_secs%60;
   $('#tlv').textContent=s?(m?m+' min ':'')+s+' s':m+' min';
   $('#monTc').textContent='−'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
   $('#monFmt').textContent=cw+'×'+ch+' · '+C.clip.fps;
   $('#h-desk').textContent=C.desktop_capture?'Activée : le buffer tourne en permanence, même sur le bureau.':'Désactivée : le buffer ne tourne que pendant un jeu plein écran. 0 % GPU sur le bureau.';
-  $('#amHint').textContent={none:'Clips muets.',mixed:'Jeu et micro mélangés en une piste : simple à partager.',split:'Jeu et micro séparés : vous réglez le micro au montage.'}[C.audio_mode]||'';
-  $('#audioSub').hidden=$('#audioLv').hidden=C.audio_mode==='none';
+  const at=C.audio_tracks||[];$$('[data-track]').forEach(x=>x.checked=at.includes(x.dataset.track));
+  $('#amHint').textContent=at.length?at.length+' piste'+(at.length>1?'s':'')+' audio dans chaque clip, dans l\'ordre : '+TRACKS.filter(t=>at.includes(t)).map(t=>({mix:'Tout',game:'PC',mic:'Micro'})[t]).join(', ')+'.':'Clips muets : activez au moins une piste.';
+  $('#audioSub').hidden=$('#audioLv').hidden=!at.length;
   const mu=$('#mute');mu.setAttribute('aria-pressed',!!C.mic_muted);mu.querySelector('span').textContent=C.mic_muted?'Coupé':'Couper';mu.querySelector('use').setAttribute('href',C.mic_muted?'#i-micoff':'#i-mic');$('#vuM').classList.toggle('muted',!!C.mic_muted);
   const ovk=hkLive.overlay||pretty(C.key_overlay);
   $('#ovHint').textContent={hidden:'Aucune statistique à l\'écran.',hotkey:'Affichez ou masquez pendant le jeu avec '+ovk+'.',always:'Visible en permanence par-dessus le jeu.'}[C.overlay_mode]||'';
@@ -973,7 +1042,9 @@ function render(){
   ov.innerHTML=(C.overlay_items||[]).map(k=>OVV[k]?`<div class="r"><span>${OVV[k][0]}</span><span${OVV[k][2]?' class="hi"':''}>${OVV[k][1]}</span></div>`:'').join('');
   const cn=val('overlay_corner');Object.assign(ov.style,{top:cn[0]==='t'?'22px':'auto',bottom:cn[0]==='b'?'32px':'auto',left:cn[1]==='l'?'22px':'auto',right:cn[1]==='r'?'22px':'auto'});
   ov.style.setProperty('--ov-s',({s:9,m:10,l:11.5}[val('overlay_size')]||10)+'px');ov.style.setProperty('--ov-a',(+val('overlay_opacity')).toFixed(2));
-  $('#chipS').textContent={auto:'Automatique',dgpu:'Carte graphique',igpu:'Puce intégrée'}[C.encode_chip]||'';
+  const ce=chipEff();$$('[data-chip]').forEach(x=>x.checked=x.dataset.chip===ce);
+  $('#chipS').textContent=(GPUS.find(g=>g.id===ce)||{}).name||'Processeur';
+  $$('#enc option').forEach(o=>{if(o.value)o.disabled=!encOk(o.value)});
   $('#strS').textContent={off:'Désactivé','16:9':'16:9','16:10':'16:10'}[C.stretch]||'';
   $('#strWarn').hidden=C.stretch==='off';
   $('#pOut').textContent=C.out_dir;$('#pBuf').textContent=C.buffer_dir;
@@ -990,7 +1061,7 @@ addEventListener('resize',fillTl);
 /* ---------- audio : niveaux seulement quand visibles ---------- */
 let lvT=null;
 function levels(){
-  const want=tab==='audio'&&!document.hidden&&C.audio_mode!=='none';
+  const want=tab==='audio'&&!document.hidden&&tracks()>0;
   if(want&&!lvT)lvT=setInterval(()=>send({cmd:'levels'}),66);
   if(!want&&lvT){clearInterval(lvT);lvT=null;['#vuG','#vuM'].forEach(s=>$(s).style.setProperty('--vu-off',1))}
 }
@@ -1011,7 +1082,6 @@ function recUi(){$('#recInd').hidden=!recOn;$('#recT').textContent=String(recS/6
 
 /* ---------- vidéos ---------- */
 let vids=null,vSel=null,vPending=null;
-const vUrl=p=>window.__DEV__?'':'clipper://video/'+encodeURIComponent(p);
 function when(d){if(d==null||d==='')return'';let t=typeof d==='number'?d*(d<1e12?1000:1):Date.parse(d);if(isNaN(t))return String(d);return new Date(t).toLocaleString('fr-FR',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}
 const badge=k=>`<span class="badge-k${k==='REC'?' rec':''}"><span class="led" aria-hidden="true"></span>${k==='REC'?'REC':'Clip'}</span>`;
 function renderVids(){
@@ -1031,11 +1101,20 @@ function pick(path){
   if(!v){vp.hidden=true;vp.removeAttribute('src');vp.load();$('#vph').hidden=false;$('#vph').textContent=vids&&vids.length?'Choisissez une vidéo à droite.':'';return}
   $('#vName').textContent=v.name;
   $('#vMeta').innerHTML=`${badge(v.kind)}<span class="n">${dur(v.secs)}</span><span class="n">${bytes(v.bytes)}</span><span>${esc(when(v.date))}</span>`;
-  const u=vUrl(v.path);
-  if(u){vp.hidden=false;$('#vph').hidden=true;if(vp.getAttribute('src')!==u){vp.src=u}}
-  else{vp.hidden=true;$('#vph').hidden=false;$('#vph').textContent='Lecture disponible dans l\'application (mode démo).'}
+  if(window.__DEV__){vp.hidden=true;$('#vph').hidden=false;$('#vph').textContent='Lecture disponible dans l\'application (mode démo).';return}
+  if(vSrc[path]){showV(vSrc[path]);return}
+  vp.pause();vp.removeAttribute('src');vp.load();vp.hidden=true;$('#vph').hidden=false;$('#vph').textContent='Préparation de la lecture…';
+  send({cmd:'video_preview',path});
 }
-$('#vp').addEventListener('error',()=>{if($('#vp').getAttribute('src'))$('#vErr').hidden=false});
+const vSrc={};
+function showV(u){const vp=$('#vp');vp.hidden=false;$('#vph').hidden=true;if(vp.getAttribute('src')!==u)vp.src=u}
+function onPreview(m){
+  if(m.url)vSrc[m.path]=m.url;
+  if(m.path!==vSel)return;
+  if(m.url)showV(m.url);
+  else{$('#vph').textContent='';$('#vErrT').textContent=m.error||'';$('#vErr').hidden=false}
+}
+$('#vp').addEventListener('error',()=>{if($('#vp').getAttribute('src')){$('#vErrT').textContent='';$('#vErr').hidden=false}});
 $('#vSide').addEventListener('click',e=>{const b=e.target.closest('[data-va]');if(b&&vSel)send({cmd:'video_action',action:b.dataset.va,path:vSel})});
 $('[data-va-empty]').onclick=()=>send({cmd:'video_action',action:'open_folder',path:C.out_dir});
 $('#vRefresh').onclick=()=>send({cmd:'videos'});
@@ -1109,12 +1188,13 @@ function toast(m){const t=document.createElement('div');t.className='toast';t.se
 
 /* ---------- messages de Rust ---------- */
 window.__on=m=>{switch(m&&m.type){
-  case'config':C=m.config;render();askFree();break;
+  case'config':S=m.config;C={...m.config,...pending};render();askFree();adminUi();break;
   case'state':recOn=!!m.recording;recS=+m.rec_secs||0;recUi();break;
   case'toast':toast(m);if(tab==='videos'&&m.kind!=='error')send({cmd:'videos'});break;
   case'folder':free[m.path]=m.free_bytes;C={...C,[m.key]:m.path};render();showFree();break;
   case'disk':free[m.path]=m.free_bytes;showFree();break;
-  case'videos':vids=m.items||[];renderVids();if(vPending){const p=vPending;vPending=null;if(vids.some(v=>v.path===p))pick(p)}else if(!vSel&&vids.length)pick(vids[0].path);break;
+  case'preview':onPreview(m);break;
+  case'videos':for(const k in vSrc)delete vSrc[k];vids=m.items||[];vids.forEach(v=>{if(v.play)vSrc[v.path]=v.play});renderVids();if(vPending){const p=vPending;vPending=null;if(vids.some(v=>v.path===p))pick(p)}else if(!vSel&&vids.length)pick(vids[0].path);break;
   case'driver':showDriver(m);break;
   case'driver_progress':prog(m);break;
   case'clean':renderClean(m.items);break;
@@ -1122,7 +1202,57 @@ window.__on=m=>{switch(m&&m.type){
   case'ram':$('#ramBtn').disabled=false;$('#ramWait').hidden=true;$('#ramV').hidden=false;$('#ramB').textContent=bytes(m.free_before);$('#ramA').textContent=bytes(m.free_after);
     {const g=m.free_after-m.free_before;$('#ramG').textContent=(g>0?'+'+bytes(g)+' de mémoire libre':'Pas de mémoire en plus à libérer')+(m.total?' · total '+bytes(m.total):'')}break;
   case'levels':setVu($('#vuG'),m.game);setVu($('#vuM'),C.mic_muted?0:m.mic);break;
+  case'autostart':$('#autoSw').checked=!!m.on;break;
+  case'admin':adminBusy=false;if(m.elevated!=null)elevated=m.elevated;if(!m.ok)toast({kind:'error',text:'Windows a refusé l\'autorisation administrateur.'});adminUi();break;
 }};
+
+/* ---------- mode administrateur ---------- */
+let elevated=!!I.elevated,adminBusy=false;
+function adminUi(){
+  const on=!!C.admin_mode,sw=$('#adminSw');sw.checked=on;sw.disabled=adminBusy;
+  $('#h-admin').textContent=adminBusy?'En attente de l\'autorisation Windows…':on?(elevated?'Actif : Clipper tourne en administrateur, sans demande à chaque lancement. Les FPS de l\'overlay fonctionnent.':'Activé. Relancez Clipper pour passer en administrateur.'):'Windows demande l\'autorisation une seule fois. Ensuite, plus aucune demande au lancement (FPS de l\'overlay, nettoyage).';
+  $('#adminRel').hidden=!(on&&!elevated);
+}
+$('#adminSw').addEventListener('change',e=>{adminBusy=true;const v=e.target.checked;e.target.checked=!!C.admin_mode;adminUi();send({cmd:'admin_mode',value:v})});
+$('#adminRelBtn').onclick=()=>send({cmd:'relaunch_admin'});
+/* clic droit : menu sur un clip, rien ailleurs (sauf champs de texte : copier / coller) */
+let ctxPath=null;
+const hideCtx=()=>{$('#ctx').hidden=true;ctxPath=null};
+document.addEventListener('contextmenu',e=>{
+  if(e.target.closest('input[type=text],input:not([type]),textarea,.sel-text'))return;
+  e.preventDefault();const vc=e.target.closest('.vc');
+  if(!vc||!vids){hideCtx();return}
+  ctxPath=vids[+vc.dataset.i].path;const m=$('#ctx');m.hidden=false;
+  const r=m.getBoundingClientRect();
+  m.style.left=Math.min(e.clientX,innerWidth-r.width-8)+'px';m.style.top=Math.min(e.clientY,innerHeight-r.height-8)+'px';
+  m.querySelector('button').focus();
+});
+$('#ctx').addEventListener('click',e=>{const b=e.target.closest('[data-ctx]');if(!b||!ctxPath)return;const a=b.dataset.ctx,p=ctxPath;hideCtx();
+  if(a==='open'||a==='open_folder'){send({cmd:'video_action',action:a,path:p});return}
+  pick(p);if(a==='rename')$('#vRen').click();if(a==='delete')$('#vDel').click()});
+addEventListener('mousedown',e=>{if(!e.target.closest('#ctx'))hideCtx()},true);
+addEventListener('keydown',e=>{if(e.key==='Escape')hideCtx()});
+addEventListener('blur',hideCtx);addEventListener('resize',hideCtx);
+document.addEventListener('scroll',hideCtx,true);
+$('#saveGo').onclick=saveGo;$('#saveReset').onclick=saveReset;
+addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='s'&&!hkWait){e.preventDefault();saveGo()}});
+adminUi();
+
+/* ---------- sections repliables ---------- */
+(function(){
+  const get=k=>{try{return localStorage.getItem(k)}catch(e){return null}},put=(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}};
+  $$('.panel section.grp').forEach((s,i)=>{
+    const h=s.querySelector(':scope>h3');if(!h)return;
+    const key='fold:'+(s.closest('.panel').id)+':'+(h.id||h.textContent.trim());
+    const b=document.createElement('button');b.type='button';b.className='gt';
+    while(h.firstChild)b.appendChild(h.firstChild);
+    b.insertAdjacentHTML('beforeend','<svg class="i chev" aria-hidden="true"><use href="#i-chev"/></svg>');
+    h.appendChild(b);h.classList.add('fold');
+    const set=open=>{s.classList.toggle('closed',!open);b.setAttribute('aria-expanded',open)};
+    set(get(key)==='1');
+    b.onclick=()=>{const open=s.classList.contains('closed');set(open);put(key,open?'1':'0')};
+  });
+})();
 
 /* ---------- démarrage ---------- */
 initGpu();render();recUi();askFree();

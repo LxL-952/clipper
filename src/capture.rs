@@ -22,7 +22,8 @@ fn ffmpeg(cfg: &Config) -> Command {
 
 /// Encodeurs qui encodent vraiment une image sur cette machine (pas seulement compilés).
 pub fn probe_encoders(cfg: &Config) -> Vec<&'static str> {
-    const ALL: [&str; 8] = ["h264_nvenc", "hevc_nvenc", "av1_nvenc", "h264_amf", "hevc_amf", "av1_amf", "h264_qsv", "libx264"];
+    // Pas d'AV1 : dans les segments MPEG-TS, ffmpeg l'écrit en flux de données (« bin_data ») et les clips sont illisibles.
+    const ALL: [&str; 6] = ["h264_nvenc", "hevc_nvenc", "h264_amf", "hevc_amf", "h264_qsv", "libx264"];
     ALL.into_iter()
         .filter(|e| {
             ffmpeg(cfg)
@@ -88,17 +89,137 @@ pub fn final_size(cfg: &Config, q: crate::config::Quality, native: (u32, u32)) -
     }
 }
 
-/// Encodeur réel selon la puce choisie, parmi ceux qui marchent sur la machine.
-pub fn resolve_encoder(cfg: &Config, ok: &[&'static str]) -> String {
-    let want: &[&str] = match cfg.encode_chip.as_str() {
-        "igpu" => &["h264_amf", "hevc_amf", "h264_qsv"],
-        _ => &[],
+#[derive(Clone, serde::Serialize)]
+pub struct Gpu {
+    /// "nvidia", "amd" ou "intel".
+    pub id: String,
+    pub name: String,
+}
+
+/// Processeurs graphiques du PC (noms Windows), un par fabricant.
+pub fn gpus() -> Vec<Gpu> {
+    use windows_sys::Win32::Graphics::Gdi::{DISPLAY_DEVICEW, EnumDisplayDevicesW};
+    let mut v: Vec<Gpu> = vec![];
+    for i in 0.. {
+        let mut d: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+        d.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if unsafe { EnumDisplayDevicesW(std::ptr::null(), i, &mut d, 0) } == 0 {
+            break;
+        }
+        let n = d.DeviceString.iter().position(|&c| c == 0).unwrap_or(d.DeviceString.len());
+        let name = String::from_utf16_lossy(&d.DeviceString[..n]).trim().to_string();
+        let up = name.to_ascii_uppercase();
+        let id = if up.contains("NVIDIA") {
+            "nvidia"
+        } else if up.contains("AMD") || up.contains("RADEON") {
+            "amd"
+        } else if up.contains("INTEL") {
+            "intel"
+        } else {
+            continue; // Microsoft Basic Display, bureau à distance…
+        };
+        if !v.iter().any(|g| g.id == id) {
+            v.push(Gpu { id: id.into(), name });
+        }
+    }
+    v
+}
+
+/// Fabricant dont la puce exécute l'encodeur (None = processeur, toujours possible).
+pub fn encoder_vendor(e: &str) -> Option<&'static str> {
+    if e.ends_with("_nvenc") {
+        Some("nvidia")
+    } else if e.ends_with("_amf") {
+        Some("amd")
+    } else if e.ends_with("_qsv") {
+        Some("intel")
+    } else {
+        None
+    }
+}
+
+/// Puce réellement choisie. Anciennes valeurs : « dgpu » = NVIDIA, « igpu » = AMD/Intel ; « auto » = NVIDIA sinon la première.
+pub fn effective_chip(cfg: &Config, gpus: &[Gpu]) -> Option<String> {
+    let has = |id: &str| gpus.iter().any(|g| g.id == id);
+    let pick = match cfg.encode_chip.as_str() {
+        c if has(c) => Some(c),
+        "igpu" => ["amd", "intel"].into_iter().find(|id| has(id)),
+        _ => None,
     };
-    want.iter()
-        .chain(std::iter::once(&cfg.encoder.as_str()))
-        .chain(["h264_nvenc", "h264_amf", "h264_qsv", "libx264"].iter())
-        .find(|e| ok.contains(e))
-        .map_or("libx264".into(), |e| e.to_string())
+    pick.map(String::from)
+        .or_else(|| has("nvidia").then(|| "nvidia".into()))
+        .or_else(|| gpus.first().map(|g| g.id.clone()))
+}
+
+/// Encodeur réel : celui choisi s'il tourne sur la puce choisie, sinon le H.264 de cette puce.
+pub fn resolve_encoder(cfg: &Config, ok: &[&'static str], gpus: &[Gpu]) -> String {
+    let chip = effective_chip(cfg, gpus);
+    let allowed = |e: &&str| ok.contains(e) && encoder_vendor(e).is_none_or(|v| chip.as_deref().is_none_or(|c| c == v));
+    std::iter::once(cfg.encoder.as_str())
+        .chain(["h264_nvenc", "h264_amf", "h264_qsv", "hevc_nvenc", "hevc_amf", "libx264"])
+        .find(|e| allowed(e))
+        .map_or("libx264".into(), String::from)
+}
+
+/// (\\.\DISPLAYn, nom du moniteur) des écrans actifs, nom lu dans l'EDID par Windows.
+fn monitor_names() -> Vec<(String, String)> {
+    use windows_sys::Win32::Devices::Display::*;
+    let wstr = |s: &[u16]| String::from_utf16_lossy(&s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())]);
+    unsafe {
+        let (mut np, mut nm) = (0u32, 0u32);
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm) != 0 {
+            return vec![];
+        }
+        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![std::mem::zeroed(); np as usize];
+        let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![std::mem::zeroed(); nm as usize];
+        if QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut np, paths.as_mut_ptr(), &mut nm, modes.as_mut_ptr(), std::ptr::null_mut()) != 0 {
+            return vec![];
+        }
+        paths.truncate(np as usize);
+        paths
+            .iter()
+            .filter_map(|p| {
+                let mut src: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
+                src.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                src.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                src.header.adapterId = p.sourceInfo.adapterId;
+                src.header.id = p.sourceInfo.id;
+                let mut tgt: DISPLAYCONFIG_TARGET_DEVICE_NAME = std::mem::zeroed();
+                tgt.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                tgt.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+                tgt.header.adapterId = p.targetInfo.adapterId;
+                tgt.header.id = p.targetInfo.id;
+                if DisplayConfigGetDeviceInfo(&mut src.header) != 0 {
+                    return None;
+                }
+                DisplayConfigGetDeviceInfo(&mut tgt.header);
+                Some((wstr(&src.viewGdiDeviceName), wstr(&tgt.monitorFriendlyDeviceName)))
+            })
+            .collect()
+    }
+}
+
+/// Résolution actuelle d'un écran GDI.
+fn gdi_size(gdi: &str) -> Option<(u32, u32)> {
+    use windows_sys::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+    let name: Vec<u16> = gdi.encode_utf16().chain(Some(0)).collect();
+    let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+    dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+    (unsafe { EnumDisplaySettingsW(name.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) } != 0).then_some((dm.dmPelsWidth, dm.dmPelsHeight))
+}
+
+/// Nom de chaque sortie ddagrab : écran de même résolution, dans l'ordre DISPLAY1, DISPLAY2…
+fn match_names(sizes: &[(u32, u32)], mut screens: Vec<(String, (u32, u32), String)>) -> Vec<Option<String>> {
+    screens.sort_by_key(|(gdi, _, _)| gdi.trim_start_matches(r"\\.\DISPLAY").parse::<u32>().unwrap_or(99));
+    let mut used = vec![false; screens.len()];
+    sizes
+        .iter()
+        .map(|s| {
+            let i = (0..screens.len()).find(|&i| !used[i] && screens[i].1 == *s)?;
+            used[i] = true;
+            Some(screens[i].2.clone()).filter(|n| !n.is_empty())
+        })
+        .collect()
 }
 
 /// Taille de l'écran telle que ddagrab la voit (même numérotation des sorties).
@@ -116,25 +237,214 @@ pub fn native_size(cfg: &Config) -> Option<(u32, u32)> {
 
 /// Écrans vus par ddagrab (index 0..3), pour le réglage « Écran capturé ».
 pub fn monitors(cfg: &Config) -> Vec<serde_json::Value> {
-    (0..4)
+    let sizes: Vec<(u32, u32)> = (0..4)
         .map_while(|i| {
             let mut c = cfg.clone();
             c.monitor = i;
-            native_size(&c).map(|(w, h)| serde_json::json!({"idx": i, "w": w, "h": h, "name": format!("Écran {}", i + 1)}))
+            native_size(&c)
         })
+        .collect();
+    let screens = monitor_names().into_iter().filter_map(|(gdi, name)| Some((gdi.clone(), gdi_size(&gdi)?, name))).collect();
+    let names = match_names(&sizes, screens);
+    sizes
+        .iter()
+        .zip(names)
+        .enumerate()
+        .map(|(i, (&(w, h), name))| serde_json::json!({"idx": i, "w": w, "h": h, "name": name.unwrap_or_else(|| format!("Écran {}", i + 1))}))
         .collect()
 }
 
-/// Durée en secondes (ffprobe), 0 si illisible.
-pub fn duration(cfg: &Config, p: &Path) -> f64 {
-    Command::new(cfg.ffmpeg.replace("ffmpeg", "ffprobe"))
+/// Ce que l'onglet Vidéos doit savoir d'un fichier (un seul ffprobe, gardé en cache).
+#[derive(Clone, Default)]
+pub struct Probe {
+    pub secs: f64,
+    video: String,
+    audio: usize,
+    first_title: String,
+}
+
+type ProbeKey = (PathBuf, std::time::SystemTime, u64);
+static PROBES: Mutex<Option<std::collections::HashMap<ProbeKey, Probe>>> = Mutex::new(None);
+
+/// Durée, codec et pistes. Résultat gardé tant que le fichier ne change pas (date + taille) :
+/// rouvrir l'onglet Vidéos ne relance aucun ffprobe.
+pub fn probe(cfg: &Config, p: &Path) -> Probe {
+    let Ok(m) = std::fs::metadata(p) else { return Probe::default() };
+    let key = (p.to_path_buf(), m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len());
+    if let Some(pr) = PROBES.lock().unwrap().as_ref().and_then(|c| c.get(&key)) {
+        return pr.clone();
+    }
+    let out = Command::new(cfg.ffmpeg.replace("ffmpeg", "ffprobe"))
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
+        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name:stream_tags=title", "-of", "json"])
         .arg(p)
         .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(0.0)
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    let j: serde_json::Value = serde_json::from_slice(&out).unwrap_or_default();
+    let mut pr = Probe { secs: j["format"]["duration"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0), ..Default::default() };
+    for s in j["streams"].as_array().into_iter().flatten() {
+        match s["codec_type"].as_str() {
+            Some("video") if pr.video.is_empty() => pr.video = s["codec_name"].as_str().unwrap_or("").into(),
+            Some("audio") => {
+                if pr.audio == 0 {
+                    pr.first_title = s["tags"]["title"].as_str().unwrap_or("").into();
+                }
+                pr.audio += 1;
+            }
+            _ => {}
+        }
+    }
+    PROBES.lock().unwrap().get_or_insert_with(Default::default).insert(key, pr.clone());
+    pr
+}
+
+/// Pistes audio à faire entendre : la 1re seule si c'est « Tout » (le mélange existe déjà).
+fn useful_audio(pr: &Probe) -> usize {
+    if pr.first_title == crate::audio::Track::Mix.title() { pr.audio.min(1) } else { pr.audio }
+}
+
+/// WebView2 lit sans extension le H.264 en MP4 avec une seule piste utile : lecture directe du fichier.
+fn direct_url(src: &Path, pr: &Probe) -> Option<String> {
+    let ext = src.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+    (pr.video == "h264" && useful_audio(pr) <= 1 && (ext == "mp4" || ext == "mov")).then(|| format!("/video?p={}", crate::ui::pct_encode(&src.to_string_lossy())))
+}
+
+fn preview_dir() -> PathBuf {
+    crate::config::dir().join("preview")
+}
+
+fn preview_name(src: &Path) -> String {
+    format!("{}.mp4", src.file_stem().unwrap_or_default().to_string_lossy())
+}
+
+/// Copie de lecture à jour (plus récente que le clip) : son adresse.
+fn cached_url(src: &Path) -> Option<String> {
+    let name = preview_name(src);
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let fresh = mtime(&preview_dir().join(&name)).is_some_and(|o| mtime(src).is_some_and(|s| o >= s));
+    fresh.then(|| format!("/preview/{}", crate::ui::pct_encode(&name)))
+}
+
+/// Adresse lisible tout de suite, sans conversion (None = copie de lecture à préparer).
+pub fn ready_url(src: &Path, pr: &Probe) -> Option<String> {
+    direct_url(src, pr).or_else(|| cached_url(src))
+}
+
+/// Conversions en cours : un clip demandé pendant sa préparation attend la fin au lieu d'en lancer une 2e.
+static BUSY: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static BUSY_DONE: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Adresse de lecture d'un clip, quel que soit l'encodeur : fichier direct, ou copie H.264
+/// (%APPDATA%\Clipper\preview) créée si besoin. HEVC/AV1 : réencodage rapide en 720p max.
+pub fn preview(cfg: &Config, src: &Path) -> Result<String, String> {
+    let pr = probe(cfg, src);
+    if pr.video.is_empty() {
+        return Err("Aucune piste vidéo lisible dans ce fichier.".into());
+    }
+    if let Some(u) = direct_url(src, &pr) {
+        return Ok(u);
+    }
+    {
+        let mut busy = BUSY.lock().unwrap();
+        while busy.iter().any(|b| b == src) {
+            busy = BUSY_DONE.wait(busy).unwrap();
+        }
+        if let Some(u) = cached_url(src) {
+            return Ok(u);
+        }
+        busy.push(src.to_path_buf());
+    }
+    let r = convert(cfg, src, &pr);
+    BUSY.lock().unwrap().retain(|b| b != src);
+    BUSY_DONE.notify_all();
+    r
+}
+
+fn convert(cfg: &Config, src: &Path, pr: &Probe) -> Result<String, String> {
+    let dir = preview_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let name = preview_name(src);
+    let tmp = dir.join(format!("{name}.part"));
+    // H.264 : simple changement de conteneur (instantané). Sinon : réencodage, 720p max pour aller vite.
+    let small = "scale=-2:'min(720,ih)'";
+    let encoders: &[&[&str]] = if pr.video == "h264" {
+        &[&["-c:v", "copy"]]
+    } else {
+        &[
+            &["-vf", small, "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "26", "-pix_fmt", "yuv420p"],
+            &["-vf", small, "-c:v", "h264_amf", "-quality", "speed", "-pix_fmt", "yuv420p"],
+            &["-vf", small, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p"],
+        ]
+    };
+    let audio = useful_audio(pr);
+    let ok = encoders.iter().any(|venc| {
+        let mut c = ffmpeg(cfg);
+        c.args(["-loglevel", "error", "-y", "-i"]).arg(src).args(["-map", "0:v:0"]).args(*venc);
+        match audio {
+            0 => {}
+            1 => {
+                c.args(["-map", "0:a:0", "-c:a", "aac", "-b:a", "160k"]);
+            }
+            n => {
+                let ins: String = (0..n).map(|i| format!("[0:a:{i}]")).collect();
+                c.args(["-filter_complex", &format!("{ins}amix=inputs={n}:normalize=0[a]"), "-map", "[a]", "-c:a", "aac", "-b:a", "160k"]);
+            }
+        }
+        c.args(["-movflags", "+faststart", "-f", "mp4"]).arg(&tmp);
+        c.status().is_ok_and(|s| s.success())
+    });
+    if !ok || std::fs::rename(&tmp, dir.join(&name)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("Conversion pour la lecture impossible.".into());
+    }
+    prune_previews(&dir, 16);
+    Ok(format!("/preview/{}", crate::ui::pct_encode(&name)))
+}
+
+/// File d'attente des copies de lecture à préparer d'avance (clips récents, clip qu'on vient d'enregistrer).
+static PREWARM: Mutex<(std::collections::VecDeque<PathBuf>, bool)> = Mutex::new((std::collections::VecDeque::new(), false));
+
+/// Prépare en tâche de fond (un seul fil, basse priorité comme tout ffmpeg) les copies manquantes.
+/// `done` reçoit (clip, adresse) à chaque copie prête.
+pub fn prewarm(cfg: &Config, clips: Vec<PathBuf>, done: impl Fn(PathBuf, String) + Send + 'static) {
+    let mut q = PREWARM.lock().unwrap();
+    for c in clips {
+        if !q.0.contains(&c) {
+            q.0.push_back(c);
+        }
+    }
+    if q.1 || q.0.is_empty() {
+        return;
+    }
+    q.1 = true;
+    let cfg = cfg.clone();
+    std::thread::spawn(move || loop {
+        let next = {
+            let mut q = PREWARM.lock().unwrap();
+            let n = q.0.pop_front();
+            if n.is_none() {
+                q.1 = false;
+            }
+            n
+        };
+        let Some(clip) = next else { return };
+        if let Ok(url) = preview(&cfg, &clip) {
+            done(clip, url);
+        }
+    });
+}
+
+/// Garde seulement les `keep` copies de lecture les plus récentes.
+fn prune_previews(dir: &Path, keep: usize) {
+    let mut v: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.iter().skip(keep).for_each(|(_, p)| drop(std::fs::remove_file(p)));
 }
 
 pub fn buffer_args(cfg: &Config, native: (u32, u32), dir: &Path, start: u64, pipes: &[String]) -> Vec<String> {
@@ -166,7 +476,8 @@ fn capture_args(cfg: &Config, q: crate::config::Quality, native: (u32, u32), pip
     let kb = bitrate_kbps(h, q.fps, &cfg.encoder, cfg.quality);
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", &vf].iter().map(|s| s.to_string()).collect();
     a.extend(crate::audio::input_args(pipes));
-    a.extend(crate::audio::output_args(pipes.len()));
+    let kinds = crate::audio::tracks(cfg);
+    a.extend(crate::audio::output_args(if kinds.len() == pipes.len() { &kinds } else { &[] }));
     a.extend(["-c:v".into(), cfg.encoder.clone()]);
     a.extend(preset_args(&cfg.encoder, cfg.quality).iter().map(|s| s.to_string()));
     for s in [
@@ -256,6 +567,7 @@ impl Buffer {
     pub fn start(cfg: Config, native: (u32, u32), dir: PathBuf, audio: Option<Arc<crate::audio::Audio>>) -> Self {
         let audio_keep = audio.clone();
         let _ = std::fs::create_dir_all(&dir);
+        purge_if_format_changed(&cfg, native, &dir, audio.as_ref().map_or(String::new(), |_| format!("{:?}", crate::audio::tracks(&cfg))));
         let stop = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None::<Child>));
         let rec_from = Arc::new(Mutex::new(None::<u64>));
@@ -277,11 +589,15 @@ impl Buffer {
                 if let Ok(f) = std::fs::File::create(d.join("ffmpeg.log")) {
                     cmd.stderr(f); // dernière erreur gardée pour le diagnostic
                 }
-                let pipes = audio.as_ref().map_or(vec![], |a| a.open_pipes(0, crate::audio::pipe_count(&cfg), spawns));
+                let pipes = audio.as_ref().map_or(vec![], |a| a.open_pipes(0, &crate::audio::tracks(&cfg), spawns));
                 let args = buffer_args(&cfg, native, &d, next, &pipes);
                 let _ = std::fs::write(d.join("ffmpeg-args.txt"), format!("pipes={pipes:?} audio={}
 {}", audio.is_some(), args.join(" ")));
                 match cmd.args(args).spawn() {
+                    Ok(mut ch) if s.load(Ordering::Relaxed) => {
+                        let _ = ch.kill();
+                        break;
+                    }
                     Ok(ch) => *c.lock().unwrap() = Some(ch),
                     Err(_) => {
                         std::thread::sleep(Duration::from_secs(5));
@@ -322,6 +638,11 @@ impl Buffer {
                 }
                 std::thread::sleep(Duration::from_millis(300));
             }
+            // stop() peut passer pendant un spawn : sans ça, le ffmpeg lancé juste après continuait seul.
+            if let Some(mut ch) = c.lock().unwrap().take() {
+                let _ = ch.kill();
+                let _ = ch.wait();
+            }
         });
         Self { dir, stop, child, rec_from, rec2: Mutex::new(None), audio: audio_keep, native }
     }
@@ -331,6 +652,21 @@ impl Buffer {
         if let Some(mut ch) = self.child.lock().unwrap().take() {
             let _ = ch.kill();
         }
+        if let Some((mut ch, _)) = self.rec2.lock().unwrap().take() {
+            let _ = ch.kill();
+        }
+    }
+}
+
+/// Segments d'un autre codec, d'une autre taille ou d'un autre nombre de pistes : impossibles
+/// à assembler avec `-c copy` (« ffmpeg n'a pas pu assembler le clip »). On repart de zéro.
+fn purge_if_format_changed(cfg: &Config, native: (u32, u32), dir: &Path, pipes: String) {
+    let (w, h) = final_size(cfg, cfg.clip, native);
+    let sig = format!("{} {w}x{h} {} audio{pipes}", cfg.encoder, cfg.clip.fps);
+    let file = dir.join("format.txt");
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(sig.as_str()) {
+        segments(dir).iter().for_each(|p| drop(std::fs::remove_file(p)));
+        let _ = std::fs::write(&file, sig);
     }
 }
 
@@ -392,7 +728,7 @@ pub fn rec_start(cfg: &Config, buf: &Buffer) -> Result<(), String> {
         return Ok(());
     }
     let file = buf.dir.join(format!("rec-{}.ts", stamp()));
-    let pipes = buf.audio.as_ref().map_or(vec![], |a| a.open_pipes(1, crate::audio::pipe_count(cfg), 0));
+    let pipes = buf.audio.as_ref().map_or(vec![], |a| a.open_pipes(1, &crate::audio::tracks(cfg), 0));
     let mut a = capture_args(cfg, cfg.rec, buf.native, &pipes);
     // Un seul .ts : lisible même si le PC s'arrête en plein REC.
     a.extend(["-f".into(), "mpegts".into(), file.to_string_lossy().into_owned()]);
@@ -449,6 +785,33 @@ mod tests {
     }
 
     #[test]
+    fn encoders_follow_chosen_chip() {
+        let ok = ["h264_nvenc", "hevc_nvenc", "h264_amf", "hevc_amf", "libx264"];
+        let gpus = vec![Gpu { id: "nvidia".into(), name: "RTX".into() }, Gpu { id: "amd".into(), name: "Radeon".into() }];
+        let mut c = Config::default();
+        c.encode_chip = "nvidia".into();
+        c.encoder = "hevc_amf".into();
+        assert_eq!(resolve_encoder(&c, &ok, &gpus), "h264_nvenc");
+        c.encoder = "hevc_nvenc".into();
+        assert_eq!(resolve_encoder(&c, &ok, &gpus), "hevc_nvenc");
+        c.encode_chip = "igpu".into();
+        assert_eq!(resolve_encoder(&c, &ok, &gpus), "h264_amf");
+        c.encoder = "libx264".into();
+        assert_eq!(resolve_encoder(&c, &ok, &gpus), "libx264");
+        c.encode_chip = "auto".into();
+        c.encoder = "h264_amf".into();
+        assert_eq!(resolve_encoder(&c, &ok, &gpus), "h264_nvenc");
+    }
+
+    #[test]
+    fn monitor_names_matched_by_size_then_order() {
+        let s = |g: &str, w, h, n: &str| (g.to_string(), (w, h), n.to_string());
+        let screens = vec![s(r"\\.\DISPLAY2", 1920, 1080, "DELL P2419H"), s(r"\\.\DISPLAY1", 2560, 1440, "LG ULTRAGEAR")];
+        let n = match_names(&[(2560, 1440), (1920, 1080), (800, 600)], screens);
+        assert_eq!(n, vec![Some("LG ULTRAGEAR".into()), Some("DELL P2419H".into()), None]);
+    }
+
+    #[test]
     fn bitrate_scales() {
         assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 1.0), 20_000);
         assert_eq!(bitrate_kbps(1080, 30, "h264_nvenc", 1.0), 13_000);
@@ -471,6 +834,16 @@ mod live_fullscreen {
     #[ignore = "dépend de la fenêtre au premier plan"]
     fn report() {
         println!("jeu plein écran au premier plan : {}", super::fullscreen_foreground());
+    }
+
+    #[test]
+    #[ignore = "lit les GPU et les écrans"]
+    fn hardware() {
+        for g in super::gpus() {
+            println!("GPU {} : {}", g.id, g.name);
+        }
+        println!("écrans Windows {:?}", super::monitor_names());
+        println!("sorties ddagrab {:?}", super::monitors(&crate::config::Config::load()));
     }
 }
 

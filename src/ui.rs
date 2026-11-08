@@ -108,6 +108,13 @@ fn protocol(req: &Request<Vec<u8>>, out_dir: &Path) -> Response<Cow<'static, [u8
             Err(_) => reply(StatusCode::NOT_FOUND, "text/plain", vec![]),
         };
     }
+    if let Some(name) = path.strip_prefix("preview/") {
+        let name = pct_decode(name);
+        if name.contains(['/', '\\']) || name.contains("..") || !name.ends_with(".mp4") {
+            return reply(StatusCode::FORBIDDEN, "text/plain", vec![]);
+        }
+        return serve_video(&crate::config::dir().join("preview").join(name), req);
+    }
     if path == "video" {
         let q = req.uri().query().unwrap_or("");
         let p = PathBuf::from(pct_decode(q.strip_prefix("p=").unwrap_or("")));

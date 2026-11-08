@@ -70,19 +70,22 @@ kbd{grid-column:2;font:500 10px/1 var(--mono);color:var(--text-3);letter-spacing
 const dev=!window.__INIT__;
 if(dev){
   window.__INIT__={page:"bar",native:[1920,1200],recording:true,rec_secs:42,
-    config:{buffer_secs:180,clip:{height:1080,fps:60},audio_mode:"split",overlay_mode:"hotkey"},
+    config:{buffer_secs:180,clip:{height:1080,fps:60},audio_tracks:["game","mic"],overlay_mode:"hotkey"},
     hotkeys:{clip:"Alt+X",rec:"Ctrl+Alt+R",bar:"Alt+Maj+Z",overlay:"Alt+F"}};
   window.ipc={postMessage(s){const m=JSON.parse(s);console.log("ipc",m);
     if(m.cmd==="clip")setTimeout(()=>window.__on({type:"toast",kind:"clip",text:"Clip enregistré · 3 min",path:"C:\\Users\\Vous\\Videos\\Clipper\\Clip 2026-11-07 21-14-03.mp4"}),300);
     if(m.cmd==="rec"){I.recording=!I.recording;I.rec_secs=0;window.__on({type:"state",recording:I.recording,rec_secs:0})}
-    if(m.cmd==="set"){I.config=setPath(I.config,m.key,m.value);window.__on({type:"config",config:I.config})}}};
+    if(m.cmd==="set_many"){for(const[k,v]of Object.entries(m.values))I.config=setPath(I.config,k,v);setTimeout(()=>window.__on({type:"config",config:I.config}),300)}}};
 }
 const I=window.__INIT__,$=id=>document.getElementById(id);
 const send=m=>window.ipc.postMessage(JSON.stringify(m));
 function setPath(o,k,v){const c=structuredClone(o),p=k.split(".");let t=c;while(p.length>1)t=t[p.shift()];t[p[0]]=v;return c}
 
-const BUF=[60,90,120,180,300,600],RES=[720,1080,1440,2160],AUD=["none","mixed","split"],OV=["hidden","hotkey","always"];
-const AUD_L={none:"Muet",mixed:"1 piste",split:"2 pistes"},OV_L={hidden:"Stats off",hotkey:"Stats",always:"Stats fixes"};
+const BUF=[60,90,120,180,300,600],RES=[720,1080,1440,2160],OV=["hidden","hotkey","always"];
+// Pistes audio : préréglages parcourus au clic (Tout / PC / Micro).
+const AUD=["","mix","game,mic","mix,game,mic"];
+const audLabel=t=>t.length?t.length+(t.length>1?" pistes":" piste"):"Muet";
+const OV_L={hidden:"Stats off",hotkey:"Stats",always:"Stats fixes"};
 const next=(list,v)=>list[(list.indexOf(v)+1)%list.length];
 const fmtBuf=s=>s%60?`${s/60|0}:${String(s%60).padStart(2,"0")}`:`${s/60} min`;
 const fmtT=s=>`${String(s/60|0).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
@@ -94,7 +97,7 @@ function render(){
   const c=I.config,k=I.hotkeys||{};
   $("k-clip").textContent=k.clip||"";$("k-rec").textContent=(k.rec||"")+(I.recording?" · arrêter":"");$("k-ov").textContent=k.overlay||"";
   $("v-buf").textContent=fmtBuf(c.buffer_secs);$("v-res").textContent=resLabel(c.clip.height);$("v-fps").textContent=c.clip.fps+" fps";
-  $("v-aud").textContent=AUD_L[c.audio_mode]||c.audio_mode;$("v-stats").textContent=OV_L[c.overlay_mode]||"Stats";
+  $("v-aud").textContent=audLabel(c.audio_tracks||[]);$("v-stats").textContent=OV_L[c.overlay_mode]||"Stats";
   $("b-stats").classList.toggle("on",c.overlay_mode!=="hidden");
   $("b-rec").classList.toggle("on",!!I.recording);$("b-rec").setAttribute("aria-pressed",!!I.recording);
   $("rec-v").textContent=I.recording?fmtT(I.rec_secs):"REC";
@@ -106,25 +109,29 @@ function recTick(){clearInterval(recTimer);recTimer=null;if(I.recording)recTimer
 
 $("b-clip").onclick=()=>send({cmd:"clip"});
 $("b-rec").onclick=()=>send({cmd:"rec"});
-$("b-buf").onclick=()=>send({cmd:"set",key:"buffer_secs",value:next(BUF,I.config.buffer_secs)});
-$("b-res").onclick=()=>{let h=I.config.clip.height;do{h=next(RES,h)}while(!resOk(h)&&h!==I.config.clip.height);send({cmd:"set",key:"clip.height",value:h})};
-$("b-fps").onclick=()=>send({cmd:"set",key:"clip.fps",value:I.config.clip.fps===60?30:60});
-$("b-aud").onclick=()=>send({cmd:"set",key:"audio_mode",value:next(AUD,I.config.audio_mode)});
-$("b-stats").onclick=()=>send({cmd:"set",key:"overlay_mode",value:next(OV,I.config.overlay_mode)});
+// Affichage immédiat ; clics rapprochés regroupés en un seul envoi (une seule relance de la capture).
+let pend={},flushT=null;
+function set(k,v){I.config=setPath(I.config,k,v);pend[k]=v;render();clearTimeout(flushT);flushT=setTimeout(flush,450)}
+function flush(){clearTimeout(flushT);flushT=null;if(Object.keys(pend).length)send({cmd:"set_many",values:pend});pend={}}
+$("b-buf").onclick=()=>set("buffer_secs",next(BUF,I.config.buffer_secs));
+$("b-res").onclick=()=>{let h=I.config.clip.height;do{h=next(RES,h)}while(!resOk(h)&&h!==I.config.clip.height);set("clip.height",h)};
+$("b-fps").onclick=()=>set("clip.fps",I.config.clip.fps===60?30:60);
+$("b-aud").onclick=()=>set("audio_tracks",next(AUD,(I.config.audio_tracks||[]).join(",")).split(",").filter(Boolean));
+$("b-stats").onclick=()=>set("overlay_mode",next(OV,I.config.overlay_mode));
 $("b-set").onclick=()=>send({cmd:"open_settings"});
 $("t-see").onclick=()=>send({cmd:"open_settings",tab:"videos"});
 
 // Fermeture auto : 5 s sans souris sur la barre (le compte repart à chaque mouvement).
 let idle=null;
 const arm=()=>{clearTimeout(idle);idle=setTimeout(close,5000)};
-function close(){$("bar").classList.replace("in","out");setTimeout(()=>send({cmd:"close"}),220)}
+function close(){flush();$("bar").classList.replace("in","out");setTimeout(()=>send({cmd:"close"}),220)}
 document.addEventListener("mousemove",arm);document.addEventListener("mousedown",arm);
 document.addEventListener("keydown",e=>{if(e.key==="Escape")close()});
 
 let toastT=null;
 window.__on=m=>{switch(m&&m.type){
   case "state":I.recording=m.recording;I.rec_secs=m.rec_secs||0;render();recTick();break;
-  case "config":I.config=m.config;render();break;
+  case "config":I.config=m.config;for(const[k,v]of Object.entries(pend))I.config=setPath(I.config,k,v);render();break;
   case "toast":{
     $("t-t").textContent=m.text;$("t-t").classList.toggle("err",m.kind==="error");
     $("t-s").textContent=m.path?m.path.split("\\").pop():"";$("t-see").hidden=m.kind==="error"||!m.path;

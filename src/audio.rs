@@ -113,8 +113,8 @@ pub struct Audio {
     pub game: Arc<Source>,
     pub mic: Arc<Source>,
     /// Pipes par instance ffmpeg : slot 0 = buffer, slot 1 = REC aux réglages différents.
-    /// Chaque slot reçoit 1 pipe (mélange) ou 2 (jeu, micro).
-    slots: Arc<Mutex<[Vec<File>; 2]>>,
+    /// Chaque slot reçoit un pipe par piste activée : (piste, pipe).
+    slots: Arc<Mutex<[Vec<(Track, File)>; 2]>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -168,11 +168,14 @@ impl Audio {
             let mix = bytes(&g.iter().zip(&m).map(|(a, b)| (a + b).clamp(-1.0, 1.0)).collect::<Vec<_>>());
             let (gb, mb) = (bytes(&g), bytes(&m));
             for pipes in slots.iter_mut() {
-                let ok = match pipes.len() {
-                    1 => pipes[0].write_all(&mix).is_ok(),
-                    2 => pipes[0].write_all(&gb).is_ok() && pipes[1].write_all(&mb).is_ok(),
-                    _ => true,
-                };
+                let ok = pipes.iter_mut().all(|(t, f)| {
+                    f.write_all(match t {
+                        Track::Mix => &mix,
+                        Track::Game => &gb,
+                        Track::Mic => &mb,
+                    })
+                    .is_ok()
+                });
                 if !ok {
                     pipes.clear(); // ffmpeg arrêté : on attend les pipes de la prochaine instance
                 }
@@ -190,13 +193,18 @@ impl Audio {
     }
 
     /// Crée les pipes d'une nouvelle instance ffmpeg dans `slot`. Renvoie les chemins à passer en `-i`.
-    pub fn open_pipes(self: &Arc<Self>, slot: usize, count: usize, tag: u64) -> Vec<String> {
+    pub fn open_pipes(self: &Arc<Self>, slot: usize, tracks: &[Track], tag: u64) -> Vec<String> {
+        let count = tracks.len();
+        // Numéro unique au processus : après une relance de capture, l'ancien pipe peut encore exister
+        // (fil bloqué dans ConnectNamedPipe) et un nom réutilisé faisait échouer CreateNamedPipeW (buffer sans son).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         self.slots.lock().unwrap()[slot].clear();
-        let names: Vec<String> = (0..count).map(|i| format!(r"\\.\pipe\clipper-{}-{slot}-{tag}-{i}", std::process::id())).collect();
+        let names: Vec<String> = (0..count).map(|i| format!(r"\\.\pipe\clipper-{}-{slot}-{tag}-{seq}-{i}", std::process::id())).collect();
         let mut files = vec![];
         for n in &names {
             match create_pipe(n) {
-                Some(h) => files.push(unsafe { File::from_raw_handle(h as _) }),
+                Some(h) => files.push((tracks[files.len()], unsafe { File::from_raw_handle(h as _) })),
                 None => return vec![],
             }
         }
@@ -204,7 +212,7 @@ impl Audio {
         // ConnectNamedPipe bloque jusqu'à ce que ffmpeg ouvre le pipe : dans un fil à part.
         std::thread::spawn(move || {
             use std::os::windows::io::AsRawHandle;
-            for f in &files {
+            for (_, f) in &files {
                 unsafe { windows_sys::Win32::System::Pipes::ConnectNamedPipe(f.as_raw_handle() as _, std::ptr::null_mut()) };
             }
             a.slots.lock().unwrap()[slot] = files;
@@ -229,22 +237,50 @@ pub fn input_args(pipes: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Arguments de sortie audio : mapping + AAC 160 kb/s par piste.
-pub fn output_args(pipes: usize) -> Vec<String> {
+/// Arguments de sortie audio : mapping + AAC 160 kb/s + nom de chaque piste (visible au montage).
+pub fn output_args(tracks: &[Track]) -> Vec<String> {
     let mut a: Vec<String> = vec!["-map".into(), "0:v".into()];
-    for i in 1..=pipes {
+    for i in 1..=tracks.len() {
         a.extend(["-map".into(), format!("{i}:a")]);
     }
-    if pipes > 0 {
+    if !tracks.is_empty() {
         a.extend(["-c:a", "aac", "-b:a", "160k"].map(String::from));
+    }
+    for (i, t) in tracks.iter().enumerate() {
+        a.extend([format!("-metadata:s:a:{i}"), format!("title={}", t.title())]);
     }
     a
 }
 
-pub fn pipe_count(cfg: &Config) -> usize {
-    match cfg.audio_mode.as_str() {
-        "mixed" => 1,
-        "split" => 2,
-        _ => 0,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Track {
+    /// Tout le son : PC + micro mélangés.
+    Mix,
+    /// Son du PC seul.
+    Game,
+    /// Micro seul.
+    Mic,
+}
+
+impl Track {
+    pub fn title(self) -> &'static str {
+        match self {
+            Track::Mix => "Tout",
+            Track::Game => "PC",
+            Track::Mic => "Micro",
+        }
     }
+}
+
+/// Pistes activées, toujours dans l'ordre Tout, PC, Micro.
+pub fn tracks(cfg: &Config) -> Vec<Track> {
+    [("mix", Track::Mix), ("game", Track::Game), ("mic", Track::Mic)]
+        .into_iter()
+        .filter(|(k, _)| cfg.audio_tracks.iter().any(|t| t == k))
+        .map(|(_, t)| t)
+        .collect()
+}
+
+pub fn pipe_count(cfg: &Config) -> usize {
+    tracks(cfg).len()
 }
