@@ -49,15 +49,24 @@ fn get(url: &str) -> Result<String, String> {
 /// Identifiants produit NVIDIA (psid = série, pfid = modèle) à partir du nom du GPU.
 fn product_ids(gpu: &str) -> Result<(String, String), String> {
     let xml = get("https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=3")?;
-    // <LookupValue ParentID="129"><Name>GeForce RTX 4060 Laptop GPU</Name><Value>1007</Value>
-    let gpu = gpu.trim_start_matches("NVIDIA ");
-    let needle = format!("<Name>{gpu}</Name>");
-    let at = xml.find(&needle).ok_or(format!("Modèle « {gpu} » inconnu de NVIDIA."))?;
-    let before = &xml[..at];
-    let psid = before.rsplit("ParentID=\"").next().and_then(|s| s.split('"').next()).ok_or("Réponse NVIDIA illisible.")?;
-    let after = &xml[at + needle.len()..];
-    let pfid = after.split("<Value>").nth(1).and_then(|s| s.split('<').next()).ok_or("Réponse NVIDIA illisible.")?;
-    Ok((psid.into(), pfid.into()))
+    find_product(&xml, gpu).ok_or(format!("Modèle « {} » inconnu de NVIDIA.", normalize(gpu)))
+}
+
+/// NVIDIA écrit tantôt « NVIDIA GeForce RTX 4080 SUPER », tantôt « GeForce RTX 4060 Laptop GPU ».
+fn normalize(name: &str) -> String {
+    let n = name.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    n.strip_prefix("nvidia ").unwrap_or(&n).to_string()
+}
+
+/// <LookupValue ParentID="129"><Name>GeForce RTX 4060 Laptop GPU</Name><Value>1007</Value>
+fn find_product(xml: &str, gpu: &str) -> Option<(String, String)> {
+    let gpu = normalize(gpu);
+    xml.split("<LookupValue ").skip(1).find_map(|e| {
+        let psid = e.split("ParentID=\"").nth(1)?.split('"').next()?;
+        let name = e.split("<Name>").nth(1)?.split("</Name>").next()?;
+        let pfid = e.split("<Value>").nth(1)?.split('<').next()?;
+        (normalize(name) == gpu).then(|| (psid.to_string(), pfid.to_string()))
+    })
 }
 
 fn json_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
@@ -184,6 +193,15 @@ mod tests {
         println!("Game Ready {} {}\nStudio {} {}", gr.version, gr.url, st.version, st.url);
         let g = installed().unwrap();
         println!("installé {} {}", g.name, g.driver);
+    }
+
+    #[test]
+    fn product_names_with_or_without_nvidia_prefix() {
+        let xml = r#"<LookupValues><LookupValue ParentID="127"><Name>NVIDIA GeForce RTX 4080 SUPER</Name><Value>1041</Value></LookupValue><LookupValue ParentID="129"><Name>GeForce RTX 4060 Laptop GPU</Name><Value>1007</Value></LookupValue><LookupValue ParentID="127"><Name>NVIDIA GeForce RTX 4080</Name><Value>999</Value></LookupValue></LookupValues>"#;
+        assert_eq!(find_product(xml, "NVIDIA GeForce RTX 4080 SUPER"), Some(("127".into(), "1041".into())));
+        assert_eq!(find_product(xml, "NVIDIA GeForce RTX 4080"), Some(("127".into(), "999".into())));
+        assert_eq!(find_product(xml, "NVIDIA GeForce RTX 4060 Laptop GPU"), Some(("129".into(), "1007".into())));
+        assert_eq!(find_product(xml, "GeForce RTX 9999"), None);
     }
 
     #[test]

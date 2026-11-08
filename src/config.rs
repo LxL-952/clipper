@@ -20,8 +20,10 @@ pub struct Config {
     pub quality: f32,
     /// "mp4", "mkv" ou "mov" : commun au Clip et au REC.
     pub container: String,
-    /// "none", "mixed" (1 piste) ou "split" (2 pistes).
+    /// Ancien réglage ("none", "mixed", "split") : sert seulement à migrer vers `audio_tracks`.
     pub audio_mode: String,
+    /// Pistes enregistrées, chacune activable : "mix" (tout le son), "game" (PC), "mic" (micro).
+    pub audio_tracks: Vec<String>,
     pub out_device: Option<String>,
     pub mic_device: Option<String>,
     pub game_volume: f32,
@@ -52,6 +54,10 @@ pub struct Config {
     pub overlay_size: String,
     /// 0.0 à 1.0.
     pub overlay_opacity: f32,
+    /// Mise à jour des statistiques de l'overlay, en ms (250, 500, 1000 ou 2000).
+    pub overlay_refresh_ms: u32,
+    /// Lancement via la tâche planifiée « Clipper (administrateur) » : admin sans demande UAC.
+    pub admin_mode: bool,
 }
 
 impl Default for Config {
@@ -67,6 +73,7 @@ impl Default for Config {
             quality: 1.0,
             container: "mp4".into(),
             audio_mode: "mixed".into(),
+            audio_tracks: vec!["mix".into()],
             out_device: None,
             mic_device: None,
             game_volume: 1.0,
@@ -89,6 +96,8 @@ impl Default for Config {
             overlay_corner: "tl".into(),
             overlay_size: "m".into(),
             overlay_opacity: 0.7,
+            overlay_refresh_ms: 500,
+            admin_mode: false,
         }
     }
 }
@@ -100,10 +109,22 @@ pub fn dir() -> PathBuf {
 impl Config {
     /// Fichier absent ou illisible : valeurs par défaut (jamais de panic au démarrage).
     pub fn load() -> Self {
-        std::fs::read_to_string(dir().join("config.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        std::fs::read_to_string(dir().join("config.json")).ok().map_or_else(Self::default, |s| Self::parse(&s))
+    }
+
+    /// JSON illisible : valeurs par défaut. Ancien `audio_mode` sans `audio_tracks` : converti.
+    fn parse(s: &str) -> Self {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return Self::default() };
+        let mut c: Self = serde_json::from_value(v.clone()).unwrap_or_default();
+        if v.get("audio_tracks").is_none() {
+            c.audio_tracks = match c.audio_mode.as_str() {
+                "none" => vec![],
+                "split" => vec!["game".into(), "mic".into()],
+                _ => vec!["mix".into()],
+            };
+        }
+        c.rec = c.clip; // une seule qualité pour le Clip et le REC
+        c
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -124,5 +145,13 @@ mod tests {
         assert_eq!(c.buffer_secs, 60);
         assert_eq!(c.container, "mkv");
         assert_eq!(c.clip, Quality { height: 1080, fps: 60 });
+    }
+
+    #[test]
+    fn old_audio_mode_becomes_tracks() {
+        assert_eq!(Config::parse(r#"{"audio_mode":"split"}"#).audio_tracks, ["game", "mic"]);
+        assert!(Config::parse(r#"{"audio_mode":"none"}"#).audio_tracks.is_empty());
+        assert_eq!(Config::parse(r#"{"audio_mode":"split","audio_tracks":["mix","mic"]}"#).audio_tracks, ["mix", "mic"]);
+        assert_eq!(Config::parse("pas du json").audio_tracks, ["mix"]);
     }
 }

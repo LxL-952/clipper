@@ -41,6 +41,7 @@ Name: "fr"; MessagesFile: "compiler:Languages\French.isl"
 Name: "desktop"; Description: "Créer une icône sur le Bureau"; GroupDescription: "Raccourcis :"
 Name: "startup"; Description: "Lancer Clipper au démarrage de Windows (dans la zone de notification)"; GroupDescription: "Démarrage :"
 Name: "ffmpeg"; Description: "Installer FFmpeg avec winget (nécessaire pour enregistrer)"; GroupDescription: "Composants :"; Check: NeedsFfmpeg
+Name: "presentmon"; Description: "Installer PresentMon d'Intel avec winget (FPS de l'overlay pour DirectX, Vulkan et OpenGL)"; GroupDescription: "Composants :"; Check: NeedsPresentMon
 
 [Files]
 Source: "{#Bin}\clipper.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -56,6 +57,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "winget.exe"; Parameters: "install -e --id Gyan.FFmpeg --scope user --accept-package-agreements --accept-source-agreements"; StatusMsg: "Installation de FFmpeg…"; Flags: runhidden waituntilterminated; Tasks: ffmpeg
+Filename: "winget.exe"; Parameters: "install -e --id Intel.PresentMon.Console --accept-package-agreements --accept-source-agreements"; StatusMsg: "Installation de PresentMon…"; Flags: runhidden waituntilterminated; Tasks: presentmon
 Filename: "{app}\clipper.exe"; Description: "Lancer Clipper"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -70,4 +72,11 @@ var
   Code: Integer;
 begin
   Result := not (Exec(ExpandConstant('{cmd}'), '/c where ffmpeg >nul 2>nul', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0));
+end;
+
+function NeedsPresentMon: Boolean;
+var
+  Code: Integer;
+begin
+  Result := not (Exec(ExpandConstant('{cmd}'), '/c where presentmon >nul 2>nul', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0));
 end;

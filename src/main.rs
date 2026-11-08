@@ -4,6 +4,7 @@ mod audio;
 mod capture;
 mod config;
 mod drivers;
+mod elevate;
 mod overlay;
 mod tools;
 mod ui;
@@ -28,6 +29,7 @@ pub enum UserEvent {
     Push(Value),
     /// Fin d'un clip / REC lancé dans un fil (toast + son).
     Saved(Result<PathBuf, String>, &'static str),
+    Quit,
 }
 
 /// Job Object « tuer à la fermeture » : si l'app se ferme ou plante, Windows arrête aussi
@@ -95,6 +97,13 @@ fn disk_free(p: &Path) -> u64 {
     free
 }
 
+/// explorer.exe lit sa ligne de commande lui-même : le chemin entre guillemets doit arriver tel quel.
+/// Avec `.arg()`, Rust entoure tout de guillemets et explorer ouvrait « Documents » au lieu du dossier.
+fn explorer(args: &str) {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("explorer").raw_arg(args).spawn();
+}
+
 /// Corbeille (récupérable), jamais une suppression définitive.
 fn to_recycle_bin(p: &Path) -> bool {
     use windows_sys::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
@@ -106,35 +115,67 @@ fn to_recycle_bin(p: &Path) -> bool {
     unsafe { SHFileOperationW(&mut op) == 0 }
 }
 
-/// Vidéos du dossier de sortie, plus récentes d'abord. Durée lue par ffprobe.
-fn list_videos(cfg: &Config) -> Value {
+/// Vidéos du dossier de sortie, plus récentes d'abord. ffprobe en parallèle et en cache : liste immédiate.
+/// Les clips récents qui ne se lisent pas tels quels ont leur copie de lecture préparée en tâche de fond.
+fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>) -> Value {
     let mut v: Vec<(std::time::SystemTime, PathBuf, u64)> = std::fs::read_dir(&cfg.out_dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| ["mp4", "mkv", "mov"].contains(&x)))
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| ["mp4", "mkv", "mov"].contains(&x.to_ascii_lowercase().as_str())))
         .filter_map(|e| {
             let m = e.metadata().ok()?;
             Some((m.modified().ok()?, e.path(), m.len()))
         })
         .collect();
     v.sort_by(|a, b| b.0.cmp(&a.0));
+    let probes = par_probe(cfg, &v.iter().map(|x| x.1.clone()).collect::<Vec<_>>());
+    let mut warm = vec![];
     let items: Vec<Value> = v
         .into_iter()
-        .map(|(t, p, bytes)| {
+        .zip(probes)
+        .enumerate()
+        .map(|(i, ((t, p, bytes), pr))| {
             let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let stem = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-            let secs = capture::duration(cfg, &p);
             let date = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let play = capture::ready_url(&p, &pr);
+            if play.is_none() && i < 8 {
+                warm.push(p.clone());
+            }
             json!({
                 "path": p, "name": name, "kind": if stem.starts_with("REC") { "REC" } else { "Clip" },
-                "bytes": bytes, "secs": secs, "date": date,
+                "bytes": bytes, "secs": pr.secs, "date": date, "play": play,
                 "thumb": format!("/thumb/{}", ui::pct_encode(&format!("{stem}.jpg"))),
-                "url": format!("/video?p={}", ui::pct_encode(&p.to_string_lossy())),
             })
         })
         .collect();
+    prewarm(cfg, warm, proxy);
     json!({"type": "videos", "items": items})
+}
+
+/// ffprobe sur 6 fils au plus (les fichiers déjà vus sortent du cache sans rien lancer).
+fn par_probe(cfg: &Config, paths: &[PathBuf]) -> Vec<capture::Probe> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: Vec<std::sync::Mutex<capture::Probe>> = paths.iter().map(|_| Default::default()).collect();
+    std::thread::scope(|s| {
+        for _ in 0..paths.len().min(6) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(p) = paths.get(i) else { break };
+                *out[i].lock().unwrap() = capture::probe(cfg, p);
+            });
+        }
+    });
+    out.into_iter().map(|m| m.into_inner().unwrap()).collect()
+}
+
+/// Copies de lecture préparées d'avance ; chaque copie prête est signalée à l'UI (lecture instantanée).
+fn prewarm(cfg: &Config, clips: Vec<PathBuf>, proxy: &EventLoopProxy<UserEvent>) {
+    let p = proxy.clone();
+    capture::prewarm(cfg, clips, move |path, url| {
+        let _ = p.send_event(UserEvent::Push(json!({"type": "preview", "path": path, "url": url})));
+    });
 }
 
 struct Keys {
@@ -154,11 +195,17 @@ fn pretty(k: &HotKey) -> String {
 struct App {
     cfg: Config,
     encoders: Vec<&'static str>,
+    gpus: Vec<capture::Gpu>,
+    /// Capteur de température CPU lisible par Windows (souvent absent sur PC de bureau).
+    cpu_temp: bool,
     native: (u32, u32),
     monitors: Vec<Value>,
     buffer: Arc<capture::Buffer>,
     audio: Option<Arc<audio::Audio>>,
     recording: Option<Instant>,
+    /// Réglages changés pendant un REC : capture relancée à l'arrêt du REC.
+    restart_pending: bool,
+    reprobe_pending: bool,
     /// Overlay affiché par le raccourci (mode "hotkey").
     overlay_shown: bool,
     main: Option<ui::Win>,
@@ -176,16 +223,23 @@ impl App {
         (buffer, audio)
     }
 
-    fn restart_capture(&mut self) {
+    /// `reprobe` : relire la taille de l'écran (ffprobe, ~1 s) seulement si l'écran capturé a changé.
+    fn restart_capture(&mut self, reprobe: bool) {
         if self.recording.is_some() {
-            return; // jamais pendant un REC : on appliquera à l'arrêt
+            self.restart_pending = true; // jamais pendant un REC : on appliquera à l'arrêt
+            self.reprobe_pending |= reprobe;
+            return;
         }
+        let reprobe = reprobe || std::mem::take(&mut self.reprobe_pending);
+        self.restart_pending = false;
         self.buffer.stop();
         if let Some(a) = &self.audio {
             a.stop();
         }
-        self.cfg.encoder = capture::resolve_encoder(&self.cfg, &self.encoders);
-        self.native = capture::native_size(&self.cfg).unwrap_or(self.native);
+        self.cfg.encoder = capture::resolve_encoder(&self.cfg, &self.encoders, &self.gpus);
+        if reprobe {
+            self.native = capture::native_size(&self.cfg).unwrap_or(self.native);
+        }
         (self.buffer, self.audio) = Self::start_capture(&self.cfg, self.native);
     }
 
@@ -200,6 +254,9 @@ impl App {
             "hotkey_conflicts": self.keys.conflicts,
             "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs()),
             "gpu": self.gpu.as_ref().map(|g| json!({"name": g.name, "driver": g.driver})),
+            "elevated": elevate::is_elevated(),
+            "gpus": self.gpus, "chip": capture::effective_chip(&self.cfg, &self.gpus),
+            "cpu_temp": self.cpu_temp, "autostart": elevate::autostart(),
         })
         .to_string()
     }
@@ -274,6 +331,10 @@ impl App {
         let s = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         match m["cmd"].as_str().unwrap_or("") {
             "set" => self.set(&s("key"), m["value"].clone()),
+            "set_many" => {
+                let items: Vec<(String, Value)> = m["values"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect();
+                self.set_many(&items);
+            }
             "clip" => self.clip(),
             "rec" => self.toggle_rec(),
             "open_settings" => self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str)),
@@ -306,9 +367,20 @@ impl App {
             }
             "videos" => {
                 let c = self.cfg.clone();
-                self.bg(move |_| list_videos(&c));
+                self.bg(move |p| list_videos(&c, p));
             }
             "video_action" => self.video_action(&s("action"), Path::new(&s("path")), &s("name")),
+            "video_preview" => {
+                let p = PathBuf::from(s("path"));
+                if p.parent() != Some(self.cfg.out_dir.as_path()) {
+                    return log("lecture refusée hors du dossier de sortie");
+                }
+                let c = self.cfg.clone();
+                self.bg(move |_| match capture::preview(&c, &p) {
+                    Ok(url) => json!({"type": "preview", "path": p, "url": url}),
+                    Err(e) => json!({"type": "preview", "path": p, "error": e}),
+                });
+            }
             "levels" => {
                 let peak = |src: &audio::Source| f32::from_bits(src.peak.swap(0, std::sync::atomic::Ordering::Relaxed));
                 let (g, mi) = self.audio.as_ref().map_or((0.0, 0.0), |a| (peak(&a.game), peak(&a.mic)));
@@ -388,6 +460,30 @@ impl App {
                     json!({"type": "clean_done", "freed_bytes": freed, "skipped": skipped})
                 });
             }
+            "admin_mode" => {
+                let on = m["value"].as_bool().unwrap_or(false);
+                self.bg(move |_| {
+                    let ok = tools::run_elevated(&format!("--admin-task {}", if on { "on" } else { "off" })).is_ok_and(|c| c == 0);
+                    json!({"type": "admin", "ok": ok, "on": on})
+                });
+            }
+            "autostart" => {
+                let on = m["value"].as_bool().unwrap_or(false);
+                if !elevate::set_autostart(on) {
+                    self.push(&json!({"type": "toast", "kind": "error", "text": "Impossible de modifier le démarrage avec Windows."}));
+                }
+                self.push(&json!({"type": "autostart", "on": elevate::autostart()}));
+            }
+            "relaunch_admin" => {
+                if self.recording.is_some() {
+                    return self.push(&json!({"type": "toast", "kind": "error", "text": "Arrêtez le REC avant de relancer."}));
+                }
+                if elevate::run_task(false) {
+                    let _ = self.proxy.send_event(UserEvent::Quit);
+                } else {
+                    self.push(&json!({"type": "toast", "kind": "error", "text": "Relance en administrateur impossible."}));
+                }
+            }
             "ram_clean" => self.bg(|_| {
                 let (before, total) = tools::ram();
                 let game = capture::fullscreen_foreground();
@@ -402,39 +498,58 @@ impl App {
 
     /// Change un champ (chemin "clip.height" accepté), valide via serde, sauvegarde, relance si besoin.
     fn set(&mut self, key: &str, value: Value) {
+        self.set_many(&[(key.to_string(), value)]);
+    }
+
+    /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
+    fn set_many(&mut self, items: &[(String, Value)]) {
+        // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
+        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
-        let mut slot = &mut v;
-        for part in key.split('.') {
-            match slot.get_mut(part) {
-                Some(s) => slot = s,
-                None => return log(&format!("réglage inconnu : {key}")),
+        let mut restart = false;
+        let reprobe = items.iter().any(|(k, _)| k == "monitor");
+        'items: for (key, value) in items {
+            let mut slot = &mut v;
+            for part in key.split('.') {
+                match slot.get_mut(part) {
+                    Some(s) => slot = s,
+                    None => {
+                        log(&format!("réglage inconnu : {key}"));
+                        continue 'items;
+                    }
+                }
             }
+            *slot = value.clone();
+            restart |= !live.contains(&key.split('.').next().unwrap_or(""));
         }
-        *slot = value;
-        let Ok(new) = serde_json::from_value::<Config>(v) else { return log(&format!("valeur refusée pour {key}")) };
+        let Ok(mut new) = serde_json::from_value::<Config>(v) else { return log("valeurs refusées") };
+        new.rec = new.clip; // une seule qualité : le REC réutilise toujours le buffer
         self.cfg = new;
         if let Err(e) = self.cfg.save() {
             log(&format!("config non sauvegardée : {e}"));
         }
-        // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "key_clip", "key_rec", "key_bar", "key_overlay"];
-        if !live.contains(&key.split('.').next().unwrap_or("")) {
-            self.restart_capture();
+        if restart {
+            self.restart_capture(reprobe);
         }
         overlay::apply(&self.cfg, self.overlay_shown);
         self.push(&json!({"type": "config", "config": self.cfg}));
     }
 
     fn video_action(&mut self, action: &str, path: &Path, name: &str) {
+        // Dossier vide de l'onglet Vidéos : ouvre le dossier de « Emplacements ».
+        if action == "open_folder" && path == self.cfg.out_dir.as_path() {
+            let _ = std::fs::create_dir_all(path);
+            return explorer(&format!("\"{}\"", path.display()));
+        }
         // Seulement des fichiers directement dans le dossier de sortie.
         if path.parent() != Some(self.cfg.out_dir.as_path()) {
             return log("action vidéo refusée hors du dossier de sortie");
         }
         let thumb = |p: &Path| config::dir().join("thumbs").join(format!("{}.jpg", p.file_stem().unwrap_or_default().to_string_lossy()));
         match action {
-            "open_folder" => {
-                let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
-            }
+            "open_folder" => return explorer(&format!("/select,\"{}\"", path.display())),
+            // Lecteur par défaut de Windows.
+            "open" => return explorer(&format!("\"{}\"", path.display())),
             "delete" => {
                 if to_recycle_bin(path) {
                     let _ = std::fs::remove_file(thumb(path));
@@ -454,7 +569,7 @@ impl App {
             _ => {}
         }
         let c = self.cfg.clone();
-        self.bg(move |_| list_videos(&c));
+        self.bg(move |p| list_videos(&c, p));
     }
 }
 
@@ -466,22 +581,29 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--clean-ram") => std::process::exit(tools::clean_ram_elevated(args.iter().any(|a| a == "--standby-only"))),
         Some("--clean") => std::process::exit(tools::clean_elevated(&args[1..], &[Config::load().buffer_dir])),
+        Some("--admin-task") => std::process::exit(elevate::set_task(args.get(1).is_some_and(|a| a == "on"))),
+        Some("--quit") => std::process::exit(if elevate::signal_quit() { 0 } else { 1 }),
         _ => {}
     }
+    let from_task = args.iter().any(|a| a == "--from-task");
+    let tray_start = args.iter().any(|a| a == "--tray") || (from_task && elevate::take_tray_flag());
     // Une seule instance : un 2e double-clic réveille la première (fenêtre réglages) puis quitte.
-    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForSingleObject};
-    let name: Vec<u16> = "Local\\ClipperOpenSettings".encode_utf16().chain(Some(0)).collect();
-    let ev = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
-    if unsafe { windows_sys::Win32::Foundation::GetLastError() } == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS {
-        unsafe { SetEvent(ev) };
+    if !from_task && elevate::signal_existing() {
         return;
     }
+    // Mode administrateur : on passe par la tâche planifiée (aucune demande UAC). Échec : lancement normal.
+    if !from_task && Config::load().admin_mode && !elevate::is_elevated() && elevate::run_task(tray_start) {
+        return;
+    }
+    use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+    let Some(ev) = elevate::own_event(from_task) else { return };
     kill_children_with_us();
     let ev = ev as usize;
     lower_priority();
     let mut cfg = Config::load();
     let encoders = capture::probe_encoders(&cfg);
-    cfg.encoder = capture::resolve_encoder(&cfg, &encoders);
+    let gpus = capture::gpus();
+    cfg.encoder = capture::resolve_encoder(&cfg, &encoders, &gpus);
     let native = capture::native_size(&cfg).unwrap_or((1920, 1080));
     let monitors = capture::monitors(&cfg);
     log(&format!("encodeurs {encoders:?}, choisi {}, écran {native:?}", cfg.encoder));
@@ -503,6 +625,13 @@ fn main() {
         unsafe { WaitForSingleObject(ev as _, INFINITE) };
         let _ = proxy.send_event(UserEvent::TrayClick);
     });
+    if let Some(q) = elevate::quit_event() {
+        let (q, proxy) = (q as usize, event_loop.create_proxy());
+        std::thread::spawn(move || {
+            unsafe { WaitForSingleObject(q as _, INFINITE) };
+            let _ = proxy.send_event(UserEvent::Quit);
+        });
+    }
     let proxy = event_loop.create_proxy();
     TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
         if let TrayIconEvent::DoubleClick { .. } = e {
@@ -542,11 +671,15 @@ fn main() {
     let mut app = App {
         cfg,
         encoders,
+        gpus,
+        cpu_temp: overlay::cpu_temp_available(),
         native,
         monitors,
         buffer,
         audio,
         recording: None,
+        restart_pending: false,
+        reprobe_pending: false,
         overlay_shown: false,
         main: None,
         bar: None,
@@ -572,7 +705,7 @@ fn main() {
                     .with_menu(Box::new(menu.clone()))
                     .build()
                     .ok();
-                if !args.iter().any(|a| a == "--tray") {
+                if !tray_start {
                     app.open(ui::Kind::Main, target, None);
                 }
             }
@@ -595,6 +728,11 @@ fn main() {
             Event::UserEvent(UserEvent::Push(v)) => {
                 if v["type"] == "driver_url" {
                     app.driver_url = v["url"].as_str().map(String::from);
+                } else if v["type"] == "admin" {
+                    if v["ok"] == true {
+                        app.set("admin_mode", v["on"].clone());
+                    }
+                    app.push(&json!({"type": "admin", "ok": v["ok"], "on": v["on"], "elevated": elevate::is_elevated()}));
                 } else {
                     app.push(&v);
                 }
@@ -602,15 +740,18 @@ fn main() {
             Event::UserEvent(UserEvent::Saved(r, kind)) => {
                 beep(r.is_ok());
                 log(&format!("{kind} : {r:?}"));
+                if let Ok(p) = &r {
+                    prewarm(&app.cfg, vec![p.clone()], &app.proxy); // lisible dans l'app dès l'ouverture
+                }
                 let msg = match &r {
                     Ok(p) => json!({"type": "toast", "kind": kind, "path": p,
                         "text": if kind == "clip" { "Clip enregistré" } else { "REC enregistré" }}),
                     Err(e) => json!({"type": "toast", "kind": "error", "text": e}),
                 };
                 app.push(&msg);
-                if kind == "rec" && app.recording.is_none() {
+                if kind == "rec" && app.recording.is_none() && app.restart_pending {
                     // Réglages changés pendant le REC : appliqués maintenant.
-                    app.restart_capture();
+                    app.restart_capture(false);
                 }
             }
             Event::WindowEvent { window_id, event: tao::event::WindowEvent::CloseRequested, .. } => {
@@ -625,16 +766,19 @@ fn main() {
             Event::UserEvent(UserEvent::TrayClick) => app.open(ui::Kind::Main, target, None),
             Event::UserEvent(UserEvent::Menu(m)) => {
                 if m == quit.id() {
-                    app.buffer.stop();
-                    if let Some(a) = &app.audio {
-                        a.stop();
-                    }
-                    (app.main, app.bar) = (None, None);
-                    tray.take();
-                    *flow = ControlFlow::Exit;
+                    let _ = app.proxy.send_event(UserEvent::Quit);
                 } else if m == open.id() {
                     app.open(ui::Kind::Main, target, None);
                 }
+            }
+            Event::UserEvent(UserEvent::Quit) => {
+                app.buffer.stop();
+                if let Some(a) = &app.audio {
+                    a.stop();
+                }
+                (app.main, app.bar) = (None, None);
+                tray.take();
+                *flow = ControlFlow::Exit;
             }
             _ => {}
         }
