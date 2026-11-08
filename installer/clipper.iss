@@ -6,7 +6,7 @@
 #ifndef Bin
   #define Bin "..\target\release"
 #endif
-#define AppVersion "1.2.3"
+#define AppVersion "1.3.0"
 
 [Setup]
 AppId={{6B1E3F52-8C0A-4C1D-9E57-3A1C2F0B7D41}
