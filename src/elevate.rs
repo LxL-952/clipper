@@ -96,6 +96,55 @@ pub fn run_task(tray: bool) -> bool {
     schtasks(&["/run", "/tn", TASK])
 }
 
+/// Programme que lance la tâche (None : pas de tâche).
+fn task_exe() -> Option<String> {
+    let out = Command::new("schtasks").creation_flags(CREATE_NO_WINDOW).args(["/query", "/tn", TASK, "/xml"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // schtasks écrit en UTF-16 ou dans la page de codes de la console selon les versions : on lit les deux.
+    let b = &out.stdout;
+    let text = if b.len() > 3 && b[1] == 0 {
+        String::from_utf16_lossy(&b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>())
+    } else {
+        String::from_utf8_lossy(b).into_owned()
+    };
+    command_of(&text)
+}
+
+/// Contenu de <Command> dans le XML d'une tâche.
+fn command_of(xml: &str) -> Option<String> {
+    let c = xml.split("<Command>").nth(1)?.split("</Command>").next()?;
+    Some(c.trim().trim_matches('"').replace("&amp;", "&"))
+}
+
+/// La tâche existe et lance bien ce programme. Sinon (Clipper installé ailleurs depuis, tâche d'une
+/// ancienne copie) le « mode administrateur » ouvrait une autre version de Clipper, ou rien.
+pub fn task_ok() -> bool {
+    let Ok(me) = std::env::current_exe() else { return false };
+    task_exe().is_some_and(|t| t.eq_ignore_ascii_case(&me.display().to_string()))
+}
+
+/// Relance Clipper sans élévation, depuis une instance administrateur : l'Explorateur (non élevé) le lance.
+/// Le fichier « relaunch » dit à la nouvelle instance d'attendre la fermeture de celle-ci.
+pub fn relaunch_normal() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let flag = crate::config::dir().join("relaunch");
+    let _ = std::fs::write(&flag, b"");
+    let ok = Command::new("explorer.exe").arg(exe).spawn().is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(flag);
+    }
+    ok
+}
+
+/// Vrai si l'instance précédente a demandé cette relance il y a moins de 30 s (fichier consommé).
+pub fn take_relaunch_flag() -> bool {
+    let flag = crate::config::dir().join("relaunch");
+    let fresh = std::fs::metadata(&flag).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d.as_secs() < 30);
+    std::fs::remove_file(&flag).is_ok() && fresh
+}
+
 /// Lancé par la tâche avec « réduit dans la zone de notification » demandé.
 pub fn take_tray_flag() -> bool {
     std::fs::remove_file(crate::config::dir().join("launch-tray")).is_ok()
@@ -144,6 +193,13 @@ pub fn set_task(on: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_task_command() {
+        let xml = r#"<Actions Context="Author"><Exec><Command>C:\A&amp;B\clipper.exe</Command><Arguments>--from-task</Arguments></Exec></Actions>"#;
+        assert_eq!(super::command_of(xml).as_deref(), Some(r"C:\A&B\clipper.exe"));
+        assert_eq!(super::command_of("<Task/>"), None);
+    }
+
     #[test]
     fn escapes_paths_for_xml() {
         assert_eq!(super::xml_escape(r#"C:\A&B\<x>"q".exe"#), r#"C:\A&amp;B\&lt;x&gt;&quot;q&quot;.exe"#);

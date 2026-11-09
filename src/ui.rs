@@ -12,6 +12,17 @@ use wry::{WebView, WebViewBuilder};
 
 static UI: Dir = include_dir!("$CARGO_MANIFEST_DIR/ui");
 
+/// Dossier de sortie actuel : les fenêtres restent ouvertes (la barre n'est jamais détruite), elles
+/// doivent servir les vidéos du dossier choisi maintenant, pas de celui de leur création.
+static OUT_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn set_out_dir(p: &Path) {
+    *OUT_DIR.lock().unwrap() = Some(p.to_path_buf());
+}
+
+const BAR_W: f64 = 1040.0;
+const BAR_H: f64 = 760.0;
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
     Main,
@@ -96,7 +107,9 @@ fn serve_video(path: &Path, req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8
 }
 
 /// Sert l'UI embarquée, les miniatures et les vidéos du dossier de sortie (et rien d'autre).
-fn protocol(req: &Request<Vec<u8>>, out_dir: &Path) -> Response<Cow<'static, [u8]>> {
+fn protocol(req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+    let out_dir = OUT_DIR.lock().unwrap().clone().unwrap_or_default();
+    let out_dir = out_dir.as_path();
     let path = req.uri().path().trim_start_matches('/');
     if let Some(name) = path.strip_prefix("thumb/") {
         let name = pct_decode(name);
@@ -135,7 +148,6 @@ pub fn open<T: 'static>(
     kind: Kind,
     target: &EventLoopWindowTarget<T>,
     init: &str,
-    out_dir: PathBuf,
     proxy: EventLoopProxy<T>,
     on_ipc: fn(Kind, String) -> T,
 ) -> Option<Win> {
@@ -145,7 +157,8 @@ pub fn open<T: 'static>(
         Kind::Main => wb.with_inner_size(LogicalSize::new(900.0, 620.0)).with_min_inner_size(LogicalSize::new(760.0, 520.0)).with_visible(false),
         Kind::Bar => {
             // Transparente, au premier plan, hors barre des tâches. Placée et focalisée après création (voir place_bar).
-            wb.with_inner_size(LogicalSize::new(900.0, 130.0))
+            // Assez grande pour la barre, la galerie et le lecteur ; le vide est transparent et un clic dessus ferme.
+            wb.with_inner_size(LogicalSize::new(BAR_W, BAR_H))
                 .with_visible(false)
                 .with_transparent(true)
                 .with_always_on_top(true)
@@ -157,17 +170,13 @@ pub fn open<T: 'static>(
     };
     let window = wb.build(target).ok()?;
     if kind == Kind::Bar {
-        tool_window(&window);
-        place_bar(&window);
-        // Focus pris : le jeu rend la souris (curseur visible, plus bloqué), et Échap ferme la barre.
-        // Le focus revient au jeu à la fermeture (main.rs, close_bar).
-        window.set_focus();
+        tool_window(&window); // créée cachée : affichée par show_bar à chaque Alt+Z, jamais détruite
     }
     // Fenêtre principale : cachée jusqu'à la 1re image de la page (message "ready"), sinon WebView2
     // affiche un écran blanc avant l'intro. main.rs la montre au plus tard après 1,5 s.
     let page = if kind == Kind::Main { "index.html" } else { "bar.html" };
     let web = WebViewBuilder::new()
-        .with_custom_protocol("clipper".into(), move |_, req| protocol(&req, &out_dir))
+        .with_custom_protocol("clipper".into(), move |_, req| protocol(&req))
         .with_initialization_script(format!("window.__INIT__={init};"))
         .with_ipc_handler(move |req: Request<String>| {
             let _ = proxy.send_event(on_ipc(kind, req.into_body()));
@@ -218,7 +227,7 @@ mod tests {
 
 /// Haut-centre de l'écran du jeu (fenêtre au premier plan), en pixels réels :
 /// juste même quand les deux écrans n'ont pas la même mise à l'échelle.
-fn place_bar(w: &Window) {
+pub fn show_bar(w: &Window) {
     use tao::dpi::PhysicalPosition;
     use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow};
     use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -227,8 +236,16 @@ fn place_bar(w: &Window) {
     let ok = unsafe { GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &mut mi) } != 0;
     if ok {
         let r = mi.rcMonitor;
-        let size = w.outer_size();
-        w.set_outer_position(PhysicalPosition::new(r.left + (r.right - r.left - size.width as i32) / 2, r.top));
+        // Taille recalculée pour l'écran du jeu (mise à l'échelle différente d'un écran à l'autre),
+        // limitée à l'écran.
+        let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(GetForegroundWindow()) }.max(96) as f64 / 96.0;
+        let (mw, mh) = ((r.right - r.left) as u32, (r.bottom - r.top) as u32);
+        let size = tao::dpi::PhysicalSize::new(((BAR_W * dpi) as u32).min(mw), ((BAR_H * dpi) as u32).min(mh));
+        w.set_inner_size(size);
+        w.set_outer_position(PhysicalPosition::new(r.left + (mw as i32 - size.width as i32) / 2, r.top));
     }
     w.set_visible(true);
+    // Focus pris : le jeu rend la souris (curseur visible, plus bloqué), et Échap ferme la barre.
+    // Le focus revient au jeu à la fermeture (main.rs, hide_bar).
+    w.set_focus();
 }

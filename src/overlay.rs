@@ -219,10 +219,48 @@ static PM_UNUSABLE: AtomicBool = AtomicBool::new(false);
 /// Une capture PresentMon tourne et alimente PM_FRAMES.
 static PM_ON: AtomicBool = AtomicBool::new(false);
 static PM_STARTING: AtomicBool = AtomicBool::new(false);
-/// Images de l'appli au premier plan ou de ses processus enfants : (arrivée, ms depuis l'image précédente, processus).
+/// Images de tous les processus : (arrivée, ms depuis l'image précédente, processus). 10 s gardées.
 static PM_FRAMES: Mutex<VecDeque<(std::time::Instant, f64, u32)>> = Mutex::new(VecDeque::new());
-/// Appli à laquelle appartiennent les images de PM_FRAMES.
-static PM_FOR: AtomicU32 = AtomicU32::new(0);
+/// Processus -> (parent, exe), tenu à jour par la lecture de PresentMon.
+static PM_TABLE: Mutex<Option<std::collections::HashMap<u32, (u32, String)>>> = Mutex::new(None);
+/// Processus du jeu détecté (celui qui affiche ses images) ; 0 = aucun.
+static GAME: AtomicU32 = AtomicU32::new(0);
+
+/// Programmes qui affichent des images sans être des jeux : jamais pris pour « le jeu en cours ».
+const NOT_GAMES: [&str; 40] = [
+    "explorer.exe", "dwm.exe", "clipper.exe", "msedgewebview2.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
+    "vivaldi.exe", "discord.exe", "code.exe", "spotify.exe", "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe", "riotclientux.exe",
+    "riotclientuxrender.exe", "riotclientservices.exe", "battle.net.exe", "taskmgr.exe", "obs64.exe", "vlc.exe", "slack.exe", "teams.exe",
+    "ms-teams.exe", "whatsapp.exe", "telegram.exe", "claude.exe", "searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
+    "applicationframehost.exe", "textinputhost.exe", "lockapp.exe", "nvidia overlay.exe", "nvidia app.exe", "widgets.exe", "notepad.exe",
+    "windowsterminal.exe",
+];
+
+/// Choix du jeu parmi les processus qui affichent des images (`count` = images des 2 dernières secondes).
+/// 1. L'appli au premier plan (ou un de ses enfants), si ce n'est ni Clipper ni un programme de bureau et
+///    qu'elle affiche vraiment : plein écran, ou au moins 30 i/s si elle est fenêtrée.
+/// 2. Sinon le jeu déjà détecté tant qu'il affiche encore des images : ouvrir la barre de Clipper, Discord ou
+///    un autre écran ne fait plus tomber le compteur à 0.
+fn pick_game(
+    count: &std::collections::HashMap<u32, usize>,
+    table: &std::collections::HashMap<u32, (u32, String)>,
+    fg: u32,
+    fullscreen: bool,
+    me: u32,
+    prev: u32,
+) -> Option<u32> {
+    let name = |p: u32| table.get(&p).map_or(String::new(), |e| e.1.to_ascii_lowercase());
+    let desktop = |p: u32| p == 0 || belongs(p, me, table) || NOT_GAMES.contains(&name(p).as_str());
+    if !desktop(fg) {
+        let best = count.iter().filter(|(p, _)| belongs(**p, fg, table) && !desktop(**p)).max_by_key(|(_, n)| **n);
+        if let Some((&p, &n)) = best {
+            if (fullscreen && n >= 2) || n >= 60 {
+                return Some(p);
+            }
+        }
+    }
+    (prev != 0 && count.get(&prev).is_some_and(|n| *n >= 2)).then_some(prev)
+}
 /// Fréquence de mise à jour de l'overlay (réglage « Mise à jour »), en ms.
 static REFRESH_MS: AtomicU32 = AtomicU32::new(500);
 /// Dernière appli pour laquelle des FPS ont été affichés (journal, une ligne par appli).
@@ -319,10 +357,9 @@ fn run_presentmon() -> bool {
         me.unpark();
     });
     let started = std::time::Instant::now();
-    let (mut cols, mut rows, mut target, mut logged) = (None, 0u64, 0u32, 0u32);
+    let (mut cols, mut rows) = (None, 0u64);
     let (mut table, mut table_at) = (process_table(), std::time::Instant::now());
-    let mut target_since = std::time::Instant::now();
-    let mut warned = 0u32;
+    *PM_TABLE.lock().unwrap() = Some(table.clone());
     for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
         let Some(cc) = cols else {
             cols = pm_columns(&line);
@@ -334,36 +371,15 @@ fn run_presentmon() -> bool {
         };
         let Some((pid, ms)) = pm_row(&line, cc) else { continue };
         rows += 1;
-        let t = TARGET.load(Ordering::Relaxed);
         // Processus inconnu (nouveau jeu, nouvel enfant) : instantané rafraîchi, au plus une fois par seconde.
-        if (!table.contains_key(&pid) || !table.contains_key(&t)) && table_at.elapsed().as_secs() >= 1 {
+        if !table.contains_key(&pid) && table_at.elapsed().as_secs() >= 1 {
             (table, table_at) = (process_table(), std::time::Instant::now());
+            *PM_TABLE.lock().unwrap() = Some(table.clone());
         }
-        let name = |p: u32| table.get(&p).map_or("?".to_string(), |e| e.1.clone());
         let mut q = PM_FRAMES.lock().unwrap();
-        PM_FOR.store(t, Ordering::Relaxed);
-        if t != target {
-            q.clear(); // autre appli au premier plan
-            target = t;
-            target_since = std::time::Instant::now();
-        }
-        // L'Explorateur (bureau, barre des tâches) est l'ancêtre de presque tout : ses « enfants » ne comptent pas,
-        // sinon un jeu ouvert en arrière-plan donnait ses FPS au bureau.
-        let shell = table.get(&t).is_some_and(|e| e.1.eq_ignore_ascii_case("explorer.exe"));
-        let mine = if shell { pid == t } else { belongs(pid, t, &table) };
-        if !mine && logged != t && warned != t && target_since.elapsed().as_secs() >= 5 {
-            warned = t;
-            crate::log(&format!("FPS : aucune image de {} ({t}) en 5 s ; d'autres processus en affichent ({})", name(t), name(pid)));
-        }
-        if mine {
-            if logged != t {
-                logged = t;
-                crate::log(&format!("FPS : images de {} ({t}) reçues via {} ({pid}), {ms:.1} ms", name(t), name(pid)));
-            }
-            q.push_back((std::time::Instant::now(), ms, pid));
-            if q.len() > 30_000 {
-                q.pop_front();
-            }
+        q.push_back((std::time::Instant::now(), ms, pid));
+        if q.len() > 60_000 {
+            q.pop_front();
         }
     }
     let _ = child.lock().unwrap().kill();
@@ -371,6 +387,7 @@ fn run_presentmon() -> bool {
     PM_ON.store(false, Ordering::Relaxed);
     PM_STARTING.store(false, Ordering::Relaxed);
     PM_FRAMES.lock().unwrap().clear();
+    GAME.store(0, Ordering::Relaxed);
     // Arrêt immédiat sans aucune ligne : pas les droits ou version incompatible.
     if rows == 0 && cols.is_none() && started.elapsed() < std::time::Duration::from_secs(3) && VISIBLE.load(Ordering::Relaxed) {
         crate::log(&format!("FPS : PresentMon s'est arrêté aussitôt (admin = {}), mesure par ETW DXGI", crate::elevate::is_elevated()));
@@ -416,19 +433,29 @@ fn pm_text() -> FpsText {
     while q.front().is_some_and(|(t, _, _)| now.duration_since(*t).as_secs_f64() > LOW_WINDOW_SECS) {
         q.pop_front();
     }
-    // Images d'une autre appli (fenêtre changée depuis) : jamais affichées pour la nouvelle.
-    if PM_FOR.load(Ordering::Relaxed) != TARGET.load(Ordering::Relaxed) {
-        return FpsText::same("0", "—");
-    }
-    // PresentMon livre ses lignes par paquets (jusqu'à ~1 s d'écart) : une fenêtre « reçues dans les
-    // dernières 0,5 s » était vide entre deux paquets, d'où « 180, 0, 180, 0 ». On moyenne donc les
-    // dernières images reçues, sur 0,5 s de durée d'image cumulée ; « 0 » seulement après 2 s sans image.
+    // PresentMon livre ses lignes par paquets (jusqu'à ~1 s d'écart) : on compte les images reçues
+    // dans les 2 dernières secondes, et on moyenne les dernières sur la période de rafraîchissement.
     const STALE_SECS: f64 = 2.0;
     let live = |f: &&(std::time::Instant, f64, u32)| now.duration_since(f.0).as_secs_f64() <= STALE_SECS;
-    // Plusieurs processus (appli + enfant GPU) : celui qui affiche le plus d'images.
     let mut count = std::collections::HashMap::<u32, usize>::new();
     q.iter().filter(live).for_each(|f| *count.entry(f.2).or_default() += 1);
-    let Some((&src, _)) = count.iter().max_by_key(|(_, n)| **n) else { return FpsText::same("0", "—") };
+    let prev = GAME.load(Ordering::Relaxed);
+    let game = {
+        let table = PM_TABLE.lock().unwrap();
+        let empty = std::collections::HashMap::new();
+        let table = table.as_ref().unwrap_or(&empty);
+        let g = pick_game(&count, table, TARGET.load(Ordering::Relaxed), crate::capture::fullscreen_foreground(), std::process::id(), prev);
+        if g != Some(prev) {
+            match g {
+                Some(p) => crate::log(&format!("FPS : jeu détecté : {} ({p})", table.get(&p).map_or("?", |e| e.1.as_str()))),
+                None if prev != 0 => crate::log("FPS : plus de jeu en cours"),
+                None => {}
+            }
+        }
+        g
+    };
+    GAME.store(game.unwrap_or(0), Ordering::Relaxed);
+    let Some(src) = game else { return FpsText::same("—", "—") };
     let span_ms = (REFRESH_MS.load(Ordering::Relaxed) as f64).max(500.0);
     let (mut sum, mut n) = (0.0, 0usize);
     for f in q.iter().rev().filter(|f| f.2 == src) {
@@ -445,9 +472,8 @@ fn pm_text() -> FpsText {
     let fps = 1000.0 / ft;
     let all: Vec<f64> = q.iter().filter(|f| f.2 == src).map(|f| f.1).collect();
     let low = one_percent_low(&all);
-    let t = TARGET.load(Ordering::Relaxed);
-    if PM_SHOWN.swap(t, Ordering::Relaxed) != t {
-        crate::log(&format!("FPS : overlay affiche {fps:.0} FPS / {ft:.1} ms (processus {t})"));
+    if PM_SHOWN.swap(src, Ordering::Relaxed) != src {
+        crate::log(&format!("FPS : overlay affiche {fps:.0} FPS / {ft:.1} ms (processus {src})"));
     }
     FpsText {
         fps: format!("{fps:.0}"),
@@ -528,7 +554,9 @@ fn refresh(cpu: &mut Cpu, nv: &Option<Nvml>, th: &Option<Thermal>) {
     let go = |b: u64| format!("{:.1}", b as f64 / 1_073_741_824.0).replace('.', ",");
     // Bureau ou appli fenêtrée : elles ne redessinent qu'au moindre changement, leurs « FPS » sautent
     // de 0 à 144 sans rien dire. Chiffres d'images seulement pour une appli plein écran (un jeu).
-    let f = if crate::capture::fullscreen_foreground() { fps_text() } else { FpsText::same("—", "—") };
+    // Avec PresentMon, le jeu est détecté parmi tous les processus (voir pick_game), fenêtré ou non.
+    // Sans lui (ETW DXGI) : seulement l'appli plein écran au premier plan.
+    let f = if PM_ON.load(Ordering::Relaxed) || PM_STARTING.load(Ordering::Relaxed) || crate::capture::fullscreen_foreground() { fps_text() } else { FpsText::same("—", "—") };
     let rows = items
         .iter()
         .filter_map(|k| {
@@ -931,6 +959,29 @@ mod presentmon_csv {
         v.extend([40.0, 60.0]);
         assert_eq!(super::one_percent_low(&v).map(|x| x.round()), Some(20.0));
         assert_eq!(super::one_percent_low(&[10.0; 5]), None);
+    }
+
+    #[test]
+    fn game_is_detected_and_kept() {
+        // Jeu (40), Clipper (10) et son WebView2 (20), Chrome (50), bureau (60).
+        let t: std::collections::HashMap<u32, (u32, String)> =
+            [(10, (1, "clipper.exe")), (20, (10, "msedgewebview2.exe")), (40, (1, "VALORANT-Win64-Shipping.exe")), (50, (1, "chrome.exe")), (60, (1, "explorer.exe"))]
+                .into_iter()
+                .map(|(p, (pp, n))| (p, (pp, n.to_string())))
+                .collect();
+        let c = |v: &[(u32, usize)]| v.iter().copied().collect::<std::collections::HashMap<u32, usize>>();
+        // Jeu plein écran au premier plan : détecté.
+        assert_eq!(super::pick_game(&c(&[(40, 300), (20, 90)]), &t, 40, true, 10, 0), Some(40));
+        // La barre de Clipper prend le focus : le jeu reste le jeu (pas les images de la barre).
+        assert_eq!(super::pick_game(&c(&[(40, 300), (20, 90)]), &t, 10, false, 10, 40), Some(40));
+        // Alt+Tab vers Chrome ou le bureau : toujours le jeu tant qu'il affiche.
+        assert_eq!(super::pick_game(&c(&[(40, 300), (50, 120)]), &t, 50, true, 10, 40), Some(40));
+        assert_eq!(super::pick_game(&c(&[(40, 300)]), &t, 60, false, 10, 40), Some(40));
+        // Jeu fermé : plus rien, même avec Chrome en plein écran.
+        assert_eq!(super::pick_game(&c(&[(50, 120)]), &t, 50, true, 10, 40), None);
+        // Jeu fenêtré : détecté s'il affiche au moins 30 i/s, pas une appli qui redessine parfois.
+        assert_eq!(super::pick_game(&c(&[(40, 240)]), &t, 40, false, 10, 0), Some(40));
+        assert_eq!(super::pick_game(&c(&[(40, 12)]), &t, 40, false, 10, 0), None);
     }
 
     #[test]

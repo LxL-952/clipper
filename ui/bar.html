@@ -1,5 +1,6 @@
 <!doctype html>
-<!-- Barre Alt+Z — DA E « Instrument ». Fenêtre transparente, toujours au premier plan, sans focus.
+<!-- Barre Alt+Z — DA E « Instrument ». Fenêtre transparente, toujours au premier plan, créée une fois puis
+     seulement affichée / cachée (ouverture immédiate). Sous la barre : les derniers clips, lisibles sur place.
      Hors de l'app (pas de window.__INIT__) : données factices pour tester dans un navigateur. -->
 <html lang="fr">
 <head>
@@ -18,15 +19,17 @@
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:transparent;overflow:hidden;user-select:none}
-body{display:grid;justify-items:center;align-content:start;font:500 13px/1.2 var(--sans);color:var(--text);-webkit-font-smoothing:antialiased}
+body{display:flex;flex-direction:column;align-items:center;font:500 13px/1.2 var(--sans);color:var(--text);-webkit-font-smoothing:antialiased}
+[hidden]{display:none!important}
 :focus-visible{outline:2px solid var(--signal);outline-offset:2px}
-.bar{display:flex;align-items:center;gap:2px;height:62px;padding:6px;background:rgba(20,25,19,.94);
+/* Tout ce qui s'anime n'utilise que transform et opacity : composé par la carte graphique, sans recalcul. */
+.bar{flex:none;display:flex;align-items:center;gap:2px;height:62px;padding:6px;background:rgba(20,25,19,.96);
   border:1px solid var(--line-2);border-top:0;border-radius:0 0 12px 12px;box-shadow:0 10px 28px rgba(0,0,0,.55);
-  transform:translateY(-110%);transition:transform .38s var(--ease)}
-.bar.in{transform:none}
-.bar.out{transform:translateY(-110%);transition-duration:.22s}
-.bar button{all:unset;cursor:pointer;display:grid;grid-template-columns:auto auto;align-items:center;column-gap:8px;height:48px;padding:0 11px;border-radius:7px;transition:background .15s}
+  transform:translateY(-110%);opacity:0;transition:transform .26s var(--ease),opacity .16s linear;will-change:transform}
+.on .bar{transform:none;opacity:1}
+.bar button{all:unset;cursor:pointer;display:grid;grid-template-columns:auto auto;align-items:center;column-gap:8px;height:48px;padding:0 11px;border-radius:7px;transition:background .12s}
 .bar button:hover{background:var(--raise-h)}
+.bar button:active{background:var(--line-2)}
 .bar button:focus-visible{outline:2px solid var(--signal)}
 .bar svg{width:17px;height:17px;grid-row:span 2;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .v{font-weight:600;line-height:1.15;white-space:nowrap}
@@ -34,8 +37,8 @@ kbd{grid-column:2;font:500 10px/1 var(--mono);color:var(--text-3);letter-spacing
 .sep{width:1px;height:30px;background:var(--line);margin:0 4px}
 .bar .clip{background:var(--signal);color:var(--signal-ink)}
 .bar .clip:hover{background:#ff9148}
+.bar .clip.busy{opacity:.6;pointer-events:none}
 .clip kbd{color:rgba(29,14,3,.72)}
-/* Clip et REC : même gabarit, même largeur, contenu aligné à gauche comme le reste de la barre. */
 .bar .clip,.bar .rec{min-width:104px;box-sizing:border-box;justify-content:start}
 .rec .led{justify-self:center;width:9px;height:9px;margin:0 4px}
 .rec.on .v{color:var(--rec);font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -43,14 +46,47 @@ kbd{grid-column:2;font:500 10px/1 var(--mono);color:var(--text-3);letter-spacing
 .rec.on .led{background:var(--rec);animation:blink 1.4s steps(1) infinite}
 @keyframes blink{50%{opacity:.25}}
 .stats.on{color:var(--ok)}
-.toast{margin-top:10px;display:flex;align-items:center;gap:10px;padding:9px 10px 9px 14px;background:var(--body);border:1px solid var(--line-2);border-radius:10px;box-shadow:0 8px 22px rgba(0,0,0,.5);opacity:0;transform:translateY(-6px);transition:opacity .25s,transform .35s var(--ease)}
-.toast.show{opacity:1;transform:none}
+/* Sous la barre : notification, galerie, lecteur. */
+.under{flex:none;display:flex;flex-direction:column;align-items:center;gap:10px;margin-top:10px;opacity:0;transform:translateY(-8px);transition:opacity .18s linear,transform .26s var(--ease)}
+.on .under{opacity:1;transform:none;transition-delay:.04s}
+.card{background:rgba(20,25,19,.96);border:1px solid var(--line-2);border-radius:10px;box-shadow:0 8px 22px rgba(0,0,0,.5)}
+.toast{display:flex;align-items:center;gap:10px;padding:9px 10px 9px 14px}
 .toast .t{font-weight:600}
 .toast .t.err{color:var(--rec)}
-.toast small{display:block;color:var(--text-2);font-weight:500;font-size:11.5px;margin-top:2px;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.toast button{all:unset;cursor:pointer;padding:6px 12px;border-radius:6px;background:var(--raise);font-weight:600}
-.toast button:hover{background:var(--raise-h)}
-@media (prefers-reduced-motion:reduce){.bar,.toast{transition:none}.rec.on .led{animation:none}}
+.toast small{display:block;color:var(--text-2);font-size:11.5px;margin-top:2px;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast button,.pl-top button{all:unset;cursor:pointer;padding:6px 12px;border-radius:6px;background:var(--raise);font-weight:600}
+.toast button:hover,.pl-top button:hover{background:var(--raise-h)}
+.gal{display:flex;gap:8px;padding:8px}
+.gal .h{writing-mode:vertical-rl;transform:rotate(180deg);font:500 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--text-3);text-align:center;padding:0 2px}
+.vc{all:unset;cursor:pointer;display:grid;gap:5px;width:158px;padding:4px;border-radius:7px;transition:background .12s}
+.vc:hover,.vc[aria-pressed=true]{background:var(--raise-h)}
+.vc:focus-visible{outline:2px solid var(--signal)}
+.vc .th{position:relative;aspect-ratio:16/9;border-radius:5px;overflow:hidden;background:#0c0f0b}
+.vc img{width:100%;height:100%;object-fit:cover;display:block}
+.vc .d{position:absolute;right:4px;bottom:4px;padding:2px 5px;border-radius:4px;background:rgba(8,11,8,.82);font:500 10.5px/1 var(--mono)}
+.vc .n{font-size:11.5px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vc[aria-pressed=true] .n{color:var(--text)}
+.pl{width:780px;max-width:calc(100vw - 24px);padding:8px;animation:plIn .22s var(--ease)}
+@keyframes plIn{from{opacity:0;transform:translateY(-6px)}}
+.pl-top{display:flex;align-items:center;gap:8px;padding:0 2px 8px 6px}
+.pl-top b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.scr{position:relative;aspect-ratio:16/9;max-height:calc(100vh - 330px);margin:0 auto;border-radius:6px;overflow:hidden;background:#000}
+.scr video{width:100%;height:100%;display:block;object-fit:contain}
+.scr .ph{position:absolute;inset:0;display:grid;place-items:center;padding:20px;text-align:center;color:var(--text-2)}
+.ctl{display:flex;align-items:center;gap:6px;padding:8px 2px 0}
+.ctl button{all:unset;cursor:pointer;display:grid;place-items:center;width:32px;height:30px;border-radius:6px}
+.ctl button:hover{background:var(--raise-h)}
+.ctl svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.ctl .tm{font:500 12px var(--mono);color:var(--text-3);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ctl .tm b{font-weight:500;color:var(--text)}
+input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;height:18px;margin:0;cursor:pointer;--p:0%}
+input[type=range]::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:linear-gradient(90deg,var(--signal) 0 var(--p),rgba(233,236,226,.2) var(--p))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;margin-top:-4px;border-radius:50%;background:var(--signal)}
+#seek{flex:1}
+#vol{width:70px}
+#vol::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--text) 0 var(--p),rgba(233,236,226,.2) var(--p))}
+#vol::-webkit-slider-thumb{background:var(--text)}
+@media (prefers-reduced-motion:reduce){.bar,.under,.pl{transition:none;animation:none}.rec.on .led{animation:none}}
 </style>
 </head>
 <body>
@@ -66,23 +102,41 @@ kbd{grid-column:2;font:500 10px/1 var(--mono);color:var(--text-3);letter-spacing
   <span class="sep"></span>
   <button id="b-set" aria-label="Ouvrir les réglages"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg><span class="v">Réglages</span><kbd>Échap ferme</kbd></button>
 </div>
-<div class="toast" id="toast" role="status" aria-live="polite"><div><div class="t" id="t-t"></div><small id="t-s"></small></div><button id="t-see">Voir</button></div>
+<div class="under" id="under">
+  <div class="card toast" id="toast" role="status" aria-live="polite" hidden><div><div class="t" id="t-t"></div><small id="t-s"></small></div><button id="t-see">Regarder</button></div>
+  <div class="card gal" id="gal" role="list" aria-label="Derniers clips" hidden></div>
+  <div class="card pl" id="pl" hidden>
+    <div class="pl-top"><b id="pl-n"></b><button id="pl-open">Ouvrir dans Clipper</button><button id="pl-x" aria-label="Fermer le lecteur">Fermer</button></div>
+    <div class="scr"><video id="vid" preload="metadata" playsinline></video><div class="ph" id="pl-ph"></div></div>
+    <div class="ctl">
+      <button id="c-play" aria-label="Lire"><svg viewBox="0 0 24 24"><path id="c-ico" d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg></button>
+      <span class="tm"><b id="c-cur">0:00</b> / <span id="c-dur">0:00</span></span>
+      <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Position dans la vidéo">
+      <button id="c-mute" aria-label="Couper le son"><svg viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path id="c-snd" d="M15.5 9a4.5 4.5 0 010 6"/></svg></button>
+      <input type="range" id="vol" min="0" max="100" value="100" aria-label="Volume">
+    </div>
+  </div>
+</div>
 
 <script>
 (()=>{
 const dev=!window.__INIT__;
 if(dev){
-  window.__INIT__={page:"bar",native:[1920,1200],recording:true,rec_secs:42,
+  window.__INIT__={page:"bar",native:[1920,1200],recording:false,rec_secs:0,
     config:{buffer_secs:180,clip:{height:1080,fps:60},audio_tracks:["game","mic"],overlay_mode:"hotkey"},
     hotkeys:{clip:"Alt+X",rec:"Ctrl+Alt+R",bar:"Alt+Maj+Z",overlay:"Alt+F"}};
   window.ipc={postMessage(s){const m=JSON.parse(s);console.log("ipc",m);
-    if(m.cmd==="clip")setTimeout(()=>window.__on({type:"toast",kind:"clip",text:"Clip enregistré · 3 min",path:"C:\\Users\\Vous\\Videos\\Clipper\\Clip 2026-11-07 21-14-03.mp4"}),300);
+    if(m.cmd==="clip")setTimeout(()=>window.__on({type:"toast",kind:"clip",text:"Clip enregistré · 3 min",path:"C:\\Clip 1.mp4"}),300);
+    if(m.cmd==="recent")setTimeout(()=>window.__on({type:"recent",items:[1,2,3,4].map(i=>({path:"C:\\Clip "+i+".mp4",name:"Clip "+i+".mp4",secs:60*i,thumb:""}))}),100);
+    if(m.cmd==="video_preview")setTimeout(()=>window.__on({type:"preview",path:m.path,error:"Lecture disponible dans l'application (mode démo)."}),300);
     if(m.cmd==="overlay_toggle")setTimeout(()=>window.__on({type:"overlay",on:!I.overlay_on}),50);
+    if(m.cmd==="close")window.__on({type:"hide"});
     if(m.cmd==="rec"){I.recording=!I.recording;I.rec_secs=0;window.__on({type:"state",recording:I.recording,rec_secs:0})}
     if(m.cmd==="set_many"){for(const[k,v]of Object.entries(m.values))I.config=setPath(I.config,k,v);setTimeout(()=>window.__on({type:"config",config:I.config}),300)}}};
 }
 const I=window.__INIT__,$=id=>document.getElementById(id);
 const send=m=>window.ipc.postMessage(JSON.stringify(m));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function setPath(o,k,v){const c=structuredClone(o),p=k.split(".");let t=c;while(p.length>1)t=t[p.shift()];t[p[0]]=v;return c}
 
 const BUF=[60,90,120,180,300,600],RES=[720,1080,1440,2160];
@@ -91,7 +145,7 @@ const AUD=["","mix","game,mic","mix,game,mic"];
 const audLabel=t=>t.length?t.length+(t.length>1?" pistes":" piste"):"Muet";
 const next=(list,v)=>list[(list.indexOf(v)+1)%list.length];
 const fmtBuf=s=>s%60?`${s/60|0}:${String(s%60).padStart(2,"0")}`:`${s/60} min`;
-const fmtT=s=>`${String(s/60|0).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+const fmtT=s=>{s=Math.round(+s||0);return `${s/60|0}:${String(s%60).padStart(2,"0")}`};
 // Même règle que capture.rs : une classe au-dessus de la hauteur native est refusée ; 1080p couvre 1080 à 1209.
 const resOk=h=>h<=I.native[1];
 const resLabel=h=>(I.native[1]>=h&&I.native[1]<=h*1.12)?`${I.native[1]}p`:`${h}p`;
@@ -103,14 +157,15 @@ function render(){
   $("v-aud").textContent=audLabel(c.audio_tracks||[]);$("v-stats").textContent=I.overlay_on?"Stats on":"Stats off";
   $("b-stats").classList.toggle("on",!!I.overlay_on);$("b-stats").setAttribute("aria-pressed",!!I.overlay_on);
   $("b-rec").classList.toggle("on",!!I.recording);$("b-rec").setAttribute("aria-pressed",!!I.recording);
-  $("rec-v").textContent=I.recording?fmtT(I.rec_secs):"REC";
+  $("rec-v").textContent=I.recording?String(I.rec_secs/60|0).padStart(2,"0")+":"+String(I.rec_secs%60).padStart(2,"0"):"REC";
 }
 
-// Compteur REC : seulement pendant un REC (aucun minuteur sinon).
-let recTimer=null;
-function recTick(){clearInterval(recTimer);recTimer=null;if(I.recording)recTimer=setInterval(()=>{I.rec_secs++;render()},1000)}
+// Compteur REC : seulement pendant un REC et barre affichée (aucun minuteur sinon).
+let recTimer=null,shown=false,recAt=0;
+function recTick(){clearInterval(recTimer);recTimer=null;recAt=Date.now()-I.rec_secs*1000;
+  if(I.recording&&shown)recTimer=setInterval(()=>{I.rec_secs=Math.round((Date.now()-recAt)/1000);render()},1000)}
 
-$("b-clip").onclick=()=>send({cmd:"clip"});
+$("b-clip").onclick=()=>{$("b-clip").classList.add("busy");send({cmd:"clip"})};
 $("b-rec").onclick=()=>send({cmd:"rec"});
 // Affichage immédiat ; clics rapprochés regroupés en un seul envoi (une seule relance de la capture).
 let pend={},flushT=null;
@@ -123,27 +178,88 @@ $("b-aud").onclick=()=>set("audio_tracks",next(AUD,(I.config.audio_tracks||[]).j
 // Même action qu'Alt+F : affiche ou masque l'overlay (le mode choisi dans les réglages n'est pas touché).
 $("b-stats").onclick=()=>send({cmd:"overlay_toggle"});
 $("b-set").onclick=()=>send({cmd:"open_settings"});
-$("t-see").onclick=()=>send({cmd:"open_settings",tab:"videos"});
 
-// Pas de fermeture automatique : la barre reste jusqu'à Alt+Z ou Échap.
-function close(){flush();$("bar").classList.replace("in","out");setTimeout(()=>send({cmd:"close",gen:I.bar_gen}),220)}
-document.addEventListener("keydown",e=>{if(e.key==="Escape")close()});
+/* ---------- galerie et lecteur ---------- */
+let clips=[],cur=null,retried=new Set();
+const V=$("vid"),seek=$("seek"),vol=$("vol");
+function renderGal(){
+  const g=$("gal");g.hidden=!clips.length;
+  g.innerHTML='<span class="h">Derniers clips</span>'+clips.map((c,i)=>`<button class="vc" role="listitem" data-i="${i}" aria-pressed="${c.path===cur}" title="${esc(c.name)}"><span class="th">${c.thumb?`<img src="${esc(c.thumb)}" alt="">`:""}<span class="d">${fmtT(c.secs)}</span></span><span class="n">${esc(c.name.replace(/\.[^.]+$/,""))}</span></button>`).join("");
+  g.querySelectorAll("img").forEach(im=>im.onerror=()=>im.remove());
+}
+$("gal").addEventListener("click",e=>{const b=e.target.closest(".vc");if(b)play(clips[+b.dataset.i])});
+function ph(t){$("pl-ph").textContent=t||"";$("pl-ph").hidden=!t;V.style.visibility=t?"hidden":"visible"}
+// Lecture sur place. Le clip vient d'être enregistré : Clipper répond dès que le fichier est lisible
+// (direct, ou copie de lecture en cours de préparation : la réponse arrive à la fin, sans rien relancer).
+function play(c){
+  if(!c)return;cur=c.path;$("pl").hidden=false;$("pl-n").textContent=c.name;stop();ph("Préparation de la lecture…");
+  renderGal();
+  if(c.play)show(c.play);else send({cmd:"video_preview",path:c.path});
+}
+function show(u){ph("");V.src=u;V.play().catch(()=>{})}
+function stop(){V.pause();V.removeAttribute("src");V.load();paint()}
+function closePlayer(){stop();cur=null;$("pl").hidden=true;renderGal()}
+$("pl-x").onclick=closePlayer;
+$("pl-open").onclick=()=>send({cmd:"open_settings",tab:"videos"});
+V.addEventListener("error",()=>{const u=V.getAttribute("src");if(!u||!cur)return;
+  if(!retried.has(cur+u)){retried.add(cur+u);V.removeAttribute("src");ph("Préparation d'une copie lisible…");send({cmd:"video_preview",path:cur,force:u.startsWith("/video?")});return}
+  ph("Lecture impossible ici. Ouvrez la vidéo dans Clipper.")});
+const toggle=()=>{if(!V.getAttribute("src"))return;V.paused||V.ended?V.play().catch(()=>{}):V.pause()};
+let drag=false;
+function paint(){const d=V.duration||0;
+  if(!drag){seek.value=d?Math.round(V.currentTime/d*1000):0;$("c-cur").textContent=fmtT(V.currentTime)}
+  seek.style.setProperty("--p",seek.value/10+"%");$("c-dur").textContent=fmtT(d);
+  const on=!V.paused&&!V.ended;$("c-ico").setAttribute("d",on?"M8 5.5v13M16 5.5v13":"M8 5.5v13l10.5-6.5z");$("c-ico").setAttribute("fill",on?"none":"currentColor");$("c-ico").setAttribute("stroke-width",on?3:1.8);
+  $("c-play").setAttribute("aria-label",on?"Pause":"Lire");
+  vol.value=V.muted?0:Math.round(V.volume*100);vol.style.setProperty("--p",vol.value+"%");$("c-snd").setAttribute("d",V.muted||!V.volume?"M16 9.5l5 5M21 9.5l-5 5":"M15.5 9a4.5 4.5 0 010 6")}
+["play","pause","ended","timeupdate","loadedmetadata","volumechange","emptied"].forEach(ev=>V.addEventListener(ev,paint));
+V.addEventListener("click",toggle);$("c-play").onclick=toggle;
+$("c-mute").onclick=()=>{V.muted=!V.muted;if(!V.muted&&!V.volume)V.volume=.5};
+seek.addEventListener("input",()=>{drag=true;const d=V.duration||0;if(d){V.currentTime=seek.value/1000*d;$("c-cur").textContent=fmtT(V.currentTime)}seek.style.setProperty("--p",seek.value/10+"%")});
+seek.addEventListener("change",()=>{drag=false});
+vol.addEventListener("input",()=>{V.volume=vol.value/100;V.muted=+vol.value===0});
+
+/* ---------- affichage / fermeture ---------- */
+// Fermeture : Échap, Alt+Z, clic dans le vide autour de la barre, ou clic ailleurs sur l'écran (la fenêtre
+// perd le focus : Clipper envoie « hide »). La lecture s'arrête toujours.
+function close(refocus){flush();send({cmd:"close",refocus})}
+function hide(){shown=false;document.body.classList.remove("on");stop();clearInterval(recTimer);recTimer=null;
+  setTimeout(()=>{if(!shown){$("pl").hidden=true;$("toast").hidden=true;cur=null}},200)}
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){if(!$("pl").hidden)closePlayer();else close(true);return}
+  if(!$("pl").hidden&&!e.target.closest("button,input")){
+    if(e.key===" "||e.key==="k"){e.preventDefault();toggle()}
+    else if(e.key==="ArrowLeft"||e.key==="ArrowRight"){e.preventDefault();V.currentTime=Math.max(0,Math.min(V.duration||0,V.currentTime+(e.key==="ArrowLeft"?-5:5)))}
+    else if(e.key==="m")V.muted=!V.muted}});
+document.addEventListener("mousedown",e=>{if(shown&&!e.target.closest(".bar,.card"))close(true)});
 
 let toastT=null;
 window.__on=m=>{switch(m&&m.type){
+  // Barre affichée : état du moment, animation d'entrée, derniers clips.
+  case "show":Object.assign(I,{config:m.config,hotkeys:m.hotkeys,native:m.native,overlay_on:m.overlay_on,recording:m.recording,rec_secs:m.rec_secs});
+    pend={};shown=true;$("b-clip").classList.remove("busy");render();recTick();send({cmd:"recent"});
+    requestAnimationFrame(()=>document.body.classList.add("on"));break;
+  case "hide":hide();break;
   case "state":I.recording=m.recording;I.rec_secs=m.rec_secs||0;render();recTick();break;
   case "config":I.config=m.config;for(const[k,v]of Object.entries(pend))I.config=setPath(I.config,k,v);render();break;
+  case "hotkeys":I.hotkeys=m.hotkeys||{};render();break;
+  case "recent":clips=m.items||[];renderGal();break;
+  case "preview":{const c=clips.find(c=>c.path===m.path);if(c&&m.url)c.play=m.url;
+    if(m.path!==cur||$("pl").hidden)break;
+    if(m.url)show(m.url);else ph(m.error||"Lecture impossible.");break}
   case "toast":{
+    $("b-clip").classList.remove("busy");if(!shown)break;
     $("t-t").textContent=m.text;$("t-t").classList.toggle("err",m.kind==="error");
     $("t-s").textContent=m.path?m.path.split("\\").pop():"";$("t-see").hidden=m.kind==="error"||!m.path;
-    $("toast").classList.add("show");clearTimeout(toastT);toastT=setTimeout(()=>$("toast").classList.remove("show"),4000);break}
+    $("t-see").onclick=()=>{$("toast").hidden=true;play(clips.find(c=>c.path===m.path)||{path:m.path,name:m.path.split("\\").pop()})};
+    $("toast").hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>{$("toast").hidden=true},6000);
+    if(m.path)send({cmd:"recent"});break}
   // Overlay affiché ou masqué (Alt+F, ce bouton, le menu) : le bouton suit l'état réel.
   case "overlay":I.overlay_on=!!m.on;render();break;
 }};
 
-render();recTick();
-requestAnimationFrame(()=>requestAnimationFrame(()=>$("bar").classList.add("in")));
-arm();
+render();
+if(dev)window.__on({type:"show",...I});else send({cmd:"bar_ready"});
 })();
 </script>
 </body>
