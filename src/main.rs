@@ -48,7 +48,9 @@ fn kill_children_with_us() {
             return;
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // BREAKAWAY_OK : l'installateur de mise à jour sort du job (sinon Windows le tuait avec Clipper :
+        // l'app se fermait et rien ne s'installait).
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as _, std::mem::size_of_val(&info) as u32);
         AssignProcessToJobObject(job, GetCurrentProcess());
         // Le handle reste ouvert jusqu'à la fin du processus : c'est sa fermeture qui déclenche l'arrêt.
@@ -129,7 +131,7 @@ fn to_recycle_bin(p: &Path) -> bool {
 
 /// Vidéos du dossier de sortie, plus récentes d'abord. ffprobe en parallèle et en cache : liste immédiate.
 /// Les clips récents qui ne se lisent pas tels quels ont leur copie de lecture préparée en tâche de fond.
-fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>) -> Value {
+fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>, limit: Option<usize>) -> Value {
     let mut v: Vec<(std::time::SystemTime, PathBuf, u64)> = std::fs::read_dir(&cfg.out_dir)
         .into_iter()
         .flatten()
@@ -141,6 +143,9 @@ fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>) -> Value {
         })
         .collect();
     v.sort_by(|a, b| b.0.cmp(&a.0));
+    if let Some(n) = limit {
+        v.truncate(n);
+    }
     let probes = par_probe(cfg, &v.iter().map(|x| x.1.clone()).collect::<Vec<_>>());
     let mut warm = vec![];
     let items: Vec<Value> = v
@@ -163,7 +168,7 @@ fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>) -> Value {
         })
         .collect();
     prewarm(cfg, warm, proxy);
-    json!({"type": "videos", "items": items})
+    json!({"type": if limit.is_some() { "recent" } else { "videos" }, "items": items})
 }
 
 /// ffprobe sur 6 fils au plus (les fichiers déjà vus sortent du cache sans rien lancer).
@@ -199,6 +204,32 @@ struct Keys {
     conflicts: Vec<String>,
 }
 
+/// Enregistre les 4 raccourcis (RegisterHotKey : pas de hook clavier, rien d'injecté).
+/// Raccourci déjà pris (overlay NVIDIA Alt+Z / Alt+R, Radeon Software…) : repli Maj+, puis Ctrl+.
+fn register_keys(mgr: &GlobalHotKeyManager, cfg: &Config) -> Keys {
+    let mut conflicts = vec![];
+    let mut taken: Vec<HotKey> = vec![];
+    let mut register = |s: &str| -> Option<HotKey> {
+        for prefix in ["", "Shift+", "Control+"] {
+            let Ok(k) = format!("{prefix}{s}").parse::<HotKey>() else { continue };
+            // Deux actions sur la même touche : la seconde prend le repli au lieu d'échouer en silence.
+            if !taken.contains(&k) && mgr.register(k).is_ok() {
+                if !prefix.is_empty() {
+                    conflicts.push(s.replace("Key", ""));
+                    log(&format!("raccourci {s} déjà pris, remplacé par {prefix}{s}"));
+                }
+                taken.push(k);
+                return Some(k);
+            }
+        }
+        conflicts.push(s.replace("Key", ""));
+        log(&format!("raccourci {s} indisponible, même avec Maj ou Ctrl"));
+        None
+    };
+    let (clip, rec, bar, overlay) = (register(&cfg.key_clip), register(&cfg.key_rec), register(&cfg.key_bar), register(&cfg.key_overlay));
+    Keys { clip, rec, bar, overlay, conflicts }
+}
+
 fn pretty(k: &HotKey) -> String {
     let s = format!("{k}");
     s.replace("shift", "Maj").replace("control", "Ctrl").replace("alt", "Alt").replace("Key", "").replace("super", "Win")
@@ -231,6 +262,9 @@ struct App {
     /// Numéro de la barre ouverte : un « close » tardif d'une ancienne barre ne ferme pas la nouvelle.
     bar_gen: u64,
     keys: Keys,
+    hotkeys: GlobalHotKeyManager,
+    /// Barre affichée (la fenêtre, elle, reste créée et cachée : réouverture immédiate).
+    bar_open: bool,
     gpu: Option<drivers::Gpu>,
     driver_url: Option<String>,
     proxy: EventLoopProxy<UserEvent>,
@@ -263,14 +297,28 @@ impl App {
         (self.buffer, self.audio) = Self::start_capture(&self.cfg, self.native);
     }
 
+    fn hotkeys_json(&self) -> Value {
+        let k = |k: &Option<HotKey>| k.as_ref().map(pretty);
+        json!({"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay)})
+    }
+
+    /// Nouveaux raccourcis actifs tout de suite : les anciens sont libérés, les nouveaux enregistrés.
+    fn rebind_keys(&mut self) {
+        let old: Vec<HotKey> = [self.keys.clip, self.keys.rec, self.keys.bar, self.keys.overlay].into_iter().flatten().collect();
+        if let Err(e) = self.hotkeys.unregister_all(&old) {
+            log(&format!("raccourcis : libération impossible ({e})"));
+        }
+        self.keys = register_keys(&self.hotkeys, &self.cfg);
+        self.push(&json!({"type": "hotkeys", "hotkeys": self.hotkeys_json(), "conflicts": self.keys.conflicts}));
+    }
+
     fn init_json(&self, page: &str, tab: Option<&str>) -> String {
         let devs = |d| audio::devices(d).into_iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>();
-        let k = |k: &Option<HotKey>| k.as_ref().map(pretty);
         json!({
             "page": page, "tab": tab, "config": self.cfg, "encoders": self.encoders, "ffmpeg_ok": self.ffmpeg_ok, "update": self.update,
             "native": [self.native.0, self.native.1], "monitors": self.monitors,
             "outputs": devs(wasapi::Direction::Render), "inputs": devs(wasapi::Direction::Capture),
-            "hotkeys": {"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay)},
+            "hotkeys": self.hotkeys_json(),
             "hotkey_conflicts": self.keys.conflicts,
             "overlay_on": self.overlay_visible(),
             "bar_gen": self.bar_gen,
@@ -304,7 +352,7 @@ impl App {
             return;
         }
         let init = self.init_json(if kind == ui::Kind::Main { "index" } else { "bar" }, tab);
-        let w = ui::open(kind, target, &init, self.cfg.out_dir.clone(), self.proxy.clone(), UserEvent::Ipc);
+        let w = ui::open(kind, target, &init, self.proxy.clone(), UserEvent::Ipc);
         if w.is_none() {
             log("WebView2 indisponible : impossible d'ouvrir la fenêtre");
         }
@@ -322,19 +370,45 @@ impl App {
         }
     }
 
-    /// Barre Alt+Z : mémorise le jeu, puis ouvre (la barre prend le focus : le jeu rend la souris).
+    /// Barre Alt+Z : mémorise le jeu, puis affiche la fenêtre déjà créée (aucune attente de WebView2).
+    /// La barre prend le focus : le jeu rend la souris.
     fn open_bar(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
         self.bar_prev = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as isize;
         self.bar_gen += 1;
-        self.open(ui::Kind::Bar, target, None);
+        self.open(ui::Kind::Bar, target, None); // créée si elle ne l'est pas encore
+        self.bar_open = self.bar.is_some();
+        self.push_bar_show();
+        if let Some(w) = &self.bar {
+            ui::show_bar(&w.window);
+        }
     }
 
-    /// Ferme la barre et rend le focus au jeu (simple changement de fenêtre, comme Alt+Tab).
-    fn close_bar(&mut self) {
+    /// État du moment (la page date de la création de la fenêtre), puis animation d'entrée.
+    fn push_bar_show(&self) {
+        if let Some(w) = &self.bar {
+            w.push(&json!({"type": "show", "gen": self.bar_gen, "config": self.cfg, "hotkeys": self.hotkeys_json(),
+                "native": [self.native.0, self.native.1], "overlay_on": self.overlay_visible(),
+                "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs())}).to_string());
+        }
+    }
+
+    /// Ferme la barre : animation de sortie côté page (qui arrête aussi la lecture), fenêtre cachée 200 ms
+    /// plus tard. `refocus` : rend le focus au jeu (Alt+Z, Échap) ; faux si l'utilisateur a cliqué ailleurs.
+    fn hide_bar(&mut self, refocus: bool) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
-        self.bar = None;
+        if !std::mem::take(&mut self.bar_open) {
+            return;
+        }
+        if let Some(w) = &self.bar {
+            w.push(&json!({"type": "hide"}).to_string());
+        }
+        let (p, g) = (self.proxy.clone(), self.bar_gen);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = p.send_event(UserEvent::Ipc(ui::Kind::Bar, json!({"cmd": "bar_hidden", "gen": g}).to_string()));
+        });
         let h = std::mem::take(&mut self.bar_prev) as windows_sys::Win32::Foundation::HWND;
-        if !h.is_null() && unsafe { IsWindow(h) } != 0 {
+        if refocus && !h.is_null() && unsafe { IsWindow(h) } != 0 {
             unsafe { SetForegroundWindow(h) };
         }
     }
@@ -415,6 +489,25 @@ impl App {
             }
             // Ctrl+R / F5 dans la fenêtre : rouverte avec les réglages actuels (sinon la page rechargée
             // reprend ceux de l'ouverture, ex. l'intro désactivée revenait).
+            // Fin de l'animation de sortie : la fenêtre est cachée (sauf si la barre a été rouverte entre-temps).
+            "bar_hidden" => {
+                if !self.bar_open && m["gen"].as_u64() == Some(self.bar_gen) {
+                    if let Some(w) = &self.bar {
+                        w.window.set_visible(false);
+                    }
+                }
+            }
+            // Page de la barre chargée : si Alt+Z est arrivé avant, elle n'a pas reçu « show ».
+            "bar_ready" => {
+                if self.bar_open {
+                    self.push_bar_show();
+                }
+            }
+            // Galerie de la barre : les derniers clips.
+            "recent" => {
+                let c = self.cfg.clone();
+                self.bg(move |p| list_videos(&c, p, Some(4)));
+            }
             "reload" => {
                 if self.main.take().is_some() {
                     self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str));
@@ -427,11 +520,13 @@ impl App {
             // Bouton « Installer » du bandeau : téléchargement vérifié puis installateur silencieux,
             // qui ferme Clipper et le relance à jour.
             "update_install" => self.bg(|_| {
-                let r = update::FOUND.lock().unwrap().take();
+                // La release reste en attente : un échec (réseau) n'empêche pas de réessayer.
+                let r = update::FOUND.lock().unwrap().clone();
                 let res = r.ok_or("Aucune mise à jour en attente.".to_string()).and_then(|r| update::download(&r)).and_then(|p| update::install(&p));
+                log(&format!("mise à jour : {res:?}"));
                 match res {
-                    Ok(()) => json!({"type": "toast", "kind": "ok", "text": "Installation de la mise à jour… Clipper va redémarrer."}),
-                    Err(e) => json!({"type": "toast", "kind": "error", "text": format!("Mise à jour impossible : {e}")}),
+                    Ok(()) => json!({"type": "update_state", "ok": true, "text": "Installation… Clipper va se fermer puis se relancer à jour."}),
+                    Err(e) => json!({"type": "update_state", "ok": false, "text": format!("Mise à jour impossible : {e}")}),
                 }
             }),
             // Bouton « Installer FFmpeg » : winget dans une fenêtre visible, puis Clipper se met à jour seul.
@@ -464,13 +559,20 @@ impl App {
             }
             "clip" => self.clip(),
             "rec" => self.toggle_rec(),
-            "open_settings" => self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str)),
+            "open_settings" => {
+                self.hide_bar(false);
+                self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str));
+            }
             "close" => match kind {
-                ui::Kind::Main => self.main = None,
-                // Échap : la barre demande sa fermeture 220 ms plus tard (animation). Si Alt+Z a entre-temps
-                // fermé puis rouvert une barre, ce message vise l'ancienne : on l'ignore.
-                ui::Kind::Bar if m["gen"].as_u64().is_none_or(|g| g == self.bar_gen) => self.close_bar(),
-                ui::Kind::Bar => {}
+                // La page a déjà joué son fondu : fenêtre cachée d'abord, puis détruite (pas d'écran blanc).
+                ui::Kind::Main => {
+                    if let Some(w) = self.main.take() {
+                        w.window.set_visible(false);
+                    }
+                    trim_self();
+                }
+                // Échap ou clic dans le vide autour de la barre.
+                ui::Kind::Bar => self.hide_bar(m["refocus"].as_bool().unwrap_or(true)),
             },
             "minimize" => {
                 if let Some(w) = &self.main {
@@ -497,7 +599,7 @@ impl App {
             }
             "videos" => {
                 let c = self.cfg.clone();
-                self.bg(move |p| list_videos(&c, p));
+                self.bg(move |p| list_videos(&c, p, None));
             }
             "video_action" => self.video_action(&s("action"), Path::new(&s("path")), &s("name")),
             "video_preview" => {
@@ -519,22 +621,24 @@ impl App {
             "driver_check" => {
                 let studio = s("branch") == "studio";
                 self.set("driver_branch", json!(if studio { "studio" } else { "game_ready" }));
-                // Version installée relue à chaque vérification (nvidia-smi) : après une installation,
-                // l'onglet ne propose plus de réinstaller le même pilote.
-                self.gpu = drivers::installed().or(self.gpu.take());
-                let Some(g) = &self.gpu else {
-                    self.push(&json!({"type": "driver", "status": "error", "error": "Aucun GPU NVIDIA détecté."}));
-                    return;
-                };
-                let (name, inst) = (g.name.clone(), g.driver.clone());
+                // Carte et version installée relues à chaque vérification, hors du fil de l'interface : après une
+                // mise à jour du pilote (par Clipper ou non), l'onglet montre la nouvelle version. Détection
+                // ratée au lancement (pilote en cours d'installation) : rattrapée ici.
+                let known = self.gpu.as_ref().map(|g| (g.name.clone(), g.driver.clone()));
                 let branch = s("branch");
-                self.bg(move |p| match drivers::latest(&name, studio) {
-                    Ok(l) => {
-                        let _ = p.send_event(UserEvent::Push(json!({"type": "driver_url", "url": l.url})));
-                        json!({"type": "driver", "installed": inst, "latest": l.version, "branch": branch, "url": l.url,
-                               "status": if drivers::is_newer(&l.version, &inst) { "update" } else { "ok" }})
+                self.bg(move |p| {
+                    let Some((name, inst)) = drivers::installed().map(|g| (g.name, g.driver)).or(known) else {
+                        return json!({"type": "driver", "status": "nogpu"});
+                    };
+                    let _ = p.send_event(UserEvent::Push(json!({"type": "gpu", "name": name, "driver": inst})));
+                    match drivers::latest(&name, studio) {
+                        Ok(l) => {
+                            let _ = p.send_event(UserEvent::Push(json!({"type": "driver_url", "url": l.url})));
+                            json!({"type": "driver", "installed": inst, "latest": l.version, "branch": branch, "url": l.url,
+                                   "status": if drivers::is_newer(&l.version, &inst) { "update" } else { "ok" }})
+                        }
+                        Err(e) => json!({"type": "driver", "installed": inst, "branch": branch, "status": "error", "error": e}),
                     }
-                    Err(e) => json!({"type": "driver", "installed": inst, "branch": branch, "status": "error", "error": e}),
                 });
             }
             "driver_install" => {
@@ -553,7 +657,18 @@ impl App {
                         r
                     });
                     // L'installateur a fini : on vérifie que la version a vraiment changé avant de dire « installé ».
-                    let after = drivers::installed().map(|g| g.driver).unwrap_or_default();
+                    // Le pilote se recharge pendant quelques secondes : on relit jusqu'à 20 s.
+                    let mut after = String::new();
+                    for _ in 0..10 {
+                        after = drivers::installed().map(|g| g.driver).unwrap_or_default();
+                        if r.is_err() || (!after.is_empty() && after != before) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    if let Some(g) = drivers::installed() {
+                        let _ = p.send_event(UserEvent::Push(json!({"type": "gpu", "name": g.name, "driver": g.driver})));
+                    }
                     log(&format!("pilote : {before} -> {after} ({r:?})"));
                     match r {
                         Ok(()) if after != before => json!({"type": "driver_progress", "phase": "done", "done": 0, "total": 0, "installed": after}),
@@ -613,16 +728,7 @@ impl App {
                 }
                 self.push(&json!({"type": "autostart", "on": elevate::autostart()}));
             }
-            "relaunch_admin" => {
-                if self.recording.is_some() {
-                    return self.push(&json!({"type": "toast", "kind": "error", "text": "Arrêtez le REC avant de relancer."}));
-                }
-                if elevate::run_task(false) {
-                    let _ = self.proxy.send_event(UserEvent::Quit);
-                } else {
-                    self.push(&json!({"type": "toast", "kind": "error", "text": "Relance en administrateur impossible."}));
-                }
-            }
+            "relaunch_admin" => self.relaunch(),
             "ram_clean" => self.bg(|_| {
                 let (before, total) = tools::ram();
                 let game = capture::fullscreen_foreground();
@@ -663,7 +769,12 @@ impl App {
         }
         let Ok(mut new) = serde_json::from_value::<Config>(v) else { return log("valeurs refusées") };
         new.rec = new.clip; // une seule qualité : le REC réutilise toujours le buffer
+        let keys_changed = (&new.key_clip, &new.key_rec, &new.key_bar, &new.key_overlay) != (&self.cfg.key_clip, &self.cfg.key_rec, &self.cfg.key_bar, &self.cfg.key_overlay);
         self.cfg = new;
+        ui::set_out_dir(&self.cfg.out_dir);
+        if keys_changed {
+            self.rebind_keys();
+        }
         if let Err(e) = self.cfg.save() {
             log(&format!("config non sauvegardée : {e}"));
         }
@@ -673,6 +784,20 @@ impl App {
         overlay::apply(&self.cfg, self.overlay_shown);
         self.push(&json!({"type": "config", "config": self.cfg}));
         self.push(&json!({"type": "overlay", "on": self.overlay_visible()}));
+    }
+
+    /// Relance Clipper dans le mode demandé par le réglage : par la tâche (administrateur, sans demande UAC)
+    /// ou normalement (par l'Explorateur, qui lance toujours sans élévation).
+    fn relaunch(&mut self) {
+        if self.recording.is_some() {
+            return self.push(&json!({"type": "toast", "kind": "error", "text": "Arrêtez le REC : Clipper se relancera ensuite dans le bon mode."}));
+        }
+        let ok = if self.cfg.admin_mode { elevate::run_task(false) } else { elevate::relaunch_normal() };
+        if ok {
+            let _ = self.proxy.send_event(UserEvent::Quit);
+        } else {
+            self.push(&json!({"type": "toast", "kind": "error", "text": "Relance impossible : fermez puis rouvrez Clipper."}));
+        }
     }
 
     fn overlay_visible(&self) -> bool {
@@ -728,7 +853,7 @@ impl App {
             _ => {}
         }
         let c = self.cfg.clone();
-        self.bg(move |p| list_videos(&c, p));
+        self.bg(move |p| list_videos(&c, p, None));
     }
 }
 
@@ -746,16 +871,27 @@ fn main() {
     }
     let from_task = args.iter().any(|a| a == "--from-task");
     let tray_start = args.iter().any(|a| a == "--tray") || (from_task && elevate::take_tray_flag());
+    // Relance demandée par l'instance précédente (changement de mode) : elle est en train de se fermer.
+    let relaunched = from_task || elevate::take_relaunch_flag();
     // Une seule instance : un 2e double-clic réveille la première (fenêtre réglages) puis quitte.
-    if !from_task && elevate::signal_existing() {
+    if !relaunched && elevate::signal_existing() {
         return;
     }
-    // Mode administrateur : on passe par la tâche planifiée (aucune demande UAC). Échec : lancement normal.
-    if !from_task && Config::load().admin_mode && !elevate::is_elevated() && elevate::run_task(tray_start) {
-        return;
+    // Mode administrateur : on passe par la tâche planifiée (aucune demande UAC). La tâche doit lancer CE
+    // programme : après une installation ailleurs (ou une vieille tâche), elle est recréée, avec une seule
+    // demande UAC. Échec ou refus : lancement normal.
+    if !from_task && Config::load().admin_mode && !elevate::is_elevated() {
+        if !elevate::task_ok() {
+            log("mode administrateur : tâche absente ou liée à un autre programme, recréée");
+            let _ = tools::run_elevated("--admin-task on");
+        }
+        if elevate::task_ok() && elevate::run_task(tray_start) {
+            return;
+        }
+        log("mode administrateur : tâche indisponible, lancement normal");
     }
     use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
-    let Some(ev) = elevate::own_event(from_task) else { return };
+    let Some(ev) = elevate::own_event(relaunched) else { return };
     kill_children_with_us();
     let ev = ev as usize;
     lower_priority();
@@ -817,27 +953,9 @@ fn main() {
         }
     }));
 
-    // RegisterHotKey sous le capot : pas de hook clavier, rien d'injecté.
     let hotkeys = GlobalHotKeyManager::new().expect("gestionnaire de raccourcis");
-    let mut conflicts = vec![];
-    // Raccourci déjà pris (overlay NVIDIA Alt+Z / Alt+R, Radeon Software…) : repli Alt+Maj, puis Ctrl+Alt.
-    let mut register = |s: &str| -> Option<HotKey> {
-        for prefix in ["", "Shift+", "Control+"] {
-            let k = format!("{prefix}{s}").parse::<HotKey>().ok()?;
-            if hotkeys.register(k).is_ok() {
-                if !prefix.is_empty() {
-                    conflicts.push(s.replace("Key", ""));
-                    log(&format!("raccourci {s} déjà pris par une autre app, remplacé par {prefix}{s}"));
-                }
-                return Some(k);
-            }
-        }
-        conflicts.push(s.replace("Key", ""));
-        log(&format!("raccourci {s} indisponible, même avec Maj ou Ctrl"));
-        None
-    };
-    let (clip, rec, bar, overlay) = (register(&cfg.key_clip), register(&cfg.key_rec), register(&cfg.key_bar), register(&cfg.key_overlay));
-    let keys = Keys { clip, rec, bar, overlay, conflicts };
+    let keys = register_keys(&hotkeys, &cfg);
+    ui::set_out_dir(&cfg.out_dir);
 
     overlay::apply(&cfg, false);
     overlay::start();
@@ -866,6 +984,8 @@ fn main() {
         bar_prev: 0,
         bar_gen: 0,
         keys,
+        hotkeys,
+        bar_open: false,
         gpu: drivers::installed(),
         driver_url: None,
         proxy: event_loop.create_proxy(),
@@ -905,6 +1025,8 @@ fn main() {
                 if !tray_start {
                     app.open(ui::Kind::Main, target, None);
                 }
+                // Barre créée d'avance, cachée : Alt+Z l'affiche sans attendre WebView2.
+                app.open(ui::Kind::Bar, target, None);
             }
             Event::UserEvent(UserEvent::Hotkey(h)) => {
                 let is = |k: &Option<HotKey>| k.is_some_and(|k| k.id() == h);
@@ -913,8 +1035,8 @@ fn main() {
                 } else if is(&app.keys.rec) {
                     app.toggle_rec();
                 } else if is(&app.keys.bar) {
-                    if app.bar.is_some() {
-                        app.close_bar();
+                    if app.bar_open {
+                        app.hide_bar(true);
                     } else {
                         app.open_bar(target);
                     }
@@ -926,11 +1048,18 @@ fn main() {
             Event::UserEvent(UserEvent::Push(v)) => {
                 if v["type"] == "driver_url" {
                     app.driver_url = v["url"].as_str().map(String::from);
+                } else if v["type"] == "gpu" {
+                    app.gpu = Some(drivers::Gpu { name: v["name"].as_str().unwrap_or("").into(), driver: v["driver"].as_str().unwrap_or("").into() });
+                    app.push(&v);
                 } else if v["type"] == "admin" {
                     if v["ok"] == true {
                         app.set("admin_mode", v["on"].clone());
                     }
                     app.push(&json!({"type": "admin", "ok": v["ok"], "on": v["on"], "elevated": elevate::is_elevated()}));
+                    // Le mode demandé prend effet tout de suite : relance dans le bon mode (sauf pendant un REC).
+                    if v["ok"] == true && v["on"].as_bool() != Some(elevate::is_elevated()) && app.recording.is_none() {
+                        app.relaunch();
+                    }
                 } else {
                     app.push(&v);
                 }
@@ -965,10 +1094,18 @@ fn main() {
             Event::WindowEvent { window_id, event: tao::event::WindowEvent::CloseRequested, .. } => {
                 // Fenêtre détruite = processus WebView2 libérés.
                 if app.main.as_ref().is_some_and(|w| w.window.id() == window_id) {
-                    app.main = None;
+                    if let Some(w) = app.main.take() {
+                        w.window.set_visible(false);
+                    }
                     trim_self(); // la fenêtre et son WebView2 sont partis
                 } else if app.bar.as_ref().is_some_and(|w| w.window.id() == window_id) {
-                    app.bar = None;
+                    app.hide_bar(true);
+                }
+            }
+            // Clic ailleurs sur l'écran : la barre perd le focus et se ferme (avec son animation).
+            Event::WindowEvent { window_id, event: tao::event::WindowEvent::Focused(false), .. } => {
+                if app.bar.as_ref().is_some_and(|w| w.window.id() == window_id) {
+                    app.hide_bar(false);
                 }
             }
             Event::UserEvent(UserEvent::TrayClick) => app.open(ui::Kind::Main, target, None),
@@ -992,6 +1129,9 @@ fn main() {
                 app.buffer.stop();
                 if let Some(a) = &app.audio {
                     a.stop();
+                }
+                for w in [&app.main, &app.bar].into_iter().flatten() {
+                    w.window.set_visible(false); // cachées avant d'être détruites : pas d'écran blanc
                 }
                 (app.main, app.bar) = (None, None);
                 tray.take();

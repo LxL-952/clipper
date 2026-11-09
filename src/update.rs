@@ -12,6 +12,7 @@ const UA: &str = concat!("Clipper/", env!("CARGO_PKG_VERSION"));
 /// Release trouvée au lancement, en attente du clic « Installer ».
 pub static FOUND: std::sync::Mutex<Option<Release>> = std::sync::Mutex::new(None);
 
+#[derive(Clone)]
 pub struct Release {
     pub version: String,
     url: String,
@@ -85,7 +86,16 @@ pub fn download(r: &Release) -> Result<PathBuf, String> {
 
 /// Lance l'installateur en mode silencieux : il ferme Clipper (--quit), installe, puis le relance.
 pub fn install(setup: &PathBuf) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // Hors du job « tuer à la fermeture » de Clipper : l'installateur doit lui survivre. Sans cela, Clipper
+    // se fermait, Windows tuait l'installateur avec lui, et rien n'était installé ni relancé.
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     std::process::Command::new(setup)
+        .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         .spawn()
         .map(drop)

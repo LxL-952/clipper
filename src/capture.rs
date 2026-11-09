@@ -450,7 +450,8 @@ fn useful_audio(pr: &Probe) -> usize {
 fn direct_url(src: &Path, pr: &Probe) -> Option<String> {
     let ext = src.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
     // AV1 : décodé par Chromium (dav1d / carte graphique). Si WebView2 refuse, l'UI demande une copie de lecture.
-    ((pr.video == "h264" || pr.video == "av1") && useful_audio(pr) <= 1 && (ext == "mp4" || ext == "mov"))
+    // MKV : WebView2 le lit aussi (même lecteur que le WebM) ; s'il refuse, l'UI demande une copie de lecture.
+    ((pr.video == "h264" || pr.video == "av1") && useful_audio(pr) <= 1 && (ext == "mp4" || ext == "mov" || ext == "mkv"))
         .then(|| format!("/video?p={}", crate::ui::pct_encode(&src.to_string_lossy())))
 }
 
@@ -486,7 +487,7 @@ static BUSY_DONE: std::sync::Condvar = std::sync::Condvar::new();
 pub fn preview(cfg: &Config, src: &Path, force: bool) -> Result<String, String> {
     let pr = probe(cfg, src);
     if pr.video.is_empty() {
-        return Err("Aucune piste vidéo lisible dans ce fichier.".into());
+        return Err("Ce fichier ne contient aucune image (clip AV1 enregistré avant la version 1.3.0, irrécupérable). Vous pouvez le supprimer.".into());
     }
     if let Some(u) = direct_url(src, &pr).filter(|_| !force) {
         return Ok(u);
@@ -518,7 +519,10 @@ fn convert(cfg: &Config, src: &Path, pr: &Probe) -> Result<String, String> {
         &[&["-c:v", "copy"]]
     } else {
         &[
-            &["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p"],
+            // « cuda » (retiré des arguments) : décodage sur la carte aussi. Refusé (pas de décodeur AV1,
+            // source 10 bits…) : même encodage avec décodage processeur.
+            &["cuda", "-c:v", "h264_nvenc", "-preset", "p3", "-rc", "vbr", "-cq", "19", "-b:v", "0"],
+            &["-c:v", "h264_nvenc", "-preset", "p3", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p"],
             &["-c:v", "h264_amf", "-quality", "quality", "-rc", "qvbr", "-qvbr_quality_level", "20", "-pix_fmt", "yuv420p"],
             &["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p"],
         ]
@@ -526,7 +530,12 @@ fn convert(cfg: &Config, src: &Path, pr: &Probe) -> Result<String, String> {
     let audio = useful_audio(pr);
     let ok = encoders.iter().any(|venc| {
         let mut c = ffmpeg(cfg);
-        c.args(["-loglevel", "error", "-y", "-i"]).arg(src).args(["-map", "0:v:0"]).args(*venc);
+        c.args(["-loglevel", "error", "-y"]);
+        if venc.contains(&"cuda") {
+            // Décodage aussi sur la carte NVIDIA : l'image ne passe pas par le processeur (copie prête en quelques secondes).
+            c.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
+        }
+        c.arg("-i").arg(src).args(["-map", "0:v:0"]).args(venc.iter().filter(|a| **a != "cuda"));
         match audio {
             0 => {}
             1 => {
@@ -544,7 +553,7 @@ fn convert(cfg: &Config, src: &Path, pr: &Probe) -> Result<String, String> {
         let _ = std::fs::remove_file(&tmp);
         return Err("Conversion pour la lecture impossible.".into());
     }
-    prune_previews(&dir, 8); // pleine résolution : quelques centaines de Mo par copie
+    prune_previews(&dir, 12); // pleine résolution : quelques centaines de Mo par copie
     Ok(format!("/preview/{}", crate::ui::pct_encode(&name)))
 }
 
@@ -756,6 +765,13 @@ impl Buffer {
                     std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
+                // Le ffmpeg précédent a été arrêté net (réglage changé, écran perdu) : son dernier segment est
+                // tronqué, parfois vide. Un seul segment illisible faisait échouer tout clip qui le contenait
+                // (« ffmpeg n'a pas pu assembler le clip »). On l'enlève avant de repartir.
+                if let Some(last) = segments(&d).last().filter(|p| !valid_seg(&cfg, p)) {
+                    crate::log(&format!("buffer : segment tronqué retiré ({})", last.file_name().unwrap_or_default().to_string_lossy()));
+                    let _ = std::fs::remove_file(last);
+                }
                 let next = segments(&d).last().map_or(0, |p| seg_number(p) + 1);
                 let mut cmd = ffmpeg(&cfg);
                 let _ = std::fs::rename(d.join("ffmpeg.log"), d.join("ffmpeg.prev.log"));
@@ -779,6 +795,8 @@ impl Buffer {
                     }
                 }
                 let mut tick = 0u32;
+                // Chien de garde : ffmpeg vivant mais plus aucun segment (capture figée) -> relancé.
+                let (mut last_seg, mut still) = (None::<u64>, 0u32);
                 loop {
                     std::thread::sleep(Duration::from_secs(1));
                     tick += 1;
@@ -791,6 +809,21 @@ impl Buffer {
                     }
                     let alive = c.lock().unwrap().as_mut().is_some_and(|ch| matches!(ch.try_wait(), Ok(None)));
                     let segs = segments(&d);
+                    let newest = segs.last().map(|p| seg_number(p));
+                    still = if newest == last_seg { still + 1 } else { 0 };
+                    last_seg = newest;
+                    if alive && still > 4 * SEG_SECS + 4 {
+                        crate::log(&format!("buffer : ffmpeg ne produit plus de segments depuis {still} s, relance"));
+                        if let Some(mut ch) = c.lock().unwrap().take() {
+                            let _ = ch.kill();
+                            let _ = ch.wait();
+                        }
+                        break;
+                    }
+                    if !alive && !s.load(Ordering::Relaxed) {
+                        let err = std::fs::read_to_string(d.join("ffmpeg.log")).unwrap_or_default();
+                        crate::log(&format!("buffer : ffmpeg s'est arrêté, relance ({})", err.lines().last().unwrap_or("aucun message")));
+                    }
                     let floor = r.lock().unwrap().unwrap_or(u64::MAX);
                     for p in segs.iter().take(segs.len().saturating_sub(keep)) {
                         if seg_number(p) < floor {
@@ -900,7 +933,13 @@ fn stamp() -> String {
 /// Assemble, puis crée la miniature de l'onglet Vidéos.
 fn save(cfg: &Config, segs: &[PathBuf], kind: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&cfg.out_dir).map_err(|e| format!("Dossier de sortie inaccessible : {e}"))?;
-    let out = cfg.out_dir.join(format!("{kind} {}.{}", stamp(), cfg.container));
+    let mut out = cfg.out_dir.join(format!("{kind} {}.{}", stamp(), cfg.container));
+    // Deux enregistrements dans la même seconde : le second ne remplace pas le premier.
+    let mut n = 2;
+    while out.exists() {
+        out = cfg.out_dir.join(format!("{kind} {} ({n}).{}", stamp(), cfg.container));
+        n += 1;
+    }
     concat(cfg, segs, &out)?;
     let thumbs = crate::config::dir().join("thumbs");
     let _ = std::fs::create_dir_all(&thumbs);
@@ -912,9 +951,100 @@ fn save(cfg: &Config, segs: &[PathBuf], kind: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Un seul clip assemblé à la fois : deux appuis rapprochés ne s'écrasent plus.
+static SAVING: Mutex<()> = Mutex::new(());
+
 pub fn save_clip(cfg: &Config, dir: &Path) -> Result<PathBuf, String> {
-    let segs = recent(segments(dir), cfg.buffer_secs, std::time::SystemTime::now());
-    save(cfg, pick_segments(&segs, cfg.buffer_secs), "Clip")
+    let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
+    // Le clip va jusqu'à l'appui : on attend que ffmpeg ferme le segment en cours (2 s au plus), au lieu
+    // de le laisser de côté. Capture arrêtée ou figée : on n'attend pas plus, on prend ce qui est écrit.
+    let pressed = std::time::Instant::now();
+    let current = segments(dir).last().map(|p| seg_number(p));
+    while current.is_some() && pressed.elapsed() < Duration::from_millis(u64::from(SEG_SECS) * 1000 + 700) {
+        if segments(dir).last().map(|p| seg_number(p)) != current {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let all = segments(dir);
+    let mut segs = recent(all.clone(), cfg.buffer_secs, std::time::SystemTime::now());
+    let newest = segs.pop(); // encore en cours d'écriture : jamais dans le clip, vide ou non
+    segs.retain(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0));
+    segs.extend(newest);
+    let pick = pick_segments(&segs, cfg.buffer_secs);
+    if pick.is_empty() {
+        let age = all.last().and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).and_then(|t| t.elapsed().ok()).map_or(-1, |d| d.as_secs() as i64);
+        let err = std::fs::read_to_string(dir.join("ffmpeg.log")).unwrap_or_default();
+        crate::log(&format!(
+            "clip impossible : {} segments dans le dossier, {} récents, dernier écrit il y a {age} s, ffmpeg : {}",
+            all.len(),
+            segs.len(),
+            err.lines().last().unwrap_or("aucun message")
+        ));
+        return Err(if (0..6).contains(&age) || all.is_empty() {
+            "Le buffer vient de démarrer : réessayez dans quelques secondes.".into()
+        } else {
+            "La capture ne tournait pas : rien à enregistrer. Clipper la relance.".into()
+        });
+    }
+    let out = match save(cfg, pick, "Clip") {
+        Ok(o) => o,
+        Err(e) => {
+            // Assemblage refusé : un segment illisible dans le lot. On garde seulement les segments sains.
+            let ok = valid_segs(cfg, pick);
+            crate::log(&format!("clip : assemblage refusé, {} segments illisibles sur {} écartés", pick.len() - ok.len(), pick.len()));
+            if ok.is_empty() || ok.len() == pick.len() {
+                return Err(e);
+            }
+            return save(cfg, &ok, "Clip");
+        }
+    };
+    // Durée contrôlée : un segment au temps cassé (PC sorti de veille, capture figée puis reprise) allongeait
+    // le clip avec une image vieille de plusieurs minutes. On refait alors le clip après ce segment.
+    let want = f64::from(pick.len() as u32 * SEG_SECS);
+    let got = probe(cfg, &out).secs;
+    if got > want + f64::from(4 * SEG_SECS) {
+        let bad = pick.iter().rposition(|p| seg_secs(cfg, p) > f64::from(3 * SEG_SECS));
+        crate::log(&format!("clip : {got:.0} s au lieu de {want:.0} s, segment anormal {bad:?} : clip refait sans lui"));
+        if let Some(i) = bad.filter(|i| i + 1 < pick.len()) {
+            let _ = std::fs::remove_file(&out);
+            return save(cfg, &pick[i + 1..], "Clip");
+        }
+    }
+    Ok(out)
+}
+
+/// Segment lisible : non vide et d'une durée connue.
+fn valid_seg(cfg: &Config, p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.len() > 0) && seg_secs(cfg, p) > 0.0
+}
+
+/// Les segments lisibles de `segs`, dans l'ordre (ffprobe sur 8 fils).
+fn valid_segs(cfg: &Config, segs: &[PathBuf]) -> Vec<PathBuf> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let ok: Vec<AtomicBool> = segs.iter().map(|_| AtomicBool::new(false)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..segs.len().min(8) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(p) = segs.get(i) else { break };
+                ok[i].store(valid_seg(cfg, p), Ordering::Relaxed);
+            });
+        }
+    });
+    segs.iter().zip(&ok).filter(|(_, v)| v.load(Ordering::Relaxed)).map(|(p, _)| p.clone()).collect()
+}
+
+/// Durée d'un segment (ffprobe direct, sans cache).
+fn seg_secs(cfg: &Config, p: &Path) -> f64 {
+    Command::new(cfg.ffmpeg.replace("ffmpeg", "ffprobe"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
+        .arg(p)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .unwrap_or(0.0)
 }
 
 /// Segments écrits pendant la durée du buffer, à l'horloge. Après une relance de Clipper ou une pause de la

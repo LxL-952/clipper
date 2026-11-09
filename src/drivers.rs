@@ -13,7 +13,44 @@ pub struct Gpu {
     pub driver: String,
 }
 
+/// Carte NVIDIA et version du pilote. Registre d'abord (instantané, à jour dès la fin d'une installation,
+/// marche même quand nvidia-smi est absent du PATH ou occupé) ; nvidia-smi en secours.
 pub fn installed() -> Option<Gpu> {
+    from_registry().or_else(from_smi)
+}
+
+/// « 32.0.15.9144 » (version Windows du pilote) -> « 591.44 » (version NVIDIA : les 5 derniers chiffres).
+fn nvidia_version(win: &str) -> Option<String> {
+    let parts: Vec<&str> = win.trim().split('.').collect();
+    if parts.len() != 4 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let digits = format!("{}{:0>4}", parts[2], parts[3]);
+    let d = &digits[digits.len().checked_sub(5)?..];
+    Some(format!("{}.{}", &d[..3], &d[3..]))
+}
+
+/// Classe « cartes graphiques » du registre : une clé par carte (0000, 0001…).
+fn from_registry() -> Option<Gpu> {
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    let w = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let read = |key: &str, value: &str| -> Option<String> {
+        let mut buf = vec![0u16; 512];
+        let mut len = (buf.len() * 2) as u32;
+        let ok = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, w(key).as_ptr(), w(value).as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as _, &mut len) } == 0;
+        ok.then(|| String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]))
+    };
+    (0..16).find_map(|i| {
+        let key = format!(r"SYSTEM\CurrentControlSet\Control\Class\{{4d36e968-e325-11ce-bfc1-08002be10318}}\{i:04}");
+        let name = read(&key, "DriverDesc")?;
+        if !name.to_ascii_uppercase().contains("NVIDIA") {
+            return None;
+        }
+        Some(Gpu { name: name.trim().into(), driver: nvidia_version(&read(&key, "DriverVersion")?)? })
+    })
+}
+
+fn from_smi() -> Option<Gpu> {
     let out = Command::new("nvidia-smi")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["--query-gpu=name,driver_version", "--format=csv,noheader"])
@@ -174,6 +211,14 @@ pub fn install(exe: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_driver_version_to_nvidia() {
+        assert_eq!(nvidia_version("32.0.15.9144").as_deref(), Some("591.44"));
+        assert_eq!(nvidia_version("32.0.15.6094").as_deref(), Some("560.94"));
+        assert_eq!(nvidia_version("31.0.15.3623").as_deref(), Some("536.23"));
+        assert_eq!(nvidia_version("n/a"), None);
+    }
 
     #[test]
     fn only_nvidia_domains() {

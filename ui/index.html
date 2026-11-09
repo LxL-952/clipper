@@ -443,6 +443,8 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
 /* En pause tant que la fenêtre n'est pas visible (classe .go posée au message "shown"). */
 #intro:not(.go),#intro:not(.go) *{animation-play-state:paused}
 @keyframes in-out{to{opacity:0;visibility:hidden;transform:scale(1.03)}}
+html.closing body{opacity:0;transform:scale(.985);transition:opacity .16s ease-out,transform .16s ease-out}
+@media (prefers-reduced-motion:reduce){html.closing body{transition:none}}
 </style>
 </head>
 <body>
@@ -951,10 +953,8 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
   <hr>
   <button type="button" role="menuitem" class="danger" data-ctx="delete"><svg class="i" aria-hidden="true"><use href="#i-trash"/></svg>Supprimer</button>
 </div>
-<div class="savebar" id="saveBar" role="region" aria-label="Modifications non enregistrées" hidden>
-  <span class="sb-t"><b>Modifications non enregistrées</b><span class="hint" id="saveHint"></span></span>
-  <button class="btn ghost" type="button" id="saveReset">Annuler</button>
-  <button class="btn primary" type="button" id="saveGo">Enregistrer</button>
+<div class="savebar" id="saveBar" role="status" aria-live="polite" hidden>
+  <span class="sb-t"><b id="saveT">Enregistrement…</b><span class="hint" id="saveHint"></span></span>
 </div>
 
 <script>
@@ -1047,7 +1047,8 @@ const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const I=window.__INIT__;let C=I.config;const NAT=I.native||[1920,1080];
 /* FFmpeg absent : message et installation en un clic (winget), au lieu de listes vides sans explication. */
 /* Mise à jour trouvée au lancement : un clic télécharge, vérifie l'empreinte et installe. */
-function showUpd(v){if(!v)return;$('#updT').textContent='Nouvelle version '+v+' · Installer';$('#upd').hidden=false}
+let updV=null;
+function showUpd(v){if(!v)return;updV=v;$('#updT').textContent='Nouvelle version '+v+' · Installer';$('#upd').hidden=false}
 showUpd(I.update);
 $('#upd').onclick=()=>{$('#upd').disabled=true;$('#updT').textContent='Téléchargement et vérification…';send({cmd:'update_install'})};
 if(I.ffmpeg_ok===false){$('#ffMiss').hidden=false;$('#ffInst').onclick=()=>{$('#ffInst').disabled=true;$('#ffWait').hidden=false;send({cmd:'install_ffmpeg'})}}
@@ -1060,30 +1061,33 @@ const durWords=s=>s<60?s+' secondes':s%60?Math.floor(s/60)+' min '+s%60+' s':(s/
 const get=k=>k.split('.').reduce((o,p)=>o==null?o:o[p],C);
 const OV_DEF={overlay_corner:"tl",overlay_size:"m",overlay_opacity:.7};
 const val=k=>{const v=get(k);return v===undefined&&k in OV_DEF?OV_DEF[k]:v};
-/* Réglages : en attente jusqu'à « Enregistrer » (une seule relance de la capture). */
-let S=C,pending={},hkSaved=null;
+/* Réglages : chaque changement est appliqué et enregistré tout de suite. Ceux qui relancent la capture
+   sont regroupés pendant 0,7 s (plusieurs clics de suite = une seule relance). */
+let pending={},flushT=null,savedT=null;
 const NOW=['mic_muted'];
 const LIVE=['driver_branch','out_dir','container','overlay_mode','overlay_items','overlay_corner','overlay_size','overlay_opacity','overlay_refresh_ms','overlay_graphs','intro','sounds','update_check','delete_permanent','delete_confirm','key_clip','key_rec','key_bar','key_overlay','admin_mode'];
 function setCfg(key,value){
   if(key.includes('.')){const[a,b]=key.split('.');value={...C[a],[b]:value};key=a}
   C={...C,[key]:value};
   if(key==='clip'){C={...C,rec:value};pending.rec=value}
-  if(NOW.includes(key))send({cmd:'set',key,value});
-  else{if(key.startsWith('key_')&&!hkSaved)hkSaved={...hkLive};pending[key]=value;saveUi()}
+  pending[key]=value;clearTimeout(flushT);
+  if(Object.keys(pending).every(k=>LIVE.includes(k)||NOW.includes(k)))flush();
+  else{flushT=setTimeout(flush,700);saveUi('Enregistrement…','La capture redémarre avec ces réglages.')}
   render();
 }
-function saveUi(){
-  const ks=Object.keys(pending);$('#saveBar').hidden=!ks.length;
-  $('#saveHint').textContent=ks.some(k=>!LIVE.includes(k))?'La capture redémarre : le buffer repart de zéro.':'Appliqué sans couper la capture.';
-}
-function saveGo(){if(!Object.keys(pending).length)return;send({cmd:'set_many',values:pending});S={...S,...pending};pending={};hkSaved=null;saveUi()}
-function saveReset(){C=S;pending={};if(hkSaved){Object.assign(hkLive,hkSaved);hkSaved=null}render();saveUi()}
+function saveUi(t,h){clearTimeout(savedT);$('#saveT').textContent=t;$('#saveHint').textContent=h||'';$('#saveBar').hidden=false}
+function flush(){clearTimeout(flushT);flushT=null;const ks=Object.keys(pending);if(!ks.length)return;
+  const restart=ks.some(k=>!LIVE.includes(k));
+  send({cmd:'set_many',values:pending});pending={};
+  if(restart){saveUi('Réglages enregistrés','Capture relancée.');savedT=setTimeout(()=>{$('#saveBar').hidden=true},1800)}
+  else $('#saveBar').hidden=true}
 const pretty=k=>String(k||'').replace(/Key([A-Z])/g,'$1').replace(/Digit(\d)/g,'$1').replace(/Shift/g,'Maj').replace(/Control/g,'Ctrl');
 
 /* ---------- barre de titre ---------- */
 $('#titlebar').addEventListener('mousedown',e=>{if(e.button===0&&!e.target.closest('button'))send({cmd:'drag'})});
 $('#wMin').onclick=()=>send({cmd:'minimize'});
-$('#wClose').onclick=()=>send({cmd:'close'});
+/* Fermeture : réglages en attente envoyés, fondu léger, puis la fenêtre est cachée et détruite. */
+$('#wClose').onclick=()=>{flush();const v=$('#vp');if(v&&!v.paused)v.pause();document.documentElement.classList.add('closing');setTimeout(()=>send({cmd:'close'}),170)};
 
 /* ---------- onglets ---------- */
 const tabs=$$('[role=tab]');let tab='clip';
@@ -1092,7 +1096,7 @@ function selTab(name,focus){
   tab=name;
   if(name==='clip')requestAnimationFrame(fillTl);
   if(name==='videos')send({cmd:'videos'});
-  if(name==='drivers'&&!drvAsked&&I.gpu)checkDriver();
+  if(name==='drivers'&&!drvAsked)checkDriver();
   if(name!=='videos'){const v=$('#vp');if(!v.paused)v.pause()}
   levels();
 }
@@ -1296,7 +1300,7 @@ function onPreview(m){
 /* Lecture directe ratée (ancien format, fichier particulier) : on demande une copie de lecture, une fois. */
 const vRetried=new Set();
 $('#vp').addEventListener('error',()=>{const vp=$('#vp'),u=vp.getAttribute('src');if(!u)return;
-  if(u.startsWith('/video?')&&vSel&&!vRetried.has(vSel)){vRetried.add(vSel);delete vSrc[vSel];vp.removeAttribute('src');vp.load();vp.hidden=true;$('#vph').hidden=false;$('#vph').textContent='Préparation d\'une copie lisible…';send({cmd:'video_preview',path:vSel,force:true});return}
+  if(vSel&&!vRetried.has(vSel+u)){vRetried.add(vSel+u);delete vSrc[vSel];vp.removeAttribute('src');vp.load();vp.hidden=true;$('#vph').hidden=false;$('#vph').textContent='Préparation d\'une copie lisible…';send({cmd:'video_preview',path:vSel,force:u.startsWith('/video?')});return}
   $('#vErrT').textContent='';$('#vErr').hidden=false});
 /* Grand écran : double-clic sur la vidéo (ou bouton du lecteur) ; la fenêtre de Clipper passe en plein écran avec. */
 /* Lecteur maison : mêmes couleurs et polices que l'app, sans les contrôles de Chromium. */
@@ -1371,7 +1375,9 @@ function checkDriver(){drvAsked=true;drv=null;
   $('#dState').textContent='Vérification auprès de NVIDIA…';$('#dLed').className='led';$('#dVers').hidden=true;$('#dErr').hidden=true;$('#dl').hidden=true;
   $('#gpuBr').textContent=BR[C.driver_branch]||'';$('#brHint').textContent=C.driver_branch==='studio'?'Studio : versions validées plus longtemps, pour les logiciels de création.':'Game Ready : optimisé pour les jeux sortis récemment.';
   send({cmd:'driver_check',branch:C.driver_branch})}
-function showDriver(d){drv=d;
+function showDriver(d){
+  if(d.status==='nogpu'){I.gpu=null;initGpu();return}
+  drv=d;
   $('#dErr').hidden=d.status!=='error';$('#dLed').className='led '+(d.status==='ok'?'ok':d.status==='update'?'warn':'rec');
   if(d.status==='error'){$('#dState').textContent='Vérification impossible';$('#dErrT').textContent=(d.error||'NVIDIA n\'a pas répondu.')+' Vérifiez la connexion Internet. ';$('#dVers').hidden=true;$('#dl').hidden=true;return}
   if(d.installed)$('#gpuDrv').textContent=d.installed;
@@ -1397,7 +1403,7 @@ function prog(p){
   if(p.phase==='done'){$('#dlProg').hidden=true;$('#dlDone').hidden=false;$('#dState').textContent='Pilote '+(drv?drv.latest:'')+' installé';$('#dLed').className='led ok';$('#dVers').hidden=true;$('#drvBadge').hidden=true}
 }
 function initGpu(){const g=I.gpu;$('#noGpu').hidden=!!g;$('#drvMain').hidden=!g;$('#gpuPlate').hidden=!g;
-  if(g){$('#gpuName').innerHTML=esc(g.name)+'<small>Détecté par nvidia-smi</small>';$('#gpuDrv').textContent=g.driver;$('#gpuBr').textContent=BR[C.driver_branch]||''}
+  if(g){$('#gpuName').innerHTML=esc(g.name)+'<small>Pilote lu dans Windows</small>';$('#gpuDrv').textContent=g.driver;$('#gpuBr').textContent=BR[C.driver_branch]||''}
   $('#gpuScr').textContent=NAT[0]+'×'+NAT[1]}
 
 /* ---------- outils ---------- */
@@ -1409,7 +1415,7 @@ function renderClean(items){clItems=items||[];$('#clWait').hidden=true;$('#clSca
 const clSel=()=>$$('#clList input:checked').map(i=>i.value);
 function clTotal(){const ids=clSel(),t=clItems.filter(i=>ids.includes(i.id)).reduce((a,i)=>a+(+i.bytes||0),0);$('#clTot').textContent=bytes(t);$('#clGo').disabled=!ids.length;return t}
 /* Ctrl+R / F5 : Clipper rouvre la fenêtre avec les réglages actuels, sur le même onglet. */
-document.addEventListener('keydown',e=>{if(e.key==='F5'||(e.ctrlKey&&(e.key==='r'||e.key==='R'))){e.preventDefault();send({cmd:'reload',tab})}});
+document.addEventListener('keydown',e=>{if(e.key==='F5'||(e.ctrlKey&&(e.key==='r'||e.key==='R'))){e.preventDefault();flush();send({cmd:'reload',tab})}});
 $('#clList').addEventListener('change',clTotal);
 /* « Ouvrir » : dossiers de la catégorie dans l'Explorateur (sans cocher la case de la ligne). */
 $('#clList').addEventListener('click',e=>{const b=e.target.closest('[data-open]');if(!b)return;e.preventDefault();send({cmd:'clean_open',id:b.dataset.open})});
@@ -1432,7 +1438,11 @@ function toast(m){const t=document.createElement('div');t.className='toast';t.se
 window.__on=m=>{switch(m&&m.type){
   case'update':showUpd(m.version);break;
   case'shown':window.__introGo&&window.__introGo();break;
-  case'config':S=m.config;C={...m.config,...pending};render();askFree();adminUi();break;
+  case'config':C={...m.config,...pending};render();askFree();adminUi();break;
+  /* Raccourcis réellement actifs après un changement (repli si la touche est prise ailleurs). */
+  case'hotkeys':Object.assign(hkLive,m.hotkeys||{});conflicts.length=0;conflicts.push(...(m.conflicts||[]).map(pretty));render();break;
+  case'update_state':if(m.ok){$('#updT').textContent=m.text}else{$('#upd').disabled=false;showUpd(updV);toast({kind:'error',text:m.text})}break;
+  case'gpu':I.gpu={name:m.name,driver:m.driver};initGpu();break;
   case'state':recOn=!!m.recording;recS=+m.rec_secs||0;recUi();break;
   case'toast':toast(m);if(tab==='videos'&&m.kind!=='error')send({cmd:'videos'});break;
   case'folder':free[m.path]=m.free_bytes;C={...C,[m.key]:m.path};render();showFree();break;
@@ -1478,8 +1488,8 @@ addEventListener('mousedown',e=>{if(!e.target.closest('#ctx'))hideCtx()},true);
 addEventListener('keydown',e=>{if(e.key==='Escape')hideCtx()});
 addEventListener('blur',hideCtx);addEventListener('resize',hideCtx);
 document.addEventListener('scroll',hideCtx,true);
-$('#saveGo').onclick=saveGo;$('#saveReset').onclick=saveReset;
-addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='s'&&!hkWait){e.preventDefault();saveGo()}});
+addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='s'&&!hkWait){e.preventDefault();flush()}});
+addEventListener('pagehide',flush);
 adminUi();
 
 /* ---------- sections repliables ---------- */
