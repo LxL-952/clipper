@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Le processus de Clipper tourne sous la normale (le jeu passe avant) et ses enfants en héritent : le
+/// décodage du lecteur, lui, sert l'utilisateur qui regarde, il garde la priorité normale.
+const NORMAL_PRIORITY: u32 = 0x0000_0020;
 
 /// Images reçues de ffmpeg (diagnostic : comparé au nombre de dessins dans le journal).
 pub static FRAMES: AtomicU32 = AtomicU32::new(0);
@@ -189,7 +192,7 @@ impl Player {
         let run = self.run.load(Ordering::Relaxed);
         let (w, h) = self.size;
         let mut c = Command::new(&self.ffmpeg);
-        c.creation_flags(CREATE_NO_WINDOW).args(["-hide_banner", "-loglevel", "error", "-hwaccel", "auto", "-ss", &format!("{:.3}", self.base)]);
+        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-hwaccel", "auto", "-ss", &format!("{:.3}", self.base)]);
         if self.playing {
             c.args(["-readrate", &self.rate.to_string()]);
             // Sans avance initiale : par défaut ffmpeg lit d'abord 0,5 s d'un coup, l'image partait donc
@@ -249,7 +252,7 @@ impl Player {
             x => format!(",atempo={x}"),
         };
         let mut c = Command::new(&self.ffmpeg);
-        c.creation_flags(CREATE_NO_WINDOW).args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", self.base), "-i"]).arg(file);
+        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", self.base), "-i"]).arg(file);
         let n = self.audio_tracks;
         let ins: String = (0..n).map(|i| format!("[0:a:{i}]")).collect();
         c.args(["-filter_complex", &format!("{ins}amix=inputs={n}:normalize=0,aresample=48000{tempo}[a]"), "-map", "[a]", "-vn", "-sn"]);
@@ -275,13 +278,11 @@ impl Player {
             c.blit(&f.data, f.w, f.h, dst.x, dst.y);
             return true;
         }
-        match tiny_skia::PixmapRef::from_bytes(&f.data, f.w, f.h) {
-            Some(img) => {
-                c.image(img, dst, rad, false);
-                true
-            }
-            None => false,
-        }
+        // Plein écran (image limitée à 1920x1080 par le tube) : agrandie sans filtrage, bandes noires déjà
+        // dans l'image. Les coins arrondis du cadre sont repeints par l'appelant.
+        c.blit_scaled(&f.data, f.w, f.h, dst);
+        let _ = rad;
+        true
     }
 }
 

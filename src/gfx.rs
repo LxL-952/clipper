@@ -951,6 +951,48 @@ impl Canvas {
         }
     }
 
+    /// Copie agrandie ou réduite d'une image opaque (plus proche voisin) dans `dst` : quelques
+    /// millisecondes même en plein écran, là où le filtrage de tiny-skia prenait plus de 150 ms par image.
+    pub fn blit_scaled(&mut self, data: &[u8], w: u32, h: u32, dst: R) {
+        if w == 0 || h == 0 || data.len() < (w * h * 4) as usize {
+            return;
+        }
+        let x0f = (dst.x + self.ox) * self.s;
+        let y0f = (dst.y + self.oy) * self.s;
+        let (px, py) = (x0f.round() as i32, y0f.round() as i32);
+        let (dw, dh) = ((dst.w * self.s).round() as i32, (dst.h * self.s).round() as i32);
+        if dw <= 0 || dh <= 0 {
+            return;
+        }
+        let (cx0, cy0, cx1, cy1) = self.clip;
+        let (x0, x1) = (px.max(cx0), (px + dw).min(cx1));
+        let (y0, y1) = (py.max(cy0), (py + dh).min(cy1));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        // Colonne source de chaque colonne de destination, calculée une fois.
+        let cols: Vec<usize> = (x0..x1).map(|x| (((x - px) as u64 * w as u64 / dw as u64).min(w as u64 - 1)) as usize).collect();
+        let pw = self.pm.width() as i32;
+        let dst_px = self.pm.data_mut();
+        let mut last: Option<(u32, usize)> = None;
+        for yy in y0..y1 {
+            let sy = (((yy - py) as u64 * h as u64 / dh as u64).min(h as u64 - 1)) as u32;
+            let d0 = ((yy * pw + x0) * 4) as usize;
+            let n = ((x1 - x0) * 4) as usize;
+            // Même ligne source que la précédente : simple recopie de la ligne déjà faite.
+            if let Some((ly, ld)) = last.filter(|(ly, _)| *ly == sy) {
+                dst_px.copy_within(ld..ld + n, d0);
+                let _ = ly;
+                continue;
+            }
+            let row = &data[(sy * w * 4) as usize..((sy + 1) * w * 4) as usize];
+            for (i, &c) in cols.iter().enumerate() {
+                dst_px[d0 + i * 4..d0 + i * 4 + 4].copy_from_slice(&row[c * 4..c * 4 + 4]);
+            }
+            last = Some((sy, d0));
+        }
+    }
+
     /// Coins arrondis après une copie directe : les quatre coins du rectangle sont repeints en `bg`.
     pub fn corners(&mut self, q: R, rad: f32, bg: Col) {
         let vis = self.vis(q);
