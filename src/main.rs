@@ -413,7 +413,7 @@ impl App {
         let now = Instant::now();
         let slot = if kind == ui::Kind::Main { &mut self.main } else { &mut self.bar };
         let Some(win) = slot.as_mut() else { return };
-        if kind == ui::Kind::Bar && !win.window.is_visible() {
+        if kind == ui::Kind::Bar && !self.bar_open && !win.window.is_visible() {
             return;
         }
         win.fit();
@@ -475,7 +475,11 @@ impl App {
         if let Some(w) = &self.bar {
             ui::show_bar(&w.window);
         }
+        // Première image peinte fenêtre encore cachée, puis affichage : jamais de cadre vide.
         self.draw(ui::Kind::Bar, target);
+        if let Some(w) = &self.bar {
+            ui::reveal_bar(&w.window);
+        }
     }
 
     /// Ferme la barre : animation de sortie côté page (qui arrête aussi la lecture), fenêtre cachée 200 ms
@@ -571,7 +575,7 @@ impl App {
             "bar_hidden" => {
                 if !self.bar_open && m["gen"].as_u64() == Some(self.bar_gen) {
                     if let Some(w) = &mut self.bar {
-                        w.window.set_visible(false);
+                        ui::conceal_bar(&w.window);
                         w.release(); // tampon rendu : la barre cachée ne garde presque rien en mémoire
                     }
                     self.barui.borrow_mut().player.close();

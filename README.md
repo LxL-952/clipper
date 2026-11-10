@@ -35,7 +35,7 @@ ISCC.exe /DBin=D:\ct\release installer\clipper.iss
 En développement. Voir [tasks/plan.md](tasks/plan.md) pour ce qui est fait, testé, et ce qui reste.
 
 ## Licence
-MIT, voir [LICENSE](LICENSE). Conditions d'utilisation affichées par l'installateur : [installer/conditions.txt](installer/conditions.txt).
+Tous droits réservés, voir [LICENSE](LICENSE). Le code est publié pour être consulté uniquement : pas de copie, de modification, de redistribution ni d'usage commercial sans autorisation écrite. Les versions jusqu'à la 1.3.1 incluse ont été publiées sous licence MIT. Conditions d'utilisation affichées par l'installateur : [installer/conditions.txt](installer/conditions.txt).
 
 ## Polices
-Archivo, JetBrains Mono, Schibsted Grotesk, Figtree, Instrument Serif, Public Sans, Barlow, Saira Condensed : licence SIL Open Font License 1.1 (fichiers venant de Fontsource).
+Geist et Geist Mono : licence SIL Open Font License 1.1.

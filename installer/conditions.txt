@@ -3,7 +3,7 @@
 Lisez ce texte avant d'installer Clipper. En cliquant sur « J'accepte », vous acceptez ces conditions.
 
 1. LICENCE
-Clipper est un logiciel libre et gratuit, distribué sous licence MIT (texte complet en fin de document). Vous pouvez l'utiliser, le copier, le modifier et le redistribuer, à condition de garder la mention de copyright et la licence.
+Clipper est gratuit. Copyright (c) 2026 LxL-952, tous droits réservés. Vous pouvez l'installer et l'utiliser à titre personnel. Il est interdit de le revendre, de le redistribuer, de copier ou modifier son code, ou de s'en servir dans un but commercial ou lucratif, sans l'autorisation écrite de l'auteur.
 
 2. AUCUNE GARANTIE
 Clipper est fourni « tel quel », sans aucune garantie. L'auteur ne peut pas être tenu responsable d'une perte de données, d'un clip manqué, d'un problème de pilote ou de tout autre dommage lié à son utilisation.
@@ -25,27 +25,3 @@ Clipper utilise FFmpeg, un programme séparé distribué sous sa propre licence 
 
 8. DONNÉES PERSONNELLES
 Clipper ne collecte aucune donnée et n'envoie rien à l'auteur. Les seules connexions réseau sont celles vers NVIDIA, quand vous cherchez un pilote, et vers GitHub au lancement pour savoir si une nouvelle version existe (désactivable dans Interface ; une mise à jour n'est installée que si vous cliquez sur « Installer », après vérification de son empreinte SHA-256).
-
----------------------------------------------------------------------------
-
-MIT License
-
-Copyright (c) 2026 LxL-952
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.

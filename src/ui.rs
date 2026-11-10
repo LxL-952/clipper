@@ -214,8 +214,23 @@ pub fn show_bar(w: &Window) {
         w.set_inner_size(size);
         w.set_outer_position(PhysicalPosition::new(m.left + (mw as i32 - size.width as i32) / 2, m.top));
     }
-    w.set_visible(true);
-    // Focus pris : le jeu rend la souris (curseur visible, plus bloqué), et Échap ferme la barre.
-    // Le focus revient au jeu à la fermeture (main.rs, hide_bar).
-    w.set_focus();
+}
+
+/// Affiche la barre déjà peinte. ShowWindow direct, pas `set_visible` de tao : tao réécrit le style
+/// étendu en l'affichant, la fenêtre apparaissait un instant sans WS_EX_LAYERED (cadre et ombre de Windows).
+/// Focus pris : le jeu rend la souris (curseur visible, plus bloqué), et Échap ferme la barre.
+/// Le focus revient au jeu à la fermeture (main.rs, hide_bar).
+pub fn reveal_bar(w: &Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOW, SetForegroundWindow, ShowWindow};
+    layered_tool_window(w);
+    unsafe {
+        ShowWindow(w.hwnd() as _, SW_SHOW);
+        SetForegroundWindow(w.hwnd() as _);
+    }
+}
+
+/// Cache la barre (pendant de `reveal_bar`, sans tao pour la même raison).
+pub fn conceal_bar(w: &Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    unsafe { ShowWindow(w.hwnd() as _, SW_HIDE) };
 }
