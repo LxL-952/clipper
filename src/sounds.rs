@@ -8,6 +8,8 @@ pub enum Sound {
     RecStop,
     Clip,
     Error,
+    /// Intro de la fenêtre : claquement du trombone à 1,09 s, deux notes douces à 1,3 s.
+    Intro,
 }
 
 const RATE: u32 = 44_100;
@@ -19,6 +21,7 @@ fn notes(s: Sound) -> &'static [(f32, u32)] {
         Sound::RecStop => &[(990.0, 70), (660.0, 110)],
         Sound::Clip => &[(1320.0, 45), (1760.0, 75)],
         Sound::Error => &[(220.0, 170)],
+        Sound::Intro => &[(0.0, 1090), (2350.0, 40), (3720.0, 90), (0.0, 80), (660.0, 70), (990.0, 260)],
     }
 }
 
@@ -56,7 +59,7 @@ fn wav(s: Sound) -> Vec<u8> {
 /// Joue le son tout de suite (asynchrone). Les WAV restent en mémoire : PlaySound les lit pendant la lecture.
 pub fn play(s: Sound) {
     use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
-    static CACHE: [OnceLock<Vec<u8>>; 4] = [const { OnceLock::new() }; 4];
+    static CACHE: [OnceLock<Vec<u8>>; 5] = [const { OnceLock::new() }; 5];
     let buf = CACHE[s as usize].get_or_init(|| wav(s));
     unsafe { PlaySoundW(buf.as_ptr() as _, std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
 }
