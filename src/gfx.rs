@@ -726,11 +726,26 @@ impl Canvas {
     }
 
     /// Ombre portée approchée : couches translucides de plus en plus larges (pas de flou gaussien).
+    /// Ombre portée sous `q`. Seul l'anneau hors de `q` est peint (trou pair-impair) : la carte posée
+    /// dessus le cache, et peindre tout l'intérieur coûtait ~30 ms par image pour une grande carte.
     pub fn shadow(&mut self, q: R, rad: f32, dy: f32, blur: f32, c: Col) {
         let n = 6;
+        let tf = self.tf();
         for i in 0..n {
             let g = blur * (i as f32 + 1.0) / n as f32;
-            self.rrect(r(q.x - g, q.y - g + dy, q.w + 2.0 * g, q.h + 2.0 * g), rad + g, c.a(0.5 / n as f32 * (1.0 + (n - i) as f32 / n as f32)));
+            let o = self.snap(r(q.x - g, q.y - g + dy, q.w + 2.0 * g, q.h + 2.0 * g));
+            let vis = self.vis(o);
+            let col = c.a(0.5 / n as f32 * (1.0 + (n - i) as f32 / n as f32));
+            if vis == 0 || col.3 == 0 {
+                continue;
+            }
+            let mut pb = PathBuilder::new();
+            push_rrect(&mut pb, o, rad + g);
+            push_rrect(&mut pb, self.snap(q), rad);
+            if let Some(path) = pb.finish() {
+                let m = (vis == 2 && self.masked).then_some(&self.mask);
+                self.pm.fill_path(&path, &Self::paint(col), FillRule::EvenOdd, tf, m);
+            }
         }
     }
 

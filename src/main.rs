@@ -1223,12 +1223,12 @@ fn main() {
         // Dessins programmés (animation en cours, compteur REC, notification qui s'efface) : la boucle dort
         // jusqu'au prochain ; sans rien de programmé, elle ne se réveille que sur un événement.
         let now = Instant::now();
-        for (i, slot) in [&app.main, &app.bar].into_iter().enumerate() {
-            if app.wake[i].is_some_and(|t| t <= now) {
+        // Dessin direct, sans request_redraw : tao perdait parfois ces demandes (intro figée jusqu'au
+        // premier mouvement de souris).
+        for (i, kind) in [ui::Kind::Main, ui::Kind::Bar].into_iter().enumerate() {
+            if *flow != ControlFlow::Exit && app.wake[i].is_some_and(|t| t <= now) {
                 app.wake[i] = None;
-                if let Some(w) = slot {
-                    w.window.request_redraw();
-                }
+                app.draw(kind, target);
             }
         }
         if *flow != ControlFlow::Exit {

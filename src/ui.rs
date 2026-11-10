@@ -155,6 +155,9 @@ impl Win {
                 let size = SIZE { cx: w, cy: h };
                 let src = POINT { x: 0, y: 0 };
                 let blend = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: 1 };
+                // tao réécrit le style étendu à chaque set_visible / set_focus… et retire WS_EX_LAYERED :
+                // sans lui, UpdateLayeredWindow échoue (erreur 87) et la barre reste invisible.
+                layered_tool_window(&self.window);
                 UpdateLayeredWindow(hwnd, screen, std::ptr::null(), &size, mem, &src, 0, &blend, ULW_ALPHA);
                 SelectObject(mem, old);
                 DeleteObject(bmp as _);
@@ -187,7 +190,10 @@ fn layered_tool_window(w: &Window) {
     let h = w.hwnd() as _;
     unsafe {
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_TOOLWINDOW | WS_EX_LAYERED) as isize);
+        let want = ex | (WS_EX_TOOLWINDOW | WS_EX_LAYERED) as isize;
+        if want != ex {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, want);
+        }
     }
 }
 
