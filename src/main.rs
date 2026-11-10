@@ -1,16 +1,25 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod audio;
+mod barui;
 mod capture;
 mod config;
 mod drivers;
 mod elevate;
+mod front;
+mod front_a;
+mod front_b;
+mod gfx;
 mod overlay;
+mod player;
+#[cfg(test)]
+mod shots;
 mod sounds;
 mod tools;
 mod tray;
 mod update;
 mod ui;
+mod widgets;
 
 use config::Config;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
@@ -34,6 +43,8 @@ pub enum UserEvent {
     Push(Value),
     /// Fin d'un clip / REC lancé dans un fil (toast + son).
     Saved(Result<PathBuf, String>, &'static str),
+    /// Une fenêtre doit être redessinée (image du lecteur arrivée, fin de lecture).
+    Redraw(ui::Kind),
     Quit,
 }
 
@@ -61,9 +72,15 @@ fn kill_children_with_us() {
 fn lower_priority() {
     use windows_sys::Win32::System::Threading::{BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass};
     unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };
-    // EcoQoS : Windows place nos fils sur les cœurs économes, à basse fréquence. ffmpeg n'en hérite pas.
-    use windows_sys::Win32::System::Threading::{PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation};
-    let s = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED };
+    eco(true);
+}
+
+/// EcoQoS : Windows place nos fils sur les cœurs économes, à basse fréquence. ffmpeg n'en hérite pas.
+/// Coupé tant qu'une fenêtre de Clipper est affichée : l'interface est dessinée par le processeur, et ce
+/// mode la rendait saccadée (lecteur à faible cadence, listes lentes). Remis dès que tout est fermé.
+fn eco(on: bool) {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation};
+    let s = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 } };
     unsafe { SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s as *const _ as _, std::mem::size_of_val(&s) as u32) };
 }
 
@@ -147,27 +164,22 @@ fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>, limit: Option<us
         v.truncate(n);
     }
     let probes = par_probe(cfg, &v.iter().map(|x| x.1.clone()).collect::<Vec<_>>());
-    let mut warm = vec![];
     let items: Vec<Value> = v
         .into_iter()
         .zip(probes)
-        .enumerate()
-        .map(|(i, ((t, p, bytes), pr))| {
+        .map(|((t, p, bytes), pr)| {
             let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let stem = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
             let date = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let play = capture::ready_url(&p, &pr);
-            if play.is_none() && i < 6 {
-                warm.push(p.clone());
-            }
+            // `video` : le fichier a une piste d'images ; `audio` : pistes à faire entendre (mélangées par le lecteur).
+            let (video, audio) = capture::playable(&pr);
             json!({
                 "path": p, "name": name, "kind": if stem.starts_with("REC") { "REC" } else { "Clip" },
-                "bytes": bytes, "secs": pr.secs, "date": date, "play": play,
-                "thumb": format!("/thumb/{}", ui::pct_encode(&format!("{stem}.jpg"))),
+                "bytes": bytes, "secs": pr.secs, "date": date, "video": video, "audio": audio,
             })
         })
         .collect();
-    prewarm(cfg, warm, proxy);
+    let _ = proxy;
     json!({"type": if limit.is_some() { "recent" } else { "videos" }, "items": items})
 }
 
@@ -185,14 +197,6 @@ fn par_probe(cfg: &Config, paths: &[PathBuf]) -> Vec<capture::Probe> {
         }
     });
     out.into_iter().map(|m| m.into_inner().unwrap()).collect()
-}
-
-/// Copies de lecture préparées d'avance ; chaque copie prête est signalée à l'UI (lecture instantanée).
-fn prewarm(cfg: &Config, clips: Vec<PathBuf>, proxy: &EventLoopProxy<UserEvent>) {
-    let p = proxy.clone();
-    capture::prewarm(cfg, clips, move |path, url| {
-        let _ = p.send_event(UserEvent::Push(json!({"type": "preview", "path": path, "url": url})));
-    });
 }
 
 struct Keys {
@@ -230,6 +234,14 @@ fn register_keys(mgr: &GlobalHotKeyManager, cfg: &Config) -> Keys {
     Keys { clip, rec, bar, overlay, conflicts }
 }
 
+/// Fonction donnée au lecteur vidéo : demande un nouveau dessin de la fenêtre depuis n'importe quel fil.
+fn redraw_fn(proxy: &EventLoopProxy<UserEvent>, kind: ui::Kind) -> Arc<dyn Fn() + Send + Sync> {
+    let p = std::sync::Mutex::new(proxy.clone());
+    Arc::new(move || {
+        let _ = p.lock().unwrap().send_event(UserEvent::Redraw(kind));
+    })
+}
+
 fn pretty(k: &HotKey) -> String {
     let s = format!("{k}");
     s.replace("shift", "Maj").replace("control", "Ctrl").replace("alt", "Alt").replace("Key", "").replace("super", "Win")
@@ -257,6 +269,13 @@ struct App {
     overlay_shown: bool,
     main: Option<ui::Win>,
     bar: Option<ui::Win>,
+    /// Contenu de la fenêtre principale (None : fenêtre fermée) et de la barre.
+    front: std::cell::RefCell<Option<front::Front>>,
+    barui: std::cell::RefCell<barui::BarUi>,
+    /// Prochain dessin programmé de chaque fenêtre (animation, compteur, notification) : [principale, barre].
+    wake: [Option<Instant>; 2],
+    /// Diagnostic : (dessins, temps cumulé en ms, début de la période).
+    perf: (u32, f32, Instant),
     /// Fenêtre au premier plan (le jeu) quand la barre s'est ouverte : elle reprend le focus à la fermeture.
     bar_prev: isize,
     /// Numéro de la barre ouverte : un « close » tardif d'une ancienne barre ne ferme pas la nouvelle.
@@ -312,7 +331,7 @@ impl App {
         self.push(&json!({"type": "hotkeys", "hotkeys": self.hotkeys_json(), "conflicts": self.keys.conflicts}));
     }
 
-    fn init_json(&self, page: &str, tab: Option<&str>) -> String {
+    fn init_json(&self, page: &str, tab: Option<&str>) -> Value {
         let devs = |d| audio::devices(d).into_iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>();
         json!({
             "page": page, "tab": tab, "config": self.cfg, "encoders": self.encoders, "ffmpeg_ok": self.ffmpeg_ok, "update": self.update,
@@ -329,13 +348,16 @@ impl App {
             "gpus": self.gpus, "chip": capture::effective_chip(&self.cfg, &self.gpus),
             "cpu_temp": self.cpu_temp, "autostart": elevate::autostart(),
         })
-        .to_string()
     }
 
+    /// Message pour l'interface : la fenêtre principale et la barre mettent leur état à jour, puis se redessinent.
     fn push(&self, msg: &Value) {
-        let s = msg.to_string();
+        if let Some(f) = self.front.borrow_mut().as_mut() {
+            f.on(msg);
+        }
+        self.barui.borrow_mut().on(msg);
         for w in [&self.main, &self.bar].into_iter().flatten() {
-            w.push(&s);
+            w.window.request_redraw();
         }
     }
 
@@ -345,28 +367,95 @@ impl App {
             if kind == ui::Kind::Main {
                 w.window.set_minimized(false);
                 w.window.set_focus();
-                if let Some(t) = tab {
-                    w.push(&json!({"type": "tab", "tab": t}).to_string());
+                if let (Some(t), Some(f)) = (tab, self.front.borrow_mut().as_mut()) {
+                    f.on(&json!({"type": "tab", "tab": t}));
                 }
+                w.window.request_redraw();
             }
             return;
         }
-        let init = self.init_json(if kind == ui::Kind::Main { "index" } else { "bar" }, tab);
-        let w = ui::open(kind, target, &init, self.proxy.clone(), UserEvent::Ipc);
+        let w = ui::open(kind, target);
         if w.is_none() {
-            log("WebView2 indisponible : impossible d'ouvrir la fenêtre");
-        }
-        if kind == ui::Kind::Main && w.is_some() {
-            // Filet de sécurité : la page n'a pas dit "ready" (WebView2 lent, erreur JS) -> on montre quand même.
-            let p = self.proxy.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(1500));
-                let _ = p.send_event(UserEvent::Ipc(ui::Kind::Main, r#"{"cmd":"ready"}"#.into()));
-            });
+            log("impossible de créer la fenêtre");
         }
         match kind {
-            ui::Kind::Main => self.main = w,
+            ui::Kind::Main => {
+                self.main = w;
+                if self.main.is_some() {
+                    let init = self.init_json("index", tab);
+                    let mut f = front::Front::new(&init, redraw_fn(&self.proxy, ui::Kind::Main));
+                    if f.intro.is_some() {
+                        sounds::play(sounds::Sound::Intro);
+                    }
+                    if let Some(t) = tab.and_then(front::Tab::parse) {
+                        f.select_tab(t);
+                    }
+                    for p in [self.cfg.out_dir.clone(), self.cfg.buffer_dir.clone()] {
+                        f.free.insert(p.clone(), disk_free(&p));
+                    }
+                    *self.front.borrow_mut() = Some(f);
+                    eco(false);
+                    // Première image dessinée avant d'afficher la fenêtre : jamais de cadre vide.
+                    self.draw(ui::Kind::Main, target);
+                    if let Some(w) = &self.main {
+                        w.window.set_visible(true);
+                        w.window.set_focus();
+                    }
+                }
+            }
             ui::Kind::Bar => self.bar = w,
+        }
+    }
+
+    /// Dessine une fenêtre : l'interface traite les entrées reçues, peint son tampon, Windows l'affiche.
+    /// Les commandes émises par l'interface sont ensuite exécutées comme avant (`ipc`).
+    fn draw(&mut self, kind: ui::Kind, target: &EventLoopWindowTarget<UserEvent>) {
+        let now = Instant::now();
+        let slot = if kind == ui::Kind::Main { &mut self.main } else { &mut self.bar };
+        let Some(win) = slot.as_mut() else { return };
+        if kind == ui::Kind::Bar && !win.window.is_visible() {
+            return;
+        }
+        win.fit();
+        let t_frame = Instant::now();
+        let (cmds, next) = {
+            let mut u = widgets::Ui { c: &mut win.canvas, i: &win.input, s: &mut win.st, now };
+            match kind {
+                ui::Kind::Main => {
+                    let mut f = self.front.borrow_mut();
+                    let Some(f) = f.as_mut() else { return };
+                    f.frame(&mut u);
+                    (std::mem::take(&mut f.out), f.next)
+                }
+                ui::Kind::Bar => {
+                    let mut b = self.barui.borrow_mut();
+                    b.frame(&mut u);
+                    (std::mem::take(&mut b.out), b.next)
+                }
+            }
+        };
+        front_b::PROF.lock().unwrap()[3] = t_frame.elapsed().as_secs_f32() * 1000.0;
+        let (hand, animating) = (win.st.hand, win.st.animating);
+        // Un clic, une touche ou la molette changent l'état pendant le dessin (section dépliée, liste
+        // ouverte…) : l'image suivante montre le résultat tout de suite, sans attendre un mouvement de souris.
+        let acted = win.input.pressed || win.input.released || win.input.rpressed || win.input.wheel != 0.0 || !win.input.keys.is_empty();
+        win.input.end_frame();
+        win.set_hand(hand);
+        win.present();
+        // Diagnostic du lecteur : images reçues de ffmpeg et dessins réellement faits, toutes les 2 s.
+        self.perf.0 += 1;
+        self.perf.1 += now.elapsed().as_secs_f32() * 1000.0;
+        if self.perf.2.elapsed().as_secs_f32() >= 2.0 {
+            let got = player::FRAMES.swap(0, std::sync::atomic::Ordering::Relaxed);
+            if got > 0 {
+                log(&format!("lecteur : {got} images reçues, {} dessins ({:.1} ms chacun) en {:.1} s, détail {:?}", self.perf.0, self.perf.1 / self.perf.0 as f32, self.perf.2.elapsed().as_secs_f32(), front_b::PROF.lock().unwrap()));
+            }
+            self.perf = (0, 0.0, Instant::now());
+        }
+        let i = (kind == ui::Kind::Bar) as usize;
+        self.wake[i] = if animating || acted || !cmds.is_empty() { Some(now + std::time::Duration::from_millis(15)) } else { next.map(|d| now + d) };
+        for c in cmds {
+            self.ipc(kind, &c.to_string(), target);
         }
     }
 
@@ -377,19 +466,16 @@ impl App {
         self.bar_gen += 1;
         self.open(ui::Kind::Bar, target, None); // créée si elle ne l'est pas encore
         self.bar_open = self.bar.is_some();
-        self.push_bar_show();
+        // État du moment, puis animation d'entrée.
+        let show = json!({"type": "show", "gen": self.bar_gen, "config": self.cfg, "hotkeys": self.hotkeys_json(),
+            "native": [self.native.0, self.native.1], "overlay_on": self.overlay_visible(),
+            "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs())});
+        self.barui.borrow_mut().on(&show);
+        eco(false);
         if let Some(w) = &self.bar {
             ui::show_bar(&w.window);
         }
-    }
-
-    /// État du moment (la page date de la création de la fenêtre), puis animation d'entrée.
-    fn push_bar_show(&self) {
-        if let Some(w) = &self.bar {
-            w.push(&json!({"type": "show", "gen": self.bar_gen, "config": self.cfg, "hotkeys": self.hotkeys_json(),
-                "native": [self.native.0, self.native.1], "overlay_on": self.overlay_visible(),
-                "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs())}).to_string());
-        }
+        self.draw(ui::Kind::Bar, target);
     }
 
     /// Ferme la barre : animation de sortie côté page (qui arrête aussi la lecture), fenêtre cachée 200 ms
@@ -399,8 +485,9 @@ impl App {
         if !std::mem::take(&mut self.bar_open) {
             return;
         }
+        self.barui.borrow_mut().on(&json!({"type": "hide"}));
         if let Some(w) = &self.bar {
-            w.push(&json!({"type": "hide"}).to_string());
+            w.window.request_redraw();
         }
         let (p, g) = (self.proxy.clone(), self.bar_gen);
         std::thread::spawn(move || {
@@ -459,15 +546,6 @@ impl App {
                 let items: Vec<(String, Value)> = m["values"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect();
                 self.set_many(&items);
             }
-            // 1re image peinte : la fenêtre apparaît directement sur l'intro, sans écran blanc.
-            "ready" => {
-                if let Some(w) = self.main.as_ref().filter(|w| !w.window.is_visible()) {
-                    w.window.set_visible(true);
-                    w.window.set_focus();
-                    // L'intro attend ce signal : sinon elle tournait déjà, fenêtre encore cachée.
-                    w.push(&json!({"type": "shown"}).to_string());
-                }
-            }
             // Vidéo en grand écran : la fenêtre suit (sinon la vidéo ne remplit que la fenêtre).
             "fullscreen" => {
                 if let Some(w) = &self.main {
@@ -492,26 +570,18 @@ impl App {
             // Fin de l'animation de sortie : la fenêtre est cachée (sauf si la barre a été rouverte entre-temps).
             "bar_hidden" => {
                 if !self.bar_open && m["gen"].as_u64() == Some(self.bar_gen) {
-                    if let Some(w) = &self.bar {
+                    if let Some(w) = &mut self.bar {
                         w.window.set_visible(false);
+                        w.release(); // tampon rendu : la barre cachée ne garde presque rien en mémoire
                     }
-                }
-            }
-            // Page de la barre chargée : si Alt+Z est arrivé avant, elle n'a pas reçu « show ».
-            "bar_ready" => {
-                if self.bar_open {
-                    self.push_bar_show();
+                    self.barui.borrow_mut().player.close();
+                    eco(self.main.is_none());
                 }
             }
             // Galerie de la barre : les derniers clips.
             "recent" => {
                 let c = self.cfg.clone();
                 self.bg(move |p| list_videos(&c, p, Some(4)));
-            }
-            "reload" => {
-                if self.main.take().is_some() {
-                    self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str));
-                }
             }
             "update_found" => {
                 self.update = m["version"].as_str().map(String::from);
@@ -553,7 +623,8 @@ impl App {
                     self.push(&json!({"type": "toast", "kind": "error", "text": "FFmpeg n'a pas pu être installé (winget)."}));
                 }
                 // Fenêtre rouverte : elle reçoit les nouveaux encodeurs et écrans.
-                if self.main.take().is_some() {
+                if self.main.is_some() {
+                    self.close_main();
                     self.open(ui::Kind::Main, target, None);
                 }
             }
@@ -565,12 +636,7 @@ impl App {
             }
             "close" => match kind {
                 // La page a déjà joué son fondu : fenêtre cachée d'abord, puis détruite (pas d'écran blanc).
-                ui::Kind::Main => {
-                    if let Some(w) = self.main.take() {
-                        w.window.set_visible(false);
-                    }
-                    trim_self();
-                }
+                ui::Kind::Main => self.close_main(),
                 // Échap ou clic dans le vide autour de la barre.
                 ui::Kind::Bar => self.hide_bar(m["refocus"].as_bool().unwrap_or(true)),
             },
@@ -602,17 +668,6 @@ impl App {
                 self.bg(move |p| list_videos(&c, p, None));
             }
             "video_action" => self.video_action(&s("action"), Path::new(&s("path")), &s("name")),
-            "video_preview" => {
-                let p = PathBuf::from(s("path"));
-                if p.parent() != Some(self.cfg.out_dir.as_path()) {
-                    return log("lecture refusée hors du dossier de sortie");
-                }
-                let (c, force) = (self.cfg.clone(), m["force"].as_bool().unwrap_or(false));
-                self.bg(move |_| match capture::preview(&c, &p, force) {
-                    Ok(url) => json!({"type": "preview", "path": p, "url": url}),
-                    Err(e) => json!({"type": "preview", "path": p, "error": e}),
-                });
-            }
             "levels" => {
                 let peak = |src: &audio::Source| f32::from_bits(src.peak.swap(0, std::sync::atomic::Ordering::Relaxed));
                 let (g, mi) = self.audio.as_ref().map_or((0.0, 0.0), |a| (peak(&a.game), peak(&a.mic)));
@@ -771,7 +826,6 @@ impl App {
         new.rec = new.clip; // une seule qualité : le REC réutilise toujours le buffer
         let keys_changed = (&new.key_clip, &new.key_rec, &new.key_bar, &new.key_overlay) != (&self.cfg.key_clip, &self.cfg.key_rec, &self.cfg.key_bar, &self.cfg.key_overlay);
         self.cfg = new;
-        ui::set_out_dir(&self.cfg.out_dir);
         if keys_changed {
             self.rebind_keys();
         }
@@ -798,6 +852,17 @@ impl App {
         } else {
             self.push(&json!({"type": "toast", "kind": "error", "text": "Relance impossible : fermez puis rouvrez Clipper."}));
         }
+    }
+
+    /// Ferme la fenêtre principale : cachée, détruite, son contenu (et le lecteur) libérés.
+    fn close_main(&mut self) {
+        if let Some(w) = self.main.take() {
+            w.window.set_visible(false);
+        }
+        *self.front.borrow_mut() = None;
+        self.wake[0] = None;
+        eco(!self.bar_open);
+        trim_self();
     }
 
     fn overlay_visible(&self) -> bool {
@@ -955,7 +1020,6 @@ fn main() {
 
     let hotkeys = GlobalHotKeyManager::new().expect("gestionnaire de raccourcis");
     let keys = register_keys(&hotkeys, &cfg);
-    ui::set_out_dir(&cfg.out_dir);
 
     overlay::apply(&cfg, false);
     overlay::start();
@@ -964,6 +1028,7 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs(10));
         trim_self();
     });
+    let bar_ui = barui::BarUi::new(&cfg, redraw_fn(&event_loop.create_proxy(), ui::Kind::Bar));
     let mut app = App {
         cfg,
         encoders,
@@ -981,6 +1046,10 @@ fn main() {
         overlay_shown: false,
         main: None,
         bar: None,
+        front: std::cell::RefCell::new(None),
+        barui: std::cell::RefCell::new(bar_ui),
+        wake: [None, None],
+        perf: (0, 0.0, Instant::now()),
         bar_prev: 0,
         bar_gen: 0,
         keys,
@@ -998,6 +1067,14 @@ fn main() {
 
     event_loop.run(move |event, target, flow| {
         *flow = ControlFlow::Wait;
+        // Souris, clavier, taille : traduits pour l'interface de la fenêtre concernée, qui se redessine.
+        if let Event::WindowEvent { window_id, event: ref we, .. } = event {
+            for win in [&mut app.main, &mut app.bar].into_iter().flatten() {
+                if win.window.id() == window_id && win.event(we) {
+                    win.window.request_redraw();
+                }
+            }
+        }
         match event {
             Event::NewEvents(StartCause::Init) => {
                 // Mises à jour : une requête GitHub, 10 s après le lancement (rien pendant le démarrage).
@@ -1071,9 +1148,6 @@ fn main() {
                     _ => {} // fin de REC : son déjà joué à l'appui
                 }
                 log(&format!("{kind} : {r:?}"));
-                if let Ok(p) = &r {
-                    prewarm(&app.cfg, vec![p.clone()], &app.proxy); // lisible dans l'app dès l'ouverture
-                }
                 let msg = match &r {
                     Ok(p) => {
                         // Durée réelle du fichier (pas celle du réglage) : un clip trop court se voit tout de suite.
@@ -1092,12 +1166,8 @@ fn main() {
                 }
             }
             Event::WindowEvent { window_id, event: tao::event::WindowEvent::CloseRequested, .. } => {
-                // Fenêtre détruite = processus WebView2 libérés.
                 if app.main.as_ref().is_some_and(|w| w.window.id() == window_id) {
-                    if let Some(w) = app.main.take() {
-                        w.window.set_visible(false);
-                    }
-                    trim_self(); // la fenêtre et son WebView2 sont partis
+                    app.close_main();
                 } else if app.bar.as_ref().is_some_and(|w| w.window.id() == window_id) {
                     app.hide_bar(true);
                 }
@@ -1106,6 +1176,15 @@ fn main() {
             Event::WindowEvent { window_id, event: tao::event::WindowEvent::Focused(false), .. } => {
                 if app.bar.as_ref().is_some_and(|w| w.window.id() == window_id) {
                     app.hide_bar(false);
+                }
+            }
+            Event::RedrawRequested(window_id) => {
+                let kind = if app.bar.as_ref().is_some_and(|w| w.window.id() == window_id) { ui::Kind::Bar } else { ui::Kind::Main };
+                app.draw(kind, target);
+            }
+            Event::UserEvent(UserEvent::Redraw(kind)) => {
+                if let Some(w) = if kind == ui::Kind::Main { &app.main } else { &app.bar } {
+                    w.window.request_redraw();
                 }
             }
             Event::UserEvent(UserEvent::TrayClick) => app.open(ui::Kind::Main, target, None),
@@ -1133,11 +1212,29 @@ fn main() {
                 for w in [&app.main, &app.bar].into_iter().flatten() {
                     w.window.set_visible(false); // cachées avant d'être détruites : pas d'écran blanc
                 }
+                *app.front.borrow_mut() = None; // arrête aussi le lecteur
+                app.barui.borrow_mut().player.close();
                 (app.main, app.bar) = (None, None);
                 tray.take();
                 *flow = ControlFlow::Exit;
             }
             _ => {}
+        }
+        // Dessins programmés (animation en cours, compteur REC, notification qui s'efface) : la boucle dort
+        // jusqu'au prochain ; sans rien de programmé, elle ne se réveille que sur un événement.
+        let now = Instant::now();
+        for (i, slot) in [&app.main, &app.bar].into_iter().enumerate() {
+            if app.wake[i].is_some_and(|t| t <= now) {
+                app.wake[i] = None;
+                if let Some(w) = slot {
+                    w.window.request_redraw();
+                }
+            }
+        }
+        if *flow != ControlFlow::Exit {
+            if let Some(t) = app.wake.iter().flatten().min() {
+                *flow = ControlFlow::WaitUntil(*t);
+            }
         }
         if app.recording.is_some() != shown_rec {
             shown_rec = app.recording.is_some();
