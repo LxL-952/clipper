@@ -205,7 +205,12 @@ pub fn install(exe: &Path) -> Result<(), String> {
         WaitForSingleObject(info.hProcess, INFINITE);
         GetExitCodeProcess(info.hProcess, &mut code);
     }
-    if code == 0 { Ok(()) } else { Err(format!("L'installateur NVIDIA a renvoyé le code {code}.")) }
+    match code {
+        0 => Ok(()),
+        _ => Err(format!(
+            "L'installateur NVIDIA a échoué (code 0x{code:08X}). Une autre installation de pilote est peut-être en cours : attendez qu'elle finisse, ou redémarrez le PC, puis réessayez"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +278,18 @@ mod live_download {
         println!("résultat {r:?} en {:.0} s", t.elapsed().as_secs_f64());
         assert!(r.is_ok());
         println!("taille {} octets", std::fs::metadata(&dest).unwrap().len());
+    }
+
+    /// Même chemin que le bouton « Installer » de Clipper : installateur NVIDIA en silencieux, UAC Windows.
+    #[test]
+    #[ignore = "installe le pilote"]
+    fn install_downloaded() {
+        let l = super::latest("NVIDIA GeForce RTX 4060 Laptop GPU", false).unwrap();
+        let dest = std::path::PathBuf::from(std::env::var("CLIPPER_DL").unwrap()).join(format!("{}.exe", l.version));
+        let t = std::time::Instant::now();
+        let r = super::install(&dest);
+        println!("installation {r:?} en {:.0} s", t.elapsed().as_secs_f64());
+        assert!(r.is_ok());
     }
 }
 

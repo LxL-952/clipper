@@ -14,6 +14,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Le processus de Clipper tourne sous la normale (le jeu passe avant) et ses enfants en héritent : le
 /// décodage du lecteur, lui, sert l'utilisateur qui regarde, il garde la priorité normale.
 const NORMAL_PRIORITY: u32 = 0x0000_0020;
+/// Cadence des images envoyées par ffmpeg pendant la lecture (clips à 30 ou 60 images/s).
+const PLAY_FPS: f64 = 60.0;
 
 /// Images reçues de ffmpeg (diagnostic : comparé au nombre de dessins dans le journal).
 pub static FRAMES: AtomicU32 = AtomicU32::new(0);
@@ -36,9 +38,10 @@ pub struct Player {
     pub vol: f32,
     pub muted: bool,
     gain: Arc<AtomicU32>,
-    /// Position au lancement des ffmpeg en cours, et instant de ce lancement.
+    /// Position au lancement des ffmpeg en cours, et instant où la première image est arrivée : le son
+    /// attend cet instant pour partir, et la position n'avance qu'à partir de lui (son et image calés).
     base: f64,
-    t0: Option<Instant>,
+    t0: Arc<Mutex<Option<Instant>>>,
     /// Taille d'image demandée à ffmpeg (pixels physiques, paire).
     size: (u32, u32),
     /// Numéro de lancement : les fils d'un ancien lancement s'arrêtent d'eux-mêmes.
@@ -65,7 +68,7 @@ impl Player {
             muted: false,
             gain: Arc::new(AtomicU32::new(1f32.to_bits())),
             base: 0.0,
-            t0: None,
+            t0: Arc::new(Mutex::new(None)),
             size: (640, 360),
             run: Arc::new(AtomicU64::new(0)),
             frame: Arc::new(Mutex::new(None)),
@@ -99,7 +102,7 @@ impl Player {
 
     /// Position de lecture, en secondes.
     pub fn pos(&self) -> f64 {
-        let p = match (self.playing, self.t0) {
+        let p = match (self.playing, *self.t0.lock().unwrap()) {
             (true, Some(t)) => self.base + t.elapsed().as_secs_f64() * self.rate as f64,
             _ => self.base,
         };
@@ -131,9 +134,8 @@ impl Player {
     /// Saute à `t` secondes (pendant un glissement : regroupé, voir `tick`).
     pub fn seek(&mut self, t: f64) {
         self.base = t.clamp(0.0, self.dur.max(0.0));
-        if self.playing {
-            self.t0 = Some(Instant::now());
-        }
+        // Position figée sur le point visé jusqu'à la première image du nouveau lancement.
+        *self.t0.lock().unwrap() = None;
         self.dirty = true;
     }
 
@@ -188,34 +190,48 @@ impl Player {
         self.dirty = false;
         self.last_spawn = Instant::now();
         self.ended.store(false, Ordering::Relaxed);
+        *self.t0.lock().unwrap() = None;
         let Some(file) = self.file.clone() else { return };
         let run = self.run.load(Ordering::Relaxed);
         let (w, h) = self.size;
         let mut c = Command::new(&self.ffmpeg);
-        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-hwaccel", "auto", "-ss", &format!("{:.3}", self.base)]);
-        if self.playing {
-            c.args(["-readrate", &self.rate.to_string()]);
-            // Sans avance initiale : par défaut ffmpeg lit d'abord 0,5 s d'un coup, l'image partait donc
-            // avec une demi-seconde d'avance sur le son.
-            if no_burst(&self.ffmpeg) {
-                c.args(["-readrate_initial_burst", "0.001"]);
-            }
-        }
+        // Pas de -readrate : il réglait aussi le rythme des images décodées avant le point visé (jusqu'à
+        // une image clé, 2 s plus tôt), d'où une image très en retard sur le son après un saut. ffmpeg
+        // décode au plus vite, le fil de lecture ci-dessous cale chaque image sur l'horloge.
+        // Décodage logiciel : première image en ~160 ms contre ~430 ms avec -hwaccel (préparation du
+        // décodeur de la carte à chaque lancement), et 10 s de HEVC 1080p60 décodées en ~1 s.
+        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", self.base)]);
         c.arg("-i").arg(&file).args(["-map", "0:v:0", "-an", "-sn"]);
         if !self.playing {
             c.args(["-frames:v", "1"]);
         }
-        // Image entière dans le cadre, bandes noires autour si le format diffère.
-        let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=bgra");
+        // Image entière dans le cadre, bandes noires autour si le format diffère. Bicubique : la réduction
+        // bilinéaire rapide rendait l'image floue. En lecture, 60 images/s fixes (cadence connue du fil).
+        let fps = if self.playing { format!("fps={PLAY_FPS},") } else { String::new() };
+        let vf = format!("{fps}scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=bgra");
+        let step = Duration::from_secs_f64(1.0 / (PLAY_FPS * self.rate.max(0.1) as f64));
         c.args(["-vf", &vf, "-f", "rawvideo", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         if let Ok(mut child) = c.spawn() {
             if let Some(mut out) = child.stdout.take() {
-                let (cur, frame, ended, wake, playing) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.playing);
+                let (cur, frame, ended, wake, playing, t0) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.playing, self.t0.clone());
                 std::thread::spawn(move || {
                     let mut buf = vec![0u8; (w * h * 4) as usize];
+                    let mut i = 0u32;
                     while out.read_exact(&mut buf).is_ok() {
                         if cur.load(Ordering::Relaxed) != run {
                             return;
+                        }
+                        if playing {
+                            // Image n à t0 + n images : la première fixe t0 (et libère le son).
+                            let start = *t0.lock().unwrap().get_or_insert_with(Instant::now);
+                            let due = start + step * i;
+                            i += 1;
+                            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                                std::thread::sleep(wait);
+                            }
+                            if cur.load(Ordering::Relaxed) != run {
+                                return;
+                            }
                         }
                         let mut f = frame.lock().unwrap();
                         match f.as_mut().filter(|f| f.w == w && f.h == h) {
@@ -234,13 +250,8 @@ impl Player {
             }
             self.kids.push(child);
         }
-        if self.playing {
-            self.t0 = Some(Instant::now());
-            if self.audio_tracks > 0 {
-                self.spawn_audio(&file, run);
-            }
-        } else {
-            self.t0 = None;
+        if self.playing && self.audio_tracks > 0 {
+            self.spawn_audio(&file, run);
         }
     }
 
@@ -259,9 +270,9 @@ impl Player {
         c.args(["-f", "f32le", "-ar", "48000", "-ac", "2", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = c.spawn() else { return };
         if let Some(out) = child.stdout.take() {
-            let (cur, gain) = (self.run.clone(), self.gain.clone());
+            let (cur, gain, t0) = (self.run.clone(), self.gain.clone(), self.t0.clone());
             std::thread::spawn(move || {
-                let _ = play_pcm(out, &cur, run, &gain);
+                let _ = play_pcm(out, &cur, run, &gain, &t0);
             });
         }
         self.kids.push(child);
@@ -286,21 +297,6 @@ impl Player {
     }
 }
 
-/// Ce ffmpeg connaît-il `-readrate_initial_burst` (versions 6.1 et suivantes) ? Essai unique, gardé.
-fn no_burst(ffmpeg: &str) -> bool {
-    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| {
-        Command::new(ffmpeg)
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["-v", "quiet", "-readrate", "1", "-readrate_initial_burst", "0.001", "-f", "lavfi", "-i", "color=s=16x16:d=0.02", "-f", "null", "-"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
-}
-
 impl Drop for Player {
     fn drop(&mut self) {
         self.kill();
@@ -308,7 +304,9 @@ impl Drop for Player {
 }
 
 /// Envoie le son décodé (f32, 48 kHz, stéréo) à la sortie par défaut de Windows, au rythme de la carte son.
-fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32) -> Result<(), Box<dyn std::error::Error>> {
+/// Le tampon est rempli d'avance, mais la lecture ne démarre qu'avec la première image (`t0`) : sans ça, le
+/// son partait avant l'image (démarrage du décodage vidéo, saut jusqu'au point visé).
+fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32, t0: &Mutex<Option<Instant>>) -> Result<(), Box<dyn std::error::Error>> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
     let _ = wasapi::initialize_mta();
     let dev = DeviceEnumerator::new()?.get_default_device(Direction::Render)?;
@@ -317,9 +315,13 @@ fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32) -> 
     // Tampon de 100 ms : assez pour ne pas hacher, assez court pour que pause et saut soient immédiats.
     client.initialize_client(&fmt, Direction::Render, StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: 1_000_000 }, None)?;
     let render = client.get_audiorenderclient()?;
-    client.start_stream()?;
     let mut buf = vec![0u8; 8 * 4800];
+    let mut started = false;
     while cur.load(Ordering::Relaxed) == run {
+        if !started && t0.lock().unwrap().is_some() {
+            client.start_stream()?;
+            started = true;
+        }
         let free = client.get_available_space_in_frames()? as usize;
         if free < 480 {
             std::thread::sleep(Duration::from_millis(5));
@@ -338,6 +340,8 @@ fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32) -> 
         }
         render.write_to_device(&buf[..n], None)?;
     }
-    let _ = client.stop_stream();
+    if started {
+        let _ = client.stop_stream();
+    }
     Ok(())
 }

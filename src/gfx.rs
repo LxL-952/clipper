@@ -136,11 +136,18 @@ fn fonts() -> &'static [fontdue::Font; 6] {
     static FONTS: OnceLock<[fontdue::Font; 6]> = OnceLock::new();
     FONTS.get_or_init(|| {
         let f = |b: &[u8]| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).expect("police embarquée");
+        // Texte : Arial de Windows (lue sur le disque, jamais copiée dans Clipper : sa licence ne le permet pas).
+        // Arial n'a que normal et gras : 400/500 -> normal, 600/700 -> gras. Absente : Geist embarquée.
+        let sys = |file: &str| {
+            let dir = std::env::var_os("WINDIR").map_or(std::path::PathBuf::from(r"C:\Windows"), std::path::PathBuf::from);
+            std::fs::read(dir.join("Fonts").join(file)).ok().and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok())
+        };
+        let (reg, bold) = (sys("arial.ttf"), sys("arialbd.ttf"));
         [
-            f(include_bytes!("../assets/geist-400.ttf")),
-            f(include_bytes!("../assets/geist-500.ttf")),
-            f(include_bytes!("../assets/geist-600.ttf")),
-            f(include_bytes!("../assets/geist-700.ttf")),
+            reg.clone().unwrap_or_else(|| f(include_bytes!("../assets/geist-400.ttf"))),
+            reg.unwrap_or_else(|| f(include_bytes!("../assets/geist-500.ttf"))),
+            bold.clone().unwrap_or_else(|| f(include_bytes!("../assets/geist-600.ttf"))),
+            bold.unwrap_or_else(|| f(include_bytes!("../assets/geist-700.ttf"))),
             f(include_bytes!("../assets/geist-mono-400.ttf")),
             f(include_bytes!("../assets/geist-mono-500.ttf")),
         ]

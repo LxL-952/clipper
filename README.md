@@ -35,7 +35,7 @@ ISCC.exe /DBin=D:\ct\release installer\clipper.iss
 En développement. Voir [tasks/plan.md](tasks/plan.md) pour ce qui est fait, testé, et ce qui reste.
 
 ## Licence
-Tous droits réservés, voir [LICENSE](LICENSE). Le code est publié pour être consulté uniquement : pas de copie, de modification, de redistribution ni d'usage commercial sans autorisation écrite. Les versions jusqu'à la 1.3.1 incluse ont été publiées sous licence MIT. Conditions d'utilisation affichées par l'installateur : [installer/conditions.txt](installer/conditions.txt).
+Tous droits réservés, voir [LICENSE](LICENSE). Le code est publié pour être consulté uniquement : pas de copie, de modification, de redistribution ni d'usage commercial sans autorisation écrite. Les versions de l'ancienne numérotation (avant le 10 novembre 2026, jusqu'à la 1.3.1) ont été publiées sous licence MIT ; la numérotation est repartie à 1.0.0 le 11 novembre 2026. Conditions d'utilisation affichées par l'installateur : [installer/conditions.txt](installer/conditions.txt).
 
 ## Polices
 Geist et Geist Mono : licence SIL Open Font License 1.1.

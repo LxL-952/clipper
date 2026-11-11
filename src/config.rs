@@ -52,7 +52,7 @@ pub struct Config {
     pub overlay_items: Vec<String>,
     /// Mesures de l'overlay accompagnées d'une courbe des 15 dernières secondes.
     pub overlay_graphs: Vec<String>,
-    /// "tl", "tr", "bl" ou "br".
+    /// "tl", "tc", "tr", "bl", "bc" ou "br" (haut / bas, puis gauche / milieu / droite).
     pub overlay_corner: String,
     /// "s", "m" ou "l".
     pub overlay_size: String,
@@ -60,6 +60,8 @@ pub struct Config {
     pub overlay_opacity: f32,
     /// Mise à jour des statistiques de l'overlay, en ms (250, 500, 1000 ou 2000).
     pub overlay_refresh_ms: u32,
+    /// Cartes graphiques affichées par l'overlay (noms complets, une ou plusieurs) ; vide = la carte NVIDIA.
+    pub overlay_gpus: Vec<String>,
     /// Animation et son du trombone à l'ouverture de la fenêtre.
     pub intro: bool,
     /// Sons de confirmation : début et fin de REC, clip enregistré, erreur.
@@ -74,6 +76,8 @@ pub struct Config {
     pub mic_denoise: bool,
     /// Lancement via la tâche planifiée « Clipper (administrateur) » : admin sans demande UAC.
     pub admin_mode: bool,
+    /// Bouton « – » : la fenêtre va dans la zone de notification (près de l'horloge) au lieu de la barre des tâches.
+    pub minimize_to_tray: bool,
 }
 
 impl Default for Config {
@@ -115,6 +119,7 @@ impl Default for Config {
             overlay_size: "m".into(),
             overlay_opacity: 0.7,
             overlay_refresh_ms: 250,
+            overlay_gpus: vec![],
             intro: true,
             sounds: true,
             update_check: true,
@@ -122,12 +127,30 @@ impl Default for Config {
             delete_confirm: true,
             mic_denoise: false,
             admin_mode: false,
+            minimize_to_tray: true,
         }
     }
 }
 
+/// %APPDATA%\Clipper, demandé à Windows (dossier connu du compte) plutôt qu'à la variable d'environnement :
+/// lancé par la tâche planifiée (mode administrateur), Clipper ne trouvait pas ce dossier par la variable,
+/// d'où réglages, journal et miniatures introuvables.
 pub fn dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Clipper")
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        use windows_sys::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath};
+        let mut p: windows_sys::core::PWSTR = std::ptr::null_mut();
+        let known = unsafe {
+            if SHGetKnownFolderPath(&FOLDERID_RoamingAppData, 0, std::ptr::null_mut(), &mut p) == 0 && !p.is_null() {
+                let n = (0..).take_while(|&i| *p.add(i) != 0).count();
+                Some(PathBuf::from(String::from_utf16_lossy(std::slice::from_raw_parts(p, n))))
+            } else {
+                None
+            }
+        };
+        known.or_else(|| std::env::var_os("APPDATA").map(PathBuf::from)).unwrap_or_default().join("Clipper")
+    })
+    .clone()
 }
 
 impl Config {

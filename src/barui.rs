@@ -206,7 +206,11 @@ impl BarUi {
         let hot = ui.hot(q);
         let hit = ui.click(wid, q);
         match bg {
-            Some(b) => ui.c.rrect(q, 7.0, if hot { hex(0xff9148) } else { b }),
+            // Bouton Clip : fond discret et fin contour orange (le bloc tout orange était trop voyant).
+            Some(b) => {
+                ui.c.rrect(q, 7.0, if hot { b.a(0.16) } else { b.a(0.08) });
+                ui.c.border(q, 7.0, 1.0, if hot { hex(0xff9148) } else { b.a(0.7) });
+            }
             None if hot => ui.c.rrect(q, 7.0, if ui.held(wid) { pal::LINE2 } else { pal::RAISE_H }),
             None => {}
         }
@@ -279,7 +283,7 @@ impl BarUi {
             ui.c.rect(r(*x + 4.0, 16.0, 1.0, 30.0), pal::LINE);
             *x += 11.0;
         };
-        let clip_st = (pal::SIGNAL_INK, pal::SIGNAL_INK.a(0.72), Some(if self.busy { pal::SIGNAL.a(0.6) } else { pal::SIGNAL }), 104.0);
+        let clip_st = (pal::SIGNAL, pal::TEXT3, Some(if self.busy { pal::SIGNAL.a(0.6) } else { pal::SIGNAL }), 104.0);
         let (hit, bw_) = self.bbtn(ui, id("b-clip"), x, y, Some("b-clip"), "Clip", &items[0].1, clip_st);
         if hit && !self.busy {
             self.busy = true;

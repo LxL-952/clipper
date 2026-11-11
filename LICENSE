@@ -11,9 +11,12 @@ L'installateur publié dans les releases peut être téléchargé, installé et 
 gratuitement, à titre personnel, selon les conditions affichées par l'installateur
 (installer/conditions.txt). Il ne peut pas être revendu ni redistribué.
 
-Les versions publiées jusqu'à la 1.3.1 incluse l'ont été sous licence MIT ; ce
-changement s'applique à toutes les versions suivantes.
+Les versions publiées avant le 10 novembre 2026 (ancienne numérotation, jusqu'à la
+1.3.1 incluse) l'ont été sous licence MIT. La numérotation est repartie à 1.0.0 le
+11 novembre 2026 : toutes les versions publiées depuis sont soumises à la présente
+licence.
 
 Les composants tiers gardent leur propre licence : PresentMon d'Intel (MIT,
 installer/third-party), polices Geist (SIL Open Font License 1.1), FFmpeg (GPL,
-non inclus).
+non inclus). L'interface utilise la police Arial de Windows, lue sur le PC et non
+incluse dans Clipper.

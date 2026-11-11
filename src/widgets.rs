@@ -65,6 +65,8 @@ pub struct UiState {
     pub active: u64,
     anims: HashMap<u64, Anim>,
     pub scroll: HashMap<u64, f32>,
+    /// Position visée par la molette (la position affichée y glisse).
+    pub scroll_to: HashMap<u64, f32>,
     /// Une animation est en cours : une autre image est nécessaire.
     pub animating: bool,
     /// Curseur « main » demandé pendant cette image.
@@ -523,24 +525,41 @@ impl<'a> Ui<'a> {
         let max = (content_h - view.h).max(0.0);
         let mut pos = self.s.scroll.get(&wid).copied().unwrap_or(0.0);
         let over = view.has(self.i.mouse) && self.s.popup.is_none() && self.s.block.is_none_or(|b| !b.has(self.i.mouse));
+        // Molette : 42 px par cran (100 px sautaient trop loin), avec un glissé de 0,14 s vers la cible.
+        // Position changée ailleurs (retour en haut d'une page…) : la cible la suit, sans animation.
+        const STEP: f32 = 42.0;
+        let akey = wid ^ 0x5C_0011_u64;
+        let shown = self.s.anims.get(&akey).map(|a| a.v);
+        let mut target = self.s.scroll_to.get(&wid).copied().unwrap_or(pos);
+        let mut snap = shown.is_none_or(|v| (v - pos).abs() > 0.5);
+        if snap {
+            target = pos;
+        }
         if over && self.i.wheel != 0.0 {
-            pos -= self.i.wheel * 100.0;
+            target = (target - self.i.wheel * STEP).clamp(0.0, max);
         }
         if max > 0.0 {
             let th = (view.h * view.h / content_h).max(28.0);
             let track = r(view.right() - 10.0, view.y, 10.0, view.h);
             let ty = view.y + (view.h - th) * (pos / max).clamp(0.0, 1.0);
-            let thumb = r(track.x + 3.0, ty + 3.0, 4.0, th - 6.0);
             if over && self.i.pressed && track.has(self.i.mouse) {
                 self.s.drag_scroll = Some((wid, if r(track.x, ty, 10.0, th).has(self.i.mouse) { self.i.mouse.1 - ty } else { th / 2.0 }));
             }
             if let Some((did, off)) = self.s.drag_scroll {
                 if did == wid && self.i.down {
-                    pos = ((self.i.mouse.1 - off - view.y) / (view.h - th)).clamp(0.0, 1.0) * max;
+                    // Barre tirée à la souris : suit la main, sans retard.
+                    target = ((self.i.mouse.1 - off - view.y) / (view.h - th)).clamp(0.0, 1.0) * max;
+                    snap = true;
                 }
             }
+        }
+        target = target.clamp(0.0, max);
+        self.s.scroll_to.insert(wid, target);
+        pos = self.anim(akey, target, if snap { 0.0 } else { 0.14 });
+        if max > 0.0 {
+            let th = (view.h * view.h / content_h).max(28.0);
             let ty = view.y + (view.h - th) * (pos / max).clamp(0.0, 1.0);
-            self.c.rrect(r(thumb.x, ty + 3.0, thumb.w, thumb.h), 2.0, pal::LINE2);
+            self.c.rrect(r(view.right() - 7.0, ty + 3.0, 4.0, th - 6.0), 2.0, pal::LINE2);
         }
         self.s.scroll.insert(wid, pos.clamp(0.0, max));
     }

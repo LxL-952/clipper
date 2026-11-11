@@ -502,7 +502,14 @@ impl Front {
         y += 38.0 + 20.0;
         y += ui.hint(x, y, w, if self.cfg.driver_branch == "studio" { "Studio : versions validées plus longtemps, pour les logiciels de création." } else { "Game Ready : optimisé pour les jeux sortis récemment." }) + 20.0;
         if self.drv.status == "error" {
-            let msg = format!("{} Vérifiez la connexion Internet.", if self.drv.error.is_empty() { "NVIDIA n'a pas répondu." } else { &self.drv.error });
+            // « Vérifiez la connexion » seulement pour une erreur réseau, pas pour un code de l'installateur.
+            let msg = if self.drv.error.is_empty() {
+                "NVIDIA n'a pas répondu. Vérifiez la connexion Internet.".to_string()
+            } else if self.drv.error.contains("Réseau") || self.drv.error.contains("Téléchargement") {
+                format!("{} Vérifiez la connexion Internet.", self.drv.error)
+            } else {
+                self.drv.error.clone()
+            };
             let (nh, (ax, ay)) = ui.note(x, y, w, Note::Err, "warn", &msg, 39.0);
             if ui.btn(id("dRetry"), r(ax, ay + 7.0, Ui::btn_w("Réessayer", true, Btn::N), 32.0), "Réessayer", Some("refresh"), Btn::N) {
                 self.check_driver();

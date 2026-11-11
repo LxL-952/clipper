@@ -48,7 +48,7 @@ fn ov_sample(k: &str) -> Option<(&'static str, &'static str, bool)> {
     Some(match k {
         "fps" => ("FPS", "142", true),
         "low1" => ("1% LOW", "98", false),
-        "frametime" => ("IMAGE", "7,0 ms", false),
+        "frametime" => ("MS/IMG", "7,0 ms", false),
         "cpu" => ("CPU", "23 %", false),
         "gpu" => ("GPU", "87 %", false),
         "cpu_temp" => ("CPU °C", "68", false),
@@ -169,7 +169,11 @@ impl Front {
                     let bw = rows.iter().map(|(a, b, _)| text_w(a, f) + 10.0 + text_w(b, f)).fold(0.0, f32::max) + 14.0;
                     let bh = rows.len() as f32 * lh + 10.0;
                     let cn = self.cfg.overlay_corner.as_str();
-                    let tx = if cn.ends_with('r') { m.right() - 22.0 - bw } else { m.x + 22.0 };
+                    let tx = match cn.chars().nth(1) {
+                        Some('r') => m.right() - 22.0 - bw,
+                        Some('c') => m.x + (m.w - bw) / 2.0,
+                        _ => m.x + 22.0,
+                    };
                     let ty = if cn.starts_with('b') { m.bottom() - 32.0 - bh } else { m.y + 22.0 };
                     let ax = ui.anim(id("ov-x"), tx, 0.3);
                     let ay = ui.anim(id("ov-y"), ty, 0.3);
@@ -508,14 +512,14 @@ impl Front {
                 }
                 cy -= 4.0;
                 cy += ui.hint(fx, cy, fw, "Courbe des 15 dernières secondes à côté de la valeur, comme Afterburner.") + 12.0;
-                // coin
-                self.lab(ui.c, x, cy, 75.0, "Coin", None);
-                let cb_ = r(fx, cy, 91.0, 75.0);
+                // position : haut ou bas, gauche, milieu ou droite
+                self.lab(ui.c, x, cy, 75.0, "Position", None);
+                let cb_ = r(fx, cy, 134.0, 75.0);
                 ui.c.rrect(cb_, 6.0, pal::WELL);
                 ui.c.border(cb_, 6.0, 1.0, pal::LINE);
                 let mut pick = None;
-                for (i, v) in ["tl", "tr", "bl", "br"].iter().enumerate() {
-                    let cell = r(fx + 4.0 + (i % 2) as f32 * 43.0, cy + 4.0 + (i / 2) as f32 * 35.0, 40.0, 32.0);
+                for (i, v) in ["tl", "tc", "tr", "bl", "bc", "br"].iter().enumerate() {
+                    let cell = r(fx + 4.0 + (i % 3) as f32 * 43.0, cy + 4.0 + (i / 3) as f32 * 35.0, 40.0, 32.0);
                     let on = self.cfg.overlay_corner == *v;
                     if on || ui.hot(cell) {
                         ui.c.rrect(cell, 3.0, pal::RAISE);
@@ -523,8 +527,12 @@ impl Front {
                     if ui.click(idn("corner", i), cell) {
                         pick = Some(*v);
                     }
-                    let mx = if i % 2 == 0 { cell.x + 6.0 } else { cell.right() - 15.0 };
-                    let my = if i / 2 == 0 { cell.y + 6.0 } else { cell.bottom() - 13.0 };
+                    let mx = match i % 3 {
+                        0 => cell.x + 6.0,
+                        1 => cell.x + (cell.w - 9.0) / 2.0,
+                        _ => cell.right() - 15.0,
+                    };
+                    let my = if i / 3 == 0 { cell.y + 6.0 } else { cell.bottom() - 13.0 };
                     ui.c.rrect(r(mx, my, 9.0, 7.0), 1.0, if on { pal::SIGNAL } else { pal::LINE2 });
                 }
                 if let Some(v) = pick {
@@ -534,10 +542,55 @@ impl Front {
                 self.lab(ui.c, x, cy, 38.0, "Taille", None);
                 self.seg_cfg(ui, "overlay_size", fx, cy, &[("Petite", json!("s")), ("Moyenne", json!("m")), ("Grande", json!("l"))], false);
                 cy += 38.0 + 12.0;
+                // Cartes mesurées (GPU %, température, VRAM) : une ou plusieurs, puce intégrée comprise.
+                let names = self.gpu_names.clone();
+                if names.len() > 1 {
+                    // Aucune cochée = la carte NVIDIA (ou la première) : affichée cochée.
+                    let chosen: Vec<String> = if self.cfg.overlay_gpus.iter().any(|g| names.contains(g)) {
+                        self.cfg.overlay_gpus.iter().filter(|g| names.contains(g)).cloned().collect()
+                    } else {
+                        names.iter().find(|n| n.contains("NVIDIA")).or(names.first()).cloned().into_iter().collect()
+                    };
+                    let (mut px, mut py) = (fx, cy);
+                    let mut toggled = None;
+                    for (i, n) in names.iter().enumerate() {
+                        let l = n.strip_prefix("NVIDIA ").unwrap_or(n);
+                        let cwid = (37.0 + text_w(l, F::s(12.5, 400)) + 2.0).ceil();
+                        if px + cwid > fx + fw + 0.5 {
+                            (px, py) = (fx, py + 38.0);
+                        }
+                        let (hit, cw_) = ui.chip(idn("gpus", i), px, py, l, chosen.contains(n), false);
+                        if hit {
+                            toggled = Some(n.clone());
+                        }
+                        px += cw_ + 6.0;
+                    }
+                    self.lab(ui.c, x, cy, py + 32.0 - cy, "Cartes mesurées", None);
+                    if let Some(n) = toggled {
+                        let mut on = chosen.clone();
+                        if on.contains(&n) {
+                            // Toujours au moins une carte.
+                            if on.len() > 1 {
+                                on.retain(|g| *g != n);
+                            }
+                        } else {
+                            on.push(n);
+                        }
+                        let ordered: Vec<&String> = names.iter().filter(|g| on.contains(g)).collect();
+                        self.set("overlay_gpus", json!(ordered));
+                    }
+                    cy = py + 32.0 + 6.0;
+                }
+                let t = if names.is_empty() {
+                    "GPU, température GPU et VRAM : aucune carte graphique trouvée.".to_string()
+                } else {
+                    "GPU, température GPU et VRAM : une ligne par carte cochée. Température : cartes NVIDIA seulement (« n/d » pour une puce AMD ou Intel, illisible sans le logiciel du fabricant).".to_string()
+                };
+                cy += ui.hint(fx, cy, fw, &t) + 12.0;
                 self.lab(ui.c, x, cy, 38.0, "Mise à jour", Some("des chiffres"));
                 self.seg_cfg(ui, "overlay_refresh_ms", fx, cy, &[("0,25 s", json!(250)), ("0,5 s", json!(500)), ("1 s", json!(1000)), ("2 s", json!(2000))], true);
                 cy += 38.0 + 12.0;
-                cy += ui.hint(fx, cy, fw, "Le 1 % low est calculé sur les 10 dernières secondes : la moyenne des 1 % d'images les plus lentes, comme Afterburner et CapFrameX.") + 12.0;
+                cy += ui.hint(fx, cy, fw, "FPS et MS/IMG (temps moyen d'une image, 1000 ÷ FPS) comptent les images du frame gen (DLSS, FSR) comme le compteur NVIDIA. Le 1 % low est calculé sur les 10 dernières secondes : la moyenne des 1 % d'images les plus lentes, comme Afterburner et CapFrameX.") + 12.0;
                 self.lab(ui.c, x, cy, 34.0, "Opacité du fond", None);
                 let pct = (self.cfg.overlay_opacity * 100.0).round();
                 let (s, _) = self.fader(ui, id("op"), fx, cy + 1.0, fw, pct, (0.0, 100.0, 5.0), (&format!("{pct:.0}"), " %"), None);
@@ -585,6 +638,12 @@ impl Front {
                 self.autostart = !self.autostart;
                 let v = self.autostart;
                 self.send(json!({"cmd": "autostart", "value": v}));
+            }
+            cy = self.sw_sep(ui.c, x, cy + hh, w);
+            let tray = self.cfg.minimize_to_tray;
+            let (hit, hh) = self.sw_row(ui, id("traySw"), x, cy, w, "Réduire dans la zone de notification", "Le bouton « – » range Clipper près de l'horloge (flèche en bas à droite), sans icône dans la barre des tâches.", tray, false);
+            if hit {
+                self.set("minimize_to_tray", json!(!tray));
             }
             cy = self.sw_sep(ui.c, x, cy + hh, w);
             let on = self.cfg.admin_mode;

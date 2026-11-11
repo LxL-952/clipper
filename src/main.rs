@@ -10,6 +10,7 @@ mod front;
 mod front_a;
 mod front_b;
 mod gfx;
+mod gpus;
 mod overlay;
 mod player;
 #[cfg(test)]
@@ -80,6 +81,10 @@ fn lower_priority() {
 /// mode la rendait saccadée (lecteur à faible cadence, listes lentes). Remis dès que tout est fermé.
 fn eco(on: bool) {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation};
+    use windows_sys::Win32::System::Threading::{BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, SetPriorityClass};
+    // Fenêtre affichée : priorité normale. Sous la normale, un jeu qui charge le processeur ne laissait à
+    // l'interface que quelques images par seconde (impression d'une appli à 10 i/s).
+    unsafe { SetPriorityClass(GetCurrentProcess(), if on { BELOW_NORMAL_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS }) };
     let s = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 } };
     unsafe { SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s as *const _ as _, std::mem::size_of_val(&s) as u32) };
 }
@@ -99,7 +104,17 @@ fn tray_icon_image() -> Icon {
 fn log(msg: &str) {
     use std::io::Write;
     let _ = std::fs::create_dir_all(config::dir());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(config::dir().join("log.txt")) {
+    let opened = std::fs::OpenOptions::new().create(true).append(true).open(config::dir().join("log.txt"));
+    // Journal inaccessible : l'erreur va dans %TEMP%\clipper-log.txt, sinon on ne saurait jamais pourquoi.
+    let opened = opened.or_else(|e| {
+        let alt = std::env::temp_dir().join("clipper-log.txt");
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(alt);
+        if let Ok(mut f) = f.as_ref() {
+            let _ = writeln!(f, "log.txt dans {} : {e}", config::dir().display());
+        }
+        f
+    });
+    if let Ok(mut f) = opened {
         // Heure locale : un bug signalé se retrouve dans le journal à la seconde près.
         let t = unsafe {
             let mut t = std::mem::zeroed();
@@ -346,7 +361,7 @@ impl App {
             "elevated": elevate::is_elevated(),
             "gpu_scale": capture::gpu_scaling(),
             "gpus": self.gpus, "chip": capture::effective_chip(&self.cfg, &self.gpus),
-            "cpu_temp": self.cpu_temp, "autostart": elevate::autostart(),
+            "cpu_temp": self.cpu_temp, "gpu_names": overlay::gpu_names(), "autostart": elevate::autostart(),
         })
     }
 
@@ -645,7 +660,11 @@ impl App {
                 ui::Kind::Bar => self.hide_bar(m["refocus"].as_bool().unwrap_or(true)),
             },
             "minimize" => {
-                if let Some(w) = &self.main {
+                // Option « Réduire dans la zone de notification » : la fenêtre disparaît (mémoire de l'interface
+                // libérée) et Clipper reste près de l'horloge ; sinon réduction classique dans la barre des tâches.
+                if self.cfg.minimize_to_tray {
+                    self.close_main();
+                } else if let Some(w) = &self.main {
                     w.window.set_minimized(true);
                 }
             }
@@ -709,7 +728,9 @@ impl App {
                     let prog = |done: u64, total: u64| {
                         let _ = p.send_event(UserEvent::Push(json!({"type": "driver_progress", "done": done, "total": total, "phase": "download"})));
                     };
+                    let mut ran = false; // installateur lancé (sinon : échec du téléchargement, rien à attendre)
                     let r = drivers::download(&url, &dest, prog).and_then(|exe| {
+                        ran = true;
                         let _ = p.send_event(UserEvent::Push(json!({"type": "driver_progress", "phase": "install", "done": 0, "total": 0})));
                         let r = drivers::install(&exe);
                         let _ = std::fs::remove_file(&exe);
@@ -720,7 +741,9 @@ impl App {
                     let mut after = String::new();
                     for _ in 0..10 {
                         after = drivers::installed().map(|g| g.driver).unwrap_or_default();
-                        if r.is_err() || (!after.is_empty() && after != before) {
+                        // Même en cas d'erreur de l'installateur : il renvoie parfois un code d'échec (0x80070005,
+                        // étape annexe refusée) alors que le pilote est bien installé. La version fait foi.
+                        if !ran || (!after.is_empty() && after != before) {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -730,7 +753,7 @@ impl App {
                     }
                     log(&format!("pilote : {before} -> {after} ({r:?})"));
                     match r {
-                        Ok(()) if after != before => json!({"type": "driver_progress", "phase": "done", "done": 0, "total": 0, "installed": after}),
+                        _ if !after.is_empty() && after != before => json!({"type": "driver_progress", "phase": "done", "done": 0, "total": 0, "installed": after}),
                         Ok(()) => json!({"type": "driver_progress", "phase": "error", "done": 0, "total": 0,
                                          "error": format!("L'installateur NVIDIA s'est terminé mais le pilote est toujours en {before}. Redémarrez le PC puis vérifiez à nouveau ; sinon relancez l'installation.")}),
                         Err(e) => json!({"type": "driver_progress", "phase": "error", "error": e, "done": 0, "total": 0}),
@@ -808,7 +831,7 @@ impl App {
     /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
     fn set_many(&mut self, items: &[(String, Value)]) {
         // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode"];
+        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_gpus", "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "minimize_to_tray"];
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
         let mut restart = false;
         let reprobe = items.iter().any(|(k, _)| k == "monitor");
@@ -972,6 +995,7 @@ fn main() {
     let native = capture::native_size(&cfg).unwrap_or((1920, 1080));
     let monitors = capture::monitors(&cfg);
     log(&format!("encodeurs {encoders:?}, choisi {}, écran {native:?}", cfg.encoder));
+    overlay::scan_installed_games();
     // Une seule fois au lancement : jamais pendant qu'un clip s'assemble.
     capture::clean_leftovers(&cfg.out_dir);
     let (buffer, audio) = App::start_capture(&cfg, native);
@@ -1179,7 +1203,20 @@ fn main() {
             // Clic ailleurs sur l'écran : la barre perd le focus et se ferme (avec son animation).
             Event::WindowEvent { window_id, event: tao::event::WindowEvent::Focused(false), .. } => {
                 if app.bar.as_ref().is_some_and(|w| w.window.id() == window_id) {
-                    app.hide_bar(false);
+                    // Clic dans le jeu (ou nulle part) : le focus lui est rendu comme avec Alt+Z, sinon certains
+                    // jeux (The Last of Us) ne reprenaient plus la souris dans leurs menus. Clic sur une autre
+                    // appli (Discord…) : elle garde le focus.
+                    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+                    let pid = |h: isize| {
+                        let mut p = 0u32;
+                        unsafe { GetWindowThreadProcessId(h as _, &mut p) };
+                        p
+                    };
+                    // Premier plan pas encore changé (la barre elle-même) : traité comme « nulle part ».
+                    let fg = unsafe { GetForegroundWindow() } as isize;
+                    let bar = app.bar.as_ref().map_or(0, |w| tao::platform::windows::WindowExtWindows::hwnd(&w.window) as isize);
+                    let game = app.bar_prev != 0 && (fg == 0 || fg == bar || pid(fg) == pid(app.bar_prev));
+                    app.hide_bar(game);
                 }
             }
             Event::RedrawRequested(window_id) => {

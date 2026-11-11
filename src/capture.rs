@@ -20,6 +20,32 @@ fn ffmpeg(cfg: &Config) -> Command {
     c
 }
 
+/// ffmpeg de l'enregistrement continu et du REC : priorité normale. Sous la normale, un jeu qui prend tout
+/// le processeur (compilation des shaders, chargement) l'affamait : plus aucun segment pendant 13 s, relance,
+/// et un trou dans le clip. L'encodage se fait sur la carte graphique : peu de processeur pris au jeu.
+fn ffmpeg_capture(cfg: &Config) -> Command {
+    const NORMAL: u32 = 0x0000_0020;
+    let mut c = ffmpeg(cfg);
+    c.creation_flags(CREATE_NO_WINDOW | NORMAL);
+    c
+}
+
+/// Refuse le mode « efficacité » (EcoQoS) pour un processus lancé : sans réglage explicite, Windows
+/// traitait les ffmpeg sans fenêtre comme du travail de fond (assemblage d'un clip en 7 s au lieu de 2 s).
+fn no_eco(ch: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Threading::{PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation};
+    let s = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: 0 };
+    unsafe { SetProcessInformation(ch.as_raw_handle() as _, ProcessPowerThrottling, &s as *const _ as _, std::mem::size_of_val(&s) as u32) };
+}
+
+/// Lance, sort du mode efficacité, attend la fin : pour les étapes d'un clip qu'on attend.
+fn run_now(mut c: Command) -> bool {
+    let Ok(mut ch) = c.spawn() else { return false };
+    no_eco(&ch);
+    ch.wait().is_ok_and(|s| s.success())
+}
+
 /// Encodeurs qui encodent vraiment une image sur cette machine (pas seulement compilés).
 /// FFmpeg utilisable ? S'il manque au PATH de Clipper (cas typique : installé par winget juste avant
 /// le lancement, PATH du processus pas encore relu), on le cherche dans le PATH à jour du registre et
@@ -104,9 +130,9 @@ pub fn output_size(class: u32, native: (u32, u32)) -> Option<(u32, u32)> {
 /// Débit vidéo en kb/s : base H.264 à 60 fps, ajusté codec, fps et curseur qualité.
 pub fn bitrate_kbps(h: u32, fps: u32, encoder: &str, quality: f32) -> u32 {
     let base = match h {
-        0..=1200 => 20_000.0,
-        1201..=1600 => 35_000.0,
-        _ => 70_000.0,
+        0..=1200 => 28_000.0,
+        1201..=1600 => 45_000.0,
+        _ => 80_000.0,
     };
     let fps_k = if fps <= 30 { 0.65 } else { 1.0 };
     let codec_k = if encoder.starts_with("hevc") || encoder.starts_with("av1") { 0.7 } else { 1.0 };
@@ -125,8 +151,10 @@ fn preset_args(encoder: &str, quality: f32) -> Vec<&'static str> {
         let p = if quality <= 1.0 { "p1" } else { "p2" };
         // Qualité constante : mesuré sur 60 s de jeu, CBR 14 Mb/s HEVC = 94 Mo VMAF 97,4 ; CQ 24 = 34 Mo
         // VMAF 97,0 (H.264 : 143 Mo -> 38 Mo, CQ 23). Même travail GPU, l'action garde le débit max.
-        let cq = if encoder.starts_with("h264") { "23" } else if encoder.starts_with("hevc") { "24" } else { "30" };
-        vec!["-preset", p, "-tune", "ll", "-rc", "vbr", "-cq", cq]
+        // Clips trouvés flous en jeu détaillé (The Last of Us) : 3 crans de qualité en plus, réglage « hq » (la
+        // faible latence de « ll » ne sert à rien, le clip est tamponné) et AQ spatiale (détails fins, textes).
+        let cq = if encoder.starts_with("h264") { "20" } else if encoder.starts_with("hevc") { "21" } else { "27" };
+        vec!["-preset", p, "-tune", "hq", "-rc", "vbr", "-cq", cq, "-spatial-aq", "1"]
     } else if encoder.ends_with("_amf") {
         // AMF reste en CBR : son mode qualité (QVBR 23) tombait à VMAF 85, visible.
         vec!["-quality", "speed", "-rc", "cbr"]
@@ -417,7 +445,7 @@ pub fn probe(cfg: &Config, p: &Path) -> Probe {
         return pr.clone();
     }
     let out = Command::new(cfg.ffmpeg.replace("ffmpeg", "ffprobe"))
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NO_WINDOW | 0x20) // priorité normale : sert au clip qu'on attend
         .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name:stream_tags=title", "-of", "json"])
         .arg(p)
         .output()
@@ -622,7 +650,7 @@ impl Buffer {
                     let _ = std::fs::remove_file(last);
                 }
                 let next = segments(&d).last().map_or(0, |p| seg_number(p) + 1);
-                let mut cmd = ffmpeg(&cfg);
+                let mut cmd = ffmpeg_capture(&cfg);
                 let _ = std::fs::rename(d.join("ffmpeg.log"), d.join("ffmpeg.prev.log"));
                 spawns += 1;
                 if let Ok(f) = std::fs::File::create(d.join("ffmpeg.log")) {
@@ -637,7 +665,10 @@ impl Buffer {
                         let _ = ch.kill();
                         break;
                     }
-                    Ok(ch) => *c.lock().unwrap() = Some(ch),
+                    Ok(ch) => {
+                        no_eco(&ch); // enregistrement continu : jamais ralenti par Windows
+                        *c.lock().unwrap() = Some(ch);
+                    }
                     Err(_) => {
                         std::thread::sleep(Duration::from_secs(5));
                         continue;
@@ -753,12 +784,44 @@ pub fn concat(cfg: &Config, segs: &[PathBuf], out: &Path) -> Result<(), String> 
         "mov" => "mov",
         _ => "mp4",
     };
-    let mut c = ffmpeg(cfg);
-    c.args(["-loglevel", "error", "-f", "concat", "-safe", "0", "-i"]).arg(&list).args(["-map", "0", "-c", "copy"]);
-    if cfg.container != "mkv" {
-        c.args(["-movflags", "+faststart"]);
-    }
-    let ok = c.args(["-f", format, "-y"]).arg(&part).status().is_ok_and(|s| s.success()) && std::fs::rename(&part, out).is_ok();
+    let run = |fast: bool| {
+        let mut c = ffmpeg_capture(cfg);
+        c.args(["-loglevel", "error"]);
+        let dir = segs[0].parent().filter(|d| segs.iter().all(|p| p.parent() == Some(*d)));
+        match dir {
+            // Segments .ts lus comme un seul flux (protocole concat) : 2 min assemblées en 0,6 s au lieu de
+            // 3,3 s avec le démultiplexeur concat, qui ouvre et analyse chaque fichier. Noms courts, dossier
+            // courant : la ligne de commande reste courte même pour un long REC.
+            Some(d) if fast => {
+                let names: Vec<String> = segs.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
+                c.current_dir(d).arg("-i").arg(format!("concat:{}", names.join("|")));
+            }
+            _ => {
+                c.args(["-f", "concat", "-safe", "0", "-i"]).arg(&list);
+            }
+        }
+        // Pas de « +faststart » : il réécrivait tout le fichier une 2e fois (double écriture disque). Disque
+        // occupé par un autre programme, un clip de 54 s passait de 2 s à 26 s. Les lecteurs, navigateurs et
+        // Discord lisent très bien l'index en fin de fichier.
+        c.args(["-map", "0", "-c", "copy"]);
+        c.args(["-f", format, "-y"]).arg(&part);
+        run_now(c)
+    };
+    // Flux continu attendu : durée proche du nombre de segments. Sinon (capture relancée entre deux
+    // segments, horodatages repartis de zéro), assemblage refait fichier par fichier.
+    let want = f64::from(segs.len() as u32 * SEG_SECS);
+    let t0 = std::time::Instant::now();
+    let fast_ran = run(true);
+    let t_fast = t0.elapsed().as_secs_f32();
+    let got = if fast_ran { probe(cfg, &part).secs } else { 0.0 };
+    let fast_ok = fast_ran && (got - want).abs() <= f64::from(3 * SEG_SECS);
+    let ok = (fast_ok || run(false)) && std::fs::rename(&part, out).is_ok();
+    crate::log(&format!(
+        "assemblage : {} segments en {:.1} s ({}, rapide {t_fast:.1} s, durée {got:.0} s pour {want:.0} s)",
+        segs.len(),
+        t0.elapsed().as_secs_f32(),
+        if fast_ok { "rapide" } else { "lent, fichier par fichier" }
+    ));
     let _ = std::fs::remove_file(&list);
     if ok {
         Ok(())
@@ -793,15 +856,17 @@ fn save(cfg: &Config, segs: &[PathBuf], kind: &str) -> Result<PathBuf, String> {
     let thumbs = crate::config::dir().join("thumbs");
     let _ = std::fs::create_dir_all(&thumbs);
     let name = out.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    let _ = ffmpeg(cfg)
-        .args(["-loglevel", "quiet", "-ss", "1", "-i"]).arg(&out)
-        .args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"]).arg(thumbs.join(name + ".jpg"))
-        .status();
+    let mut t = ffmpeg_capture(cfg);
+    t.args(["-loglevel", "quiet", "-ss", "1", "-i"]).arg(&out)
+        .args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"]).arg(thumbs.join(name + ".jpg"));
+    run_now(t);
     Ok(out)
 }
 
 /// Un seul clip assemblé à la fois : deux appuis rapprochés ne s'écrasent plus.
 static SAVING: Mutex<()> = Mutex::new(());
+/// Heure d'écriture du dernier segment du clip précédent : le clip suivant commence après.
+static LAST_CLIP_END: Mutex<Option<std::time::SystemTime>> = Mutex::new(None);
 
 pub fn save_clip(cfg: &Config, dir: &Path) -> Result<PathBuf, String> {
     let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
@@ -815,12 +880,27 @@ pub fn save_clip(cfg: &Config, dir: &Path) -> Result<PathBuf, String> {
         }
         std::thread::sleep(Duration::from_millis(60));
     }
+    crate::log(&format!("clip : segment en cours attendu {:.1} s", pressed.elapsed().as_secs_f32()));
     let all = segments(dir);
     let mut segs = recent(all.clone(), cfg.buffer_secs, std::time::SystemTime::now());
     let newest = segs.pop(); // encore en cours d'écriture : jamais dans le clip, vide ou non
     segs.retain(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0));
     segs.extend(newest);
+    // Deux clips rapprochés : le second commence où le premier s'est arrêté (clip de 2 min puis un autre
+    // 20 s plus tard = 20 s, pas encore 2 min dont 1 min 40 déjà dans le premier). Par l'heure d'écriture,
+    // pas le numéro : les numéros repartent de zéro quand la capture est relancée.
+    let mtime = |p: &PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let last = *LAST_CLIP_END.lock().unwrap();
+    if let Some(end) = last {
+        segs.retain(|p| mtime(p).is_some_and(|t| t > end));
+        if segs.is_empty() {
+            return Err("Rien de nouveau depuis le dernier clip.".into());
+        }
+    }
     let pick = pick_segments(&segs, cfg.buffer_secs);
+    if let Some(t) = pick.last().and_then(mtime) {
+        *LAST_CLIP_END.lock().unwrap() = Some(t);
+    }
     if pick.is_empty() {
         let age = all.last().and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).and_then(|t| t.elapsed().ok()).map_or(-1, |d| d.as_secs() as i64);
         let err = std::fs::read_to_string(dir.join("ffmpeg.log")).unwrap_or_default();
@@ -920,7 +1000,7 @@ pub fn rec_start(cfg: &Config, buf: &Buffer) -> Result<(), String> {
     // Un seul .ts : lisible même si le PC s'arrête en plein REC.
     let format = if seg_ext(&cfg.encoder) == "mkv" { "matroska" } else { "mpegts" };
     a.extend(["-f".into(), format.into(), file.to_string_lossy().into_owned()]);
-    let mut cmd = ffmpeg(cfg);
+    let mut cmd = ffmpeg_capture(cfg);
     if let Ok(f) = std::fs::File::create(buf.dir.join("ffmpeg-rec.log")) {
         cmd.stderr(f);
     }
@@ -1011,10 +1091,10 @@ mod tests {
 
     #[test]
     fn bitrate_scales() {
-        assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 1.0), 20_000);
-        assert_eq!(bitrate_kbps(1080, 30, "h264_nvenc", 1.0), 13_000);
-        assert_eq!(bitrate_kbps(2160, 60, "hevc_nvenc", 1.0), 49_000);
-        assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 2.0), 40_000); // plafond du curseur
+        assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 1.0), 28_000);
+        assert_eq!(bitrate_kbps(1080, 30, "h264_nvenc", 1.0), 18_200);
+        assert_eq!(bitrate_kbps(2160, 60, "hevc_nvenc", 1.0), 56_000);
+        assert_eq!(bitrate_kbps(1080, 60, "h264_nvenc", 2.0), 56_000); // plafond du curseur
     }
 
     /// Vieux segments d'avant une relance (30 min) : jamais dans le clip, même s'il en manque pour 3 min.

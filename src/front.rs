@@ -92,9 +92,9 @@ pub struct Tools {
 }
 
 /// Réglages appliqués sans relancer la capture (même liste que dans main.rs).
-const LIVE: [&str; 21] = [
-    "driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms",
-    "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "mic_muted",
+const LIVE: [&str; 23] = [
+    "driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_gpus",
+    "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "mic_muted", "minimize_to_tray",
 ];
 
 pub struct Front {
@@ -111,6 +111,8 @@ pub struct Front {
     pub ffmpeg_ok: bool,
     pub ff_installing: bool,
     pub cpu_temp: bool,
+    /// Cartes NVIDIA mesurables par l'overlay (NVML).
+    pub gpu_names: Vec<String>,
     pub gpu_scale: Option<bool>,
     pub elevated: bool,
     pub autostart: bool,
@@ -277,6 +279,7 @@ impl Front {
             ffmpeg_ok: init["ffmpeg_ok"].as_bool() != Some(false),
             ff_installing: false,
             cpu_temp: init["cpu_temp"].as_bool() != Some(false),
+            gpu_names: init["gpu_names"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default(),
             gpu_scale: init["gpu_scale"].as_bool(),
             elevated: init["elevated"].as_bool().unwrap_or(false),
             autostart: init["autostart"].as_bool().unwrap_or(false),
@@ -1016,15 +1019,16 @@ impl Front {
     /// En-tête repliable d'une section (.grp). Renvoie (ouverte, y du contenu).
     pub fn grp(&mut self, ui: &mut Ui, key: &str, title: &str, x: f32, y: f32, w: f32) -> (bool, f32) {
         let open = self.fold(key);
-        let head = r(x, y + 18.0, w, 28.0);
+        // Titre lisible d'un coup d'œil (avant : petites capitales de 11 px, on se perdait entre sections).
+        let head = r(x, y + 16.0, w, 34.0);
         let hot = ui.hot(head);
         if ui.click(id(key), head) {
             self.toggle_fold(key);
         }
-        ui.c.text(x, head.y, 28.0, &title.to_uppercase(), F::s(11.0, 700).ls(0.1), pal::TEXT);
+        ui.c.text(x, head.y, 34.0, title, F::s(16.0, 600).ls(-0.01), if hot { pal::WHITE } else { pal::TEXT });
         let rot = ui.anim(id(key) ^ 7, if open { 90.0 } else { 0.0 }, 0.2);
-        ui.c.icon_rot("chev", x + w - 14.0, head.y + 7.0, 14.0, if hot { pal::TEXT } else { pal::TEXT3 }, rot);
-        (open, y + 18.0 + 28.0 + if open { 14.0 } else { 0.0 })
+        ui.c.icon_rot("chev", x + w - 16.0, head.y + 9.0, 16.0, if hot { pal::TEXT } else { pal::TEXT3 }, rot);
+        (open, y + 16.0 + 34.0 + if open { 14.0 } else { 0.0 })
     }
 
     /// Fin de section : marge basse et filet. Renvoie le y de la section suivante.
