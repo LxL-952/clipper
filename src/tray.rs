@@ -9,6 +9,7 @@ pub struct TrayMenu {
     pub clip: IconMenuItem,
     pub rec: IconMenuItem,
     pub ram: IconMenuItem,
+    pub clipping: IconMenuItem,
     pub quit: IconMenuItem,
     rec_key: String,
 }
@@ -102,25 +103,30 @@ impl TrayMenu {
             menu: Menu::new(),
             open: IconMenuItem::new("Ouvrir Clipper", true, i_open, None),
             // Ligne d'information (grisée), mise à jour au survol de l'icône.
-            temps: IconMenuItem::new("Températures…", false, i_temp, None),
+            // Texte de départ aussi long que la ligne finale : le menu prend sa largeur à l'ouverture, une
+            // valeur arrivée ensuite était coupée (la température du CPU disparaissait).
+            temps: IconMenuItem::new(temps_text(), false, i_temp, None),
             clip: IconMenuItem::new(format!("Enregistrer un clip\t{}", key_label(clip_key)), true, i_clip, None),
             rec: IconMenuItem::new(format!("Démarrer le REC\t{rec_key}"), true, i_rec, None),
             ram: IconMenuItem::new("Nettoyer la RAM", true, i_ram, None),
+            clipping: IconMenuItem::new("Désactiver le clipping", true, None, None),
             quit: IconMenuItem::new("Quitter Clipper", true, i_quit, None),
             rec_key,
         };
         let sep = || PredefinedMenuItem::separator();
-        let _ = m.menu.append_items(&[&m.open, &m.temps, &sep(), &m.clip, &m.rec, &m.ram, &sep(), &m.quit]);
+        let _ = m.menu.append_items(&[&m.open, &m.temps, &sep(), &m.clip, &m.rec, &m.clipping, &m.ram, &sep(), &m.quit]);
         m
     }
 
-    /// Au survol de l'icône : températures lues à cet instant (aucune minuterie en arrière-plan).
+    /// Au survol de l'icône : dernières températures connues, sans aucune lecture de capteur (instantané).
     pub fn refresh_temps(&self) {
-        let (gpu, cpu) = crate::overlay::temps();
-        let c = cpu.map_or("n/d".into(), |t| format!("{t:.0} °C"));
-        let g = gpu.map_or("n/d".into(), |t| format!("{t} °C"));
-        self.temps.set_text(format!("CPU {c}   ·   GPU {g}"));
+        self.temps.set_text(temps_text());
         redraw_open_menu();
+    }
+
+    /// Texte de l'interrupteur selon l'état du clipping.
+    pub fn set_clipping(&self, on: bool) {
+        self.clipping.set_text(if on { "Désactiver le clipping" } else { "Activer le clipping" });
     }
 
     pub fn set_recording(&self, on: bool) {
@@ -140,4 +146,29 @@ fn redraw_open_menu() {
             InvalidateRect(h, std::ptr::null(), 1);
         }
     }
+}
+
+/// Dernières températures lues (GPU, CPU) : gardées si une lecture échoue, « n/d » seulement si jamais lues.
+static TEMPS: std::sync::Mutex<(Option<u32>, Option<f64>)> = std::sync::Mutex::new((None, None));
+
+fn temps_text() -> String {
+    let (gpu, cpu) = *TEMPS.lock().unwrap();
+    let c = cpu.map_or("   n/d".into(), |t| format!("{t:>3.0} °C"));
+    let g = gpu.map_or("   n/d".into(), |t| format!("{t:>3} °C"));
+    format!("CPU {c}   ·   GPU {g}")
+}
+
+/// Lecture des capteurs en tâche de fond, toutes les 5 s, hors du fil de l'interface (le capteur ACPI peut
+/// mettre du temps à répondre). Pendant un jeu plein écran : aucune lecture, la dernière valeur reste.
+pub fn start_temp_cache() {
+    std::thread::spawn(|| loop {
+        let never = TEMPS.lock().unwrap().1.is_none() && TEMPS.lock().unwrap().0.is_none();
+        if never || !crate::capture::fullscreen_foreground() {
+            let (gpu, cpu) = crate::overlay::temps();
+            let mut t = TEMPS.lock().unwrap();
+            t.0 = gpu.or(t.0);
+            t.1 = cpu.or(t.1);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    });
 }

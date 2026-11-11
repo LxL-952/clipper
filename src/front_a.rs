@@ -267,6 +267,13 @@ impl Front {
             }
             y += 14.0;
         }
+        // Interrupteur général : coupé, plus aucune capture ni encodage ni son capté (buffer vidé).
+        let hint = if self.cfg.clipping { "Activé : les dernières minutes sont gardées pour Clip et REC." } else { "Désactivé : aucune capture, aucun encodage, 0 % processeur et GPU. Clip et REC ne font rien." };
+        let (hit, hh) = self.sw_row(ui, id("clipping"), x, y, w, "Clipping", hint, self.cfg.clipping, false);
+        if hit {
+            self.set("clipping", json!(!self.cfg.clipping));
+        }
+        y += hh;
         let hint = if self.cfg.desktop_capture { "Activée : le buffer tourne en permanence, même sur le bureau." } else { "Désactivée : le buffer ne tourne que pendant un jeu plein écran. 0 % GPU sur le bureau." };
         let (hit, hh) = self.sw_row(ui, id("desktop_capture"), x, y, w, "Capture du bureau", hint, self.cfg.desktop_capture, false);
         if hit {
@@ -364,6 +371,25 @@ impl Front {
         // Qualité et fichier
         let (open, mut cy) = self.grp(ui, "clip:q", "Qualité et fichier", x, y, w);
         if open {
+            // Profil d'encodage : le jeu d'abord par défaut (« Performance maximale »).
+            self.lab(ui.c, x, cy, 34.0, "Profil", None);
+            const PROFILES: [(&str, &str); 3] = [("perf", "Compétitif (recommandé)"), ("balanced", "Équilibré"), ("quality", "Qualité max")];
+            let opts: Vec<(String, bool)> = PROFILES.iter().map(|p| (p.1.to_string(), true)).collect();
+            if let Some(i) = ui.select(id("profile"), r(fx, cy, fw, 34.0), &opts, PROFILES.iter().position(|p| p.0 == self.cfg.profile).or(Some(0))) {
+                self.set("profile", json!(PROFILES[i].0));
+            }
+            cy += 34.0 + 6.0;
+            // Détail du profil choisi : ce qui est réellement enregistré.
+            let k = crate::capture::profile_k(&self.cfg.profile) * self.cfg.quality;
+            let mbps = crate::capture::bitrate_kbps(self.cfg.clip.height, self.cfg.clip.fps, &self.cfg.encoder, k) as f32 / 1000.0;
+            let what = match self.cfg.profile.as_str() {
+                "quality" => "préréglage p2 + AQ spatiale, débit +20 % : plus de détails, fichiers plus lourds, même charge d'encodeur.",
+                "balanced" => "préréglage p1 + AQ spatiale, débit +18 % : un peu plus de détails dans l'action rapide.",
+                _ => "préréglage p1 + AQ spatiale : environ 8 % du bloc d'encodage (séparé du rendu du jeu), pensé pour Valorant.",
+            };
+            let line = format!("{}p · {} i/s · {} · jusqu'à {:.0} Mb/s · {what} Si l'encodeur sature, Clipper s'allège tout seul.", self.cfg.clip.height, self.cfg.clip.fps, enc_label(&self.cfg.encoder), mbps);
+            cy += ui.hint(x, cy, w, &line);
+            cy += 10.0;
             self.lab(ui.c, x, cy, 34.0, "Encodeur", None);
             let opts: Vec<(String, bool)> = if self.encoders.is_empty() { vec![("Aucun encodeur détecté".into(), false)] } else { self.encoders.iter().map(|e| (enc_label(e), self.enc_ok(e))).collect() };
             if let Some(i) = ui.select(id("enc"), r(fx, cy, fw, 34.0), &opts, self.encoders.iter().position(|e| *e == self.cfg.encoder)) {

@@ -211,6 +211,9 @@ pub fn show_bar(w: &Window) {
         let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(GetForegroundWindow()) }.max(96) as f64 / 96.0;
         let (mw, mh) = ((m.right - m.left) as u32, (m.bottom - m.top) as u32);
         let size = PhysicalSize::new(((BAR_W * dpi) as u32).min(mw), ((BAR_H * dpi) as u32).min(mh));
+        // Déplacée sur l'écran du jeu AVANT d'être dimensionnée : passer d'un écran à 125 % à un écran à 100 %
+        // fait redimensionner la fenêtre par Windows (WM_DPICHANGED), la barre sortait tronquée des deux côtés.
+        w.set_outer_position(PhysicalPosition::new(m.left, m.top));
         w.set_inner_size(size);
         w.set_outer_position(PhysicalPosition::new(m.left + (mw as i32 - size.width as i32) / 2, m.top));
     }

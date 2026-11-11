@@ -40,6 +40,14 @@ pub struct BarUi {
     pend: Map<String, Value>,
     flush_at: Option<Instant>,
     pub next: Option<Duration>,
+    /// Bouton Supprimer armé (1er clic) : le 2e clic dans les 3 s supprime.
+    del_armed: Option<Instant>,
+    /// Ouverture du lecteur (animation d'entrée de la carte).
+    player_t0: Instant,
+    /// Dernier clic sur l'image (lecture / pause) : icône qui grossit et s'efface au centre.
+    tap: Option<(Instant, bool)>,
+    /// Glissement en cours sur la barre de temps du lecteur.
+    scrubbing: bool,
 }
 
 const BUF: [u32; 6] = [60, 90, 120, 180, 300, 600];
@@ -70,6 +78,10 @@ impl BarUi {
             pend: Map::new(),
             flush_at: None,
             next: None,
+            del_armed: None,
+            player_t0: now,
+            tap: None,
+            scrubbing: false,
         }
     }
 
@@ -110,6 +122,9 @@ impl BarUi {
 
     fn play(&mut self, path: PathBuf) {
         let Some((secs, audio, video)) = self.clips.iter().find(|c| c.path == path).map(|c| (c.secs, c.audio, c.video)) else { return };
+        if self.cur.is_none() {
+            self.player_t0 = Instant::now(); // la carte entre ; changer de clip ne la refait pas entrer
+        }
         self.cur = Some(path.clone());
         if video {
             self.player.open(&path, secs, audio);
@@ -175,7 +190,7 @@ impl BarUi {
                         }
                     })
                     .collect();
-                self.thumbs.retain(|k, _| self.clips.iter().any(|c| &c.stem == k));
+                self.thumbs.retain(|k, _| self.clips.iter().any(|c| c.stem == k.trim_end_matches('#')));
             }
             "toast" => {
                 self.busy = false;
@@ -223,12 +238,15 @@ impl BarUi {
         (hit, w)
     }
 
-    fn thumb(&mut self, stem: &str, w: u32, h: u32) -> Option<&tiny_skia::Pixmap> {
-        let stale = self.thumbs.get(stem).is_none_or(|t| t.as_ref().is_some_and(|p| (p.width(), p.height()) != (w, h)));
+    /// Miniature à la taille voulue, en cache. `big` : celle du lecteur, rangée à part de celle de la galerie
+    /// (sinon les deux tailles se remplaçaient et l'image était relue sur le disque à chaque dessin).
+    fn thumb(&mut self, stem: &str, w: u32, h: u32, big: bool) -> Option<&tiny_skia::Pixmap> {
+        let key = if big { format!("{stem}#") } else { stem.to_string() };
+        let stale = self.thumbs.get(&key).is_none_or(|t| t.as_ref().is_some_and(|p| (p.width(), p.height()) != (w, h)));
         if stale {
-            self.thumbs.insert(stem.to_string(), crate::front::load_thumb(stem, w, h));
+            self.thumbs.insert(key.clone(), crate::front::load_thumb(stem, w, h));
         }
-        self.thumbs.get(stem).and_then(|t| t.as_ref())
+        self.thumbs.get(&key).and_then(|t| t.as_ref())
     }
 
     pub fn frame(&mut self, ui: &mut Ui) {
@@ -396,7 +414,7 @@ impl BarUi {
                 let th = r(cell.x + 4.0, cell.y + 4.0, 150.0, 84.0);
                 ui.c.rrect(th, 5.0, hex(0x0c0f0b));
                 let (pw, ph) = ((th.w * ui.c.s).round() as u32, (th.h * ui.c.s).round() as u32);
-                if let Some(img) = self.thumb(&stem, pw, ph) {
+                if let Some(img) = self.thumb(&stem, pw, ph, false) {
                     ui.c.blit(img.data(), img.width(), img.height(), th.x, th.y);
                 }
                 let d = dur(secs);
@@ -413,16 +431,48 @@ impl BarUi {
             uy += q.h + 10.0;
         }
         // lecteur sur place
+        let mut delete: Option<PathBuf> = None;
+        let mut fade: Option<(R, f32)> = None;
         if let Some(path) = self.cur.clone() {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let pw = 780.0f32.min(w - 24.0);
+            // Plus grand qu'avant (780) : plus de pixels, aperçu plus net.
+            let pw = 960.0f32.min(w - 24.0);
             let sh = ((pw - 16.0) * 9.0 / 16.0).min(h - uy - 110.0).max(120.0);
             let sw = (sh * 16.0 / 9.0).min(pw - 16.0);
+            // Entrée de la carte : glisse de 14 px vers le bas et apparaît en fondu (0,24 s).
+            let pk = ease(now.duration_since(self.player_t0).as_secs_f32() / 0.24);
+            if pk < 1.0 {
+                ui.s.animating = true;
+            }
+            let oy0 = ui.c.oy;
+            ui.c.oy = oy0 - 14.0 * (1.0 - pk);
             let q = r(((w - pw) / 2.0).round(), uy, pw, 8.0 + 32.0 + 8.0 + sh + 8.0 + 30.0 + 8.0);
+            // Zone de la carte et de son ombre, en coordonnées du tampon : atténuée à la fin du dessin.
+            fade = Some((r(q.x - 20.0, q.y + ui.c.oy - 20.0, q.w + 40.0, q.h + 40.0), pk));
             card(ui, q);
             let b2 = Ui::btn_w("Fermer", false, Btn::N);
             let b1 = Ui::btn_w("Ouvrir dans Clipper", false, Btn::N);
-            ui.c.text_cut(q.x + 14.0, q.y + 8.0, 32.0, pw - 44.0 - b1 - b2, &name, F::s(13.0, 600), pal::TEXT);
+            // Supprimer : un 1er clic arme (bouton rouge « Confirmer », 3 s), le 2e supprime.
+            let armed = self.del_armed.is_some_and(|t| now.duration_since(t) < Duration::from_secs(3));
+            if self.del_armed.is_some() && !armed {
+                self.del_armed = None;
+            }
+            let dl = if armed { "Confirmer" } else { "Supprimer" };
+            let b3 = Ui::btn_w(dl, false, Btn::N);
+            let dq = r(q.right() - 24.0 - b2 - b1 - b3, q.y + 8.0, b3, 32.0);
+            if armed {
+                ui.c.rrect(dq, 7.0, pal::REC.a(0.22));
+                self.wake_in(Duration::from_millis(300));
+            }
+            if ui.btn(id("pl-del"), dq, dl, None, Btn::N) {
+                if armed {
+                    self.del_armed = None;
+                    delete = Some(path.clone());
+                } else {
+                    self.del_armed = Some(now);
+                }
+            }
+            ui.c.text_cut(q.x + 14.0, q.y + 8.0, 32.0, pw - 52.0 - b1 - b2 - b3, &name, F::s(13.0, 600), pal::TEXT);
             if ui.btn(id("pl-x"), r(q.right() - 8.0 - b2, q.y + 8.0, b2, 32.0), "Fermer", None, Btn::N) {
                 self.close_player();
             }
@@ -436,10 +486,34 @@ impl BarUi {
             if !video {
                 ui.c.text_in(scr, 0, "Ce fichier ne contient aucune image.", F::s(13.0, 500), pal::TEXT2);
             } else if !self.player.draw(ui.c, scr, 6.0) {
-                ui.c.text_in(scr, 0, "Préparation de la lecture…", F::s(13.0, 500), pal::TEXT2);
+                // En attendant la 1re image : la miniature du clip, agrandie (plus de texte qui clignote).
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                let (tw, th) = ((sh * 16.0 / 9.0 * ui.c.s).round() as u32, (sh * ui.c.s).round() as u32);
+                let x0 = scr.x + (scr.w - sh * 16.0 / 9.0) / 2.0;
+                let c = &mut *ui.c;
+                match self.thumb(&stem, tw, th, true) {
+                    Some(img) => c.blit(img.data(), img.width(), img.height(), x0, scr.y),
+                    None => ui.c.text_in(scr, 0, "Préparation de la lecture…", F::s(13.0, 500), pal::TEXT2),
+                }
             }
             if ui.click(id("pl-img"), scr) {
                 self.player.toggle();
+                self.tap = Some((now, self.player.playing));
+            }
+            // Retour du clic sur l'image : icône lecture / pause qui grossit et s'efface (0,5 s).
+            if let Some((t, play)) = self.tap {
+                let e = now.duration_since(t).as_secs_f32() / 0.5;
+                if e >= 1.0 {
+                    self.tap = None;
+                } else {
+                    ui.s.animating = true;
+                    let a = 1.0 - ease(e);
+                    let rad = 30.0 + 14.0 * ease(e);
+                    let (cx, cy) = (scr.x + scr.w / 2.0, scr.y + scr.h / 2.0);
+                    ui.c.circle(cx, cy, rad, pal::BLACK.a(0.55 * a));
+                    let is = rad * 0.8;
+                    ui.c.icon(if play { "play" } else { "pause" }, cx - is / 2.0, cy - is / 2.0, is, pal::TEXT.a(a));
+                }
             }
             // commandes
             let cy = scr.bottom() + 8.0;
@@ -469,7 +543,15 @@ impl BarUi {
             let mut p = (pos / d) as f32;
             if ui.s.active == id("seek") {
                 p = ((ui.mouse().0 - sk.x) / sk.w).clamp(0.0, 1.0);
-                self.player.seek(p as f64 * d);
+                let t = p as f64 * d;
+                // Images seules pendant le glissement (pas de son ni de relance de lecture à chaque pixel).
+                if (t - self.player.pos()).abs() > 0.03 || !self.scrubbing {
+                    self.player.scrub(t);
+                }
+                self.scrubbing = true;
+            } else if self.scrubbing {
+                self.scrubbing = false;
+                self.player.scrub_end();
             }
             ui.c.rrect(r(sk.x, sk.cy() - 1.5, sk.w, 3.0), 2.0, pal::TEXT.a(0.2));
             ui.c.rrect(r(sk.x, sk.cy() - 1.5, sk.w * p, 3.0), 2.0, pal::SIGNAL);
@@ -497,6 +579,13 @@ impl BarUi {
             ui.c.rrect(r(vol.x, vol.cy() - 1.5, vol.w, 3.0), 2.0, pal::TEXT.a(0.2));
             ui.c.rrect(r(vol.x, vol.cy() - 1.5, vol.w * v, 3.0), 2.0, pal::TEXT);
             ui.c.circle(vol.x + 5.0 + (vol.w - 10.0) * v, vol.cy(), 5.5, pal::TEXT);
+            ui.c.oy = oy0;
+        }
+        if let Some(path) = delete {
+            self.close_player(); // fichier libéré par ffmpeg avant la suppression
+            self.send(json!({"cmd": "video_action", "action": "delete", "path": path, "name": ""}));
+            self.clips.retain(|c| c.path != path);
+            self.send(json!({"cmd": "recent"}));
         }
         ui.c.oy = 0.0;
 
@@ -525,6 +614,19 @@ impl BarUi {
             }
         }
         ui.end();
+        // Fondu d'entrée de la carte du lecteur : seule sa zone est atténuée.
+        if let Some((z, a)) = fade.filter(|f| f.1 < 1.0) {
+            let s = ui.c.s;
+            let (pw, ph) = (ui.c.pm.width() as i32, ui.c.pm.height() as i32);
+            let (x0, y0) = (((z.x * s) as i32).clamp(0, pw), ((z.y * s) as i32).clamp(0, ph));
+            let (x1, y1) = ((((z.x + z.w) * s) as i32).clamp(0, pw), (((z.y + z.h) * s) as i32).clamp(0, ph));
+            let k = (a * 256.0) as u32;
+            let data = ui.c.pm.data_mut();
+            for y in y0..y1 {
+                let row = &mut data[((y * pw + x0) * 4) as usize..((y * pw + x1) * 4) as usize];
+                row.iter_mut().for_each(|b| *b = ((*b as u32 * k) >> 8) as u8);
+            }
+        }
         // Fondu d'entrée / de sortie : tout le tampon (prémultiplié) est atténué d'un coup.
         let alpha = if self.anim_out.is_some() { k } else { (now.duration_since(self.anim_in).as_secs_f32() / 0.16).min(1.0) };
         if alpha < 1.0 {

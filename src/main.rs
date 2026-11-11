@@ -87,6 +87,18 @@ fn eco(on: bool) {
     unsafe { SetPriorityClass(GetCurrentProcess(), if on { BELOW_NORMAL_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS }) };
     let s = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 } };
     unsafe { SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s as *const _ as _, std::mem::size_of_val(&s) as u32) };
+    // Fenêtre affichée : horloge de Windows à 1 ms. Sans ça, « redessiner dans 15 ms » attendait souvent
+    // 31 ms (pas de 15,6 ms) : animations et défilement à ~30 i/s ou moins. Rendue dès que tout est fermé.
+    static FINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if FINE.swap(!on, std::sync::atomic::Ordering::Relaxed) != !on {
+        unsafe {
+            if on {
+                windows_sys::Win32::Media::timeEndPeriod(1);
+            } else {
+                windows_sys::Win32::Media::timeBeginPeriod(1);
+            }
+        }
+    }
 }
 
 /// Rend au système la RAM froide de notre processus (pas celle des autres).
@@ -161,13 +173,50 @@ fn to_recycle_bin(p: &Path) -> bool {
     unsafe { SHFileOperationW(&mut op) == 0 }
 }
 
+/// Nom du sous-dossier d'un clip : titre de la fenêtre du jeu (« VALORANT », « Battlefield 6 »), ou
+/// « Bureau » pour le bureau, un navigateur, Discord, Clipper… Lit le titre et le nom de l'exe seulement.
+fn game_folder(h: isize) -> String {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowTextW, GetWindowThreadProcessId};
+    let h = h as windows_sys::Win32::Foundation::HWND;
+    if h.is_null() || h == unsafe { GetShellWindow() } {
+        return "Bureau".into();
+    }
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(h, &mut pid) };
+    let exe = overlay::process_table().get(&pid).map(|e| e.1.to_ascii_lowercase()).unwrap_or_default();
+    if exe.is_empty() || pid == std::process::id() || overlay::NOT_GAMES.contains(&exe.as_str()) {
+        return "Bureau".into();
+    }
+    let mut buf = [0u16; 128];
+    let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), 128) }.max(0) as usize;
+    let title = String::from_utf16_lossy(&buf[..n]);
+    folder_name(&title, &exe)
+}
+
+/// Titre nettoyé pour un nom de dossier Windows (sans ™ ® ni caractères interdits), sinon le nom de l'exe.
+fn folder_name(title: &str, exe: &str) -> String {
+    let clean: String = title.chars().filter(|c| !r#"\/:*?"<>|™®©"#.contains(*c) && !c.is_control()).collect();
+    let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clean: String = clean.chars().take(48).collect::<String>().trim_end_matches(['.', ' ']).to_string();
+    if clean.is_empty() { exe.trim_end_matches(".exe").to_string() } else { clean }
+}
+
+/// Le dossier de sortie, ou un de ses sous-dossiers de jeu.
+fn in_out_dir(cfg: &Config, path: &Path) -> bool {
+    let p = path.parent();
+    p == Some(cfg.out_dir.as_path()) || p.and_then(Path::parent) == Some(cfg.out_dir.as_path())
+}
+
 /// Vidéos du dossier de sortie, plus récentes d'abord. ffprobe en parallèle et en cache : liste immédiate.
 /// Les clips récents qui ne se lisent pas tels quels ont leur copie de lecture préparée en tâche de fond.
 fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>, limit: Option<usize>) -> Value {
-    let mut v: Vec<(std::time::SystemTime, PathBuf, u64)> = std::fs::read_dir(&cfg.out_dir)
+    // Le dossier de sortie et ses sous-dossiers de jeu (un niveau).
+    let top: Vec<std::fs::DirEntry> = std::fs::read_dir(&cfg.out_dir).into_iter().flatten().flatten().collect();
+    let subs = top.iter().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).flat_map(|e| std::fs::read_dir(e.path()).into_iter().flatten().flatten());
+    let all: Vec<std::fs::DirEntry> = subs.collect();
+    let mut v: Vec<(std::time::SystemTime, PathBuf, u64)> = top
         .into_iter()
-        .flatten()
-        .flatten()
+        .chain(all)
         .filter(|e| e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| ["mp4", "mkv", "mov"].contains(&x.to_ascii_lowercase().as_str())))
         .filter_map(|e| {
             let m = e.metadata().ok()?;
@@ -191,6 +240,7 @@ fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>, limit: Option<us
             json!({
                 "path": p, "name": name, "kind": if stem.starts_with("REC") { "REC" } else { "Clip" },
                 "bytes": bytes, "secs": pr.secs, "date": date, "video": video, "audio": audio,
+                "game": if p.parent() != Some(cfg.out_dir.as_path()) { p.parent().and_then(|d| d.file_name()).map(|d| d.to_string_lossy().into_owned()) } else { None },
             })
         })
         .collect();
@@ -219,6 +269,7 @@ struct Keys {
     rec: Option<HotKey>,
     bar: Option<HotKey>,
     overlay: Option<HotKey>,
+    clipping: Option<HotKey>,
     /// Raccourcis demandés mais pris par une autre app (NVIDIA, AMD…).
     conflicts: Vec<String>,
 }
@@ -246,7 +297,8 @@ fn register_keys(mgr: &GlobalHotKeyManager, cfg: &Config) -> Keys {
         None
     };
     let (clip, rec, bar, overlay) = (register(&cfg.key_clip), register(&cfg.key_rec), register(&cfg.key_bar), register(&cfg.key_overlay));
-    Keys { clip, rec, bar, overlay, conflicts }
+    let clipping = register(&cfg.key_clipping);
+    Keys { clip, rec, bar, overlay, clipping, conflicts }
 }
 
 /// Fonction donnée au lecteur vidéo : demande un nouveau dessin de la fenêtre depuis n'importe quel fil.
@@ -289,10 +341,14 @@ struct App {
     barui: std::cell::RefCell<barui::BarUi>,
     /// Prochain dessin programmé de chaque fenêtre (animation, compteur, notification) : [principale, barre].
     wake: [Option<Instant>; 2],
+    /// Dernier dessin de chaque fenêtre (plafond de cadence, voir `draw`).
+    last_draw: [Option<Instant>; 2],
     /// Diagnostic : (dessins, temps cumulé en ms, début de la période).
     perf: (u32, f32, Instant),
     /// Fenêtre au premier plan (le jeu) quand la barre s'est ouverte : elle reprend le focus à la fermeture.
     bar_prev: isize,
+    /// Dossier (du jeu) où le REC en cours sera enregistré.
+    rec_dir: PathBuf,
     /// Numéro de la barre ouverte : un « close » tardif d'une ancienne barre ne ferme pas la nouvelle.
     bar_gen: u64,
     keys: Keys,
@@ -306,6 +362,10 @@ struct App {
 
 impl App {
     fn start_capture(cfg: &Config, native: (u32, u32)) -> (Arc<capture::Buffer>, Option<Arc<audio::Audio>>) {
+        // Clipping désactivé : ni ffmpeg, ni capture du son, ni fil de surveillance ; segments effacés.
+        if !cfg.clipping {
+            return (Arc::new(capture::Buffer::idle(cfg.buffer_dir.clone())), None);
+        }
         let audio = (audio::pipe_count(cfg) > 0).then(|| audio::Audio::start(cfg));
         let buffer = Arc::new(capture::Buffer::start(cfg.clone(), native, cfg.buffer_dir.clone(), audio.clone()));
         (buffer, audio)
@@ -333,12 +393,12 @@ impl App {
 
     fn hotkeys_json(&self) -> Value {
         let k = |k: &Option<HotKey>| k.as_ref().map(pretty);
-        json!({"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay)})
+        json!({"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay), "clipping": k(&self.keys.clipping)})
     }
 
     /// Nouveaux raccourcis actifs tout de suite : les anciens sont libérés, les nouveaux enregistrés.
     fn rebind_keys(&mut self) {
-        let old: Vec<HotKey> = [self.keys.clip, self.keys.rec, self.keys.bar, self.keys.overlay].into_iter().flatten().collect();
+        let old: Vec<HotKey> = [self.keys.clip, self.keys.rec, self.keys.bar, self.keys.overlay, self.keys.clipping].into_iter().flatten().collect();
         if let Err(e) = self.hotkeys.unregister_all(&old) {
             log(&format!("raccourcis : libération impossible ({e})"));
         }
@@ -431,6 +491,16 @@ impl App {
         if kind == ui::Kind::Bar && !self.bar_open && !win.window.is_visible() {
             return;
         }
+        // Au plus un dessin toutes les 14 ms par fenêtre (~70 i/s) : chaque image du lecteur et chaque mouvement
+        // de souris en demandaient un (321 dessins en 2 s mesurés). Le suivant est programmé, rien n'est perdu.
+        let i = (kind == ui::Kind::Bar) as usize;
+        const GAP: std::time::Duration = std::time::Duration::from_millis(14);
+        if let Some(t) = self.last_draw[i].filter(|t| now.duration_since(*t) < GAP) {
+            let due = t + GAP;
+            self.wake[i] = Some(self.wake[i].map_or(due, |w| w.min(due)));
+            return;
+        }
+        self.last_draw[i] = Some(now);
         win.fit();
         let t_frame = Instant::now();
         let (cmds, next) = {
@@ -462,12 +532,10 @@ impl App {
         self.perf.1 += now.elapsed().as_secs_f32() * 1000.0;
         if self.perf.2.elapsed().as_secs_f32() >= 2.0 {
             let got = player::FRAMES.swap(0, std::sync::atomic::Ordering::Relaxed);
-            if got > 0 {
-                log(&format!("lecteur : {got} images reçues, {} dessins ({:.1} ms chacun) en {:.1} s, détail {:?}", self.perf.0, self.perf.1 / self.perf.0 as f32, self.perf.2.elapsed().as_secs_f32(), front_b::PROF.lock().unwrap()));
-            }
+            // Plus écrit dans le journal (une ligne toutes les 2 s pendant la lecture) : gardé pour le débogage.
+            let _ = got;
             self.perf = (0, 0.0, Instant::now());
         }
-        let i = (kind == ui::Kind::Bar) as usize;
         self.wake[i] = if animating || acted || !cmds.is_empty() { Some(now + std::time::Duration::from_millis(15)) } else { next.map(|d| now + d) };
         for c in cmds {
             self.ipc(kind, &c.to_string(), target);
@@ -519,14 +587,45 @@ impl App {
         }
     }
 
+    /// Fenêtre du jeu : celle d'avant la barre si elle est ouverte, sinon celle au premier plan.
+    fn game_window(&self) -> isize {
+        if self.bar_prev != 0 { self.bar_prev } else { unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as isize } }
+    }
+
+    /// Réglages avec le dossier de sortie du jeu en cours (« Clipper\Valorant », « Clipper\Bureau »…).
+    fn cfg_for_game(&self) -> Config {
+        let mut c = self.cfg.clone();
+        c.out_dir = c.out_dir.join(game_folder(self.game_window()));
+        c
+    }
+
+    /// Raccourci et menu de l'icône : coupe ou relance toute la capture, tout de suite, sans redémarrer.
+    fn toggle_clipping(&mut self) {
+        if self.recording.is_some() {
+            return self.push(&json!({"type": "toast", "kind": "error", "text": "Arrêtez le REC avant de désactiver le clipping."}));
+        }
+        let on = !self.cfg.clipping;
+        self.set("clipping", json!(on));
+        log(if on { "clipping activé" } else { "clipping désactivé : capture arrêtée" });
+        sound(&self.cfg, if on { sounds::Sound::RecStart } else { sounds::Sound::RecStop });
+    }
+
     fn clip(&self) {
-        let (c, b, p) = (self.cfg.clone(), self.buffer.clone(), self.proxy.clone());
+        if !self.cfg.clipping {
+            sound(&self.cfg, sounds::Sound::Error);
+            return self.push(&json!({"type": "toast", "kind": "error", "text": "Clipping désactivé : rien n'est enregistré."}));
+        }
+        let (c, b, p) = (self.cfg_for_game(), self.buffer.clone(), self.proxy.clone());
         std::thread::spawn(move || {
             let _ = p.send_event(UserEvent::Saved(capture::save_clip(&c, &b.dir), "clip"));
         });
     }
 
     fn toggle_rec(&mut self) {
+        if self.recording.is_none() && !self.cfg.clipping {
+            sound(&self.cfg, sounds::Sound::Error);
+            return self.push(&json!({"type": "toast", "kind": "error", "text": "Clipping désactivé : activez-le pour enregistrer."}));
+        }
         if self.recording.take().is_none() {
             if let Err(e) = capture::rec_start(&self.cfg, &self.buffer) {
                 sound(&self.cfg, sounds::Sound::Error);
@@ -535,11 +634,18 @@ impl App {
                 return;
             }
             self.recording = Some(Instant::now());
+            // Dossier du jeu au début du REC (à l'arrêt, le jeu peut être fermé ou la barre ouverte).
+            self.rec_dir = self.cfg_for_game().out_dir;
             sound(&self.cfg, sounds::Sound::RecStart);
         } else {
             // Tout de suite à l'appui : l'assemblage du fichier prend ensuite 2 à 3 s.
             sound(&self.cfg, sounds::Sound::RecStop);
-            let (c, b, p) = (self.cfg.clone(), self.buffer.clone(), self.proxy.clone());
+            let mut c = self.cfg.clone();
+            c.out_dir = std::mem::take(&mut self.rec_dir);
+            if c.out_dir.as_os_str().is_empty() {
+                c.out_dir = self.cfg.out_dir.clone();
+            }
+            let (c, b, p) = (c, self.buffer.clone(), self.proxy.clone());
             std::thread::spawn(move || {
                 let _ = p.send_event(UserEvent::Saved(capture::rec_stop(&c, &b), "rec"));
             });
@@ -831,7 +937,7 @@ impl App {
     /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
     fn set_many(&mut self, items: &[(String, Value)]) {
         // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_gpus", "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "minimize_to_tray"];
+        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_gpus", "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "minimize_to_tray", "key_clipping"];
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
         let mut restart = false;
         let reprobe = items.iter().any(|(k, _)| k == "monitor");
@@ -851,7 +957,7 @@ impl App {
         }
         let Ok(mut new) = serde_json::from_value::<Config>(v) else { return log("valeurs refusées") };
         new.rec = new.clip; // une seule qualité : le REC réutilise toujours le buffer
-        let keys_changed = (&new.key_clip, &new.key_rec, &new.key_bar, &new.key_overlay) != (&self.cfg.key_clip, &self.cfg.key_rec, &self.cfg.key_bar, &self.cfg.key_overlay);
+        let keys_changed = (&new.key_clip, &new.key_rec, &new.key_bar, &new.key_overlay, &new.key_clipping) != (&self.cfg.key_clip, &self.cfg.key_rec, &self.cfg.key_bar, &self.cfg.key_overlay, &self.cfg.key_clipping);
         self.cfg = new;
         if keys_changed {
             self.rebind_keys();
@@ -915,8 +1021,8 @@ impl App {
             let _ = std::fs::create_dir_all(path);
             return explorer(&format!("\"{}\"", path.display()));
         }
-        // Seulement des fichiers directement dans le dossier de sortie.
-        if path.parent() != Some(self.cfg.out_dir.as_path()) {
+        // Seulement des fichiers du dossier de sortie ou d'un de ses dossiers de jeu.
+        if !in_out_dir(&self.cfg, path) {
             return log("action vidéo refusée hors du dossier de sortie");
         }
         let thumb = |p: &Path| config::dir().join("thumbs").join(format!("{}.jpg", p.file_stem().unwrap_or_default().to_string_lossy()));
@@ -1077,8 +1183,10 @@ fn main() {
         front: std::cell::RefCell::new(None),
         barui: std::cell::RefCell::new(bar_ui),
         wake: [None, None],
+        last_draw: [None, None],
         perf: (0, 0.0, Instant::now()),
         bar_prev: 0,
+        rec_dir: PathBuf::new(),
         bar_gen: 0,
         keys,
         hotkeys,
@@ -1089,8 +1197,11 @@ fn main() {
     };
 
     let label = |k: &Option<HotKey>| k.as_ref().map(pretty).unwrap_or_default();
+    tray::start_temp_cache();
     let tm = tray::TrayMenu::new(&label(&app.keys.clip), &label(&app.keys.rec));
     let mut shown_rec = false;
+    // Inverse de l'état réel : le texte de l'interrupteur du menu est posé au premier tour.
+    let mut shown_clipping = !app.cfg.clipping;
     let mut tray = None;
 
     event_loop.run(move |event, target, flow| {
@@ -1147,6 +1258,8 @@ fn main() {
                     }
                 } else if is(&app.keys.overlay) {
                     app.toggle_overlay();
+                } else if is(&app.keys.clipping) {
+                    app.toggle_clipping();
                 }
             }
             Event::UserEvent(UserEvent::Ipc(kind, body)) => app.ipc(kind, &body, target),
@@ -1239,6 +1352,8 @@ fn main() {
                     app.clip();
                 } else if m == *tm.rec.id() {
                     app.toggle_rec();
+                } else if m == *tm.clipping.id() {
+                    app.toggle_clipping();
                 } else if m == *tm.ram.id() {
                     // Même chemin que le bouton de l'onglet Outils (autorisation administrateur demandée).
                     let _ = app.proxy.send_event(UserEvent::Ipc(ui::Kind::Main, r#"{"cmd":"ram_clean"}"#.into()));
@@ -1276,6 +1391,10 @@ fn main() {
             if let Some(t) = app.wake.iter().flatten().min() {
                 *flow = ControlFlow::WaitUntil(*t);
             }
+        }
+        if app.cfg.clipping != shown_clipping {
+            shown_clipping = app.cfg.clipping;
+            tm.set_clipping(shown_clipping);
         }
         if app.recording.is_some() != shown_rec {
             shown_rec = app.recording.is_some();

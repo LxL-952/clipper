@@ -52,6 +52,8 @@ pub struct Player {
     /// Saut ou changement de taille en attente (regroupés : un lancement toutes les 120 ms au plus).
     dirty: bool,
     last_spawn: Instant,
+    /// Glissement en cours sur la barre de temps.
+    scrubbing: bool,
 }
 
 impl Player {
@@ -76,6 +78,7 @@ impl Player {
             kids: vec![],
             dirty: false,
             last_spawn: Instant::now(),
+            scrubbing: false,
         }
     }
 
@@ -114,8 +117,12 @@ impl Player {
             return;
         }
         if self.playing {
+            // Pause : on garde l'image affichée et on arrête ffmpeg, sans redécoder une image fixe (elle
+            // tombait un peu à côté : l'image sautait en arrière puis revenait).
             self.base = self.pos();
             self.playing = false;
+            self.kill();
+            return;
         } else {
             if self.dur > 0.0 && self.base >= self.dur - 0.05 {
                 self.base = 0.0; // fin atteinte : on repart du début
@@ -137,6 +144,19 @@ impl Player {
         // Position figée sur le point visé jusqu'à la première image du nouveau lancement.
         *self.t0.lock().unwrap() = None;
         self.dirty = true;
+    }
+
+    /// Glissement sur la barre de temps : images seules (sans son, sans relancer la lecture) jusqu'au lâcher.
+    pub fn scrub(&mut self, t: f64) {
+        self.scrubbing = true;
+        self.seek(t);
+    }
+
+    /// Fin du glissement : la lecture (si elle était en cours) reprend au point lâché.
+    pub fn scrub_end(&mut self) {
+        self.scrubbing = false;
+        self.dirty = true;
+        self.last_spawn = Instant::now() - Duration::from_secs(1);
     }
 
     pub fn set_rate(&mut self, rate: f32) {
@@ -170,7 +190,8 @@ impl Player {
             self.playing = false;
             self.base = self.dur;
         }
-        if self.dirty && self.last_spawn.elapsed() > Duration::from_millis(120) {
+        let gap = if self.scrubbing { 60 } else { 120 };
+        if self.dirty && self.last_spawn.elapsed() > Duration::from_millis(gap) {
             self.spawn();
         }
         self.dirty || self.playing
@@ -201,19 +222,26 @@ impl Player {
         // Décodage logiciel : première image en ~160 ms contre ~430 ms avec -hwaccel (préparation du
         // décodeur de la carte à chaque lancement), et 10 s de HEVC 1080p60 décodées en ~1 s.
         c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", self.base)]);
+        let playing = self.playing && !self.scrubbing;
+        // Lecture continue : décodage par la carte graphique (D3D11VA). Mesuré sur un clip 1080p60 : 1,9 s de
+        // processeur pour 5 s de vidéo, contre 3,6 s en logiciel. Image seule (pause, glissement) : logiciel,
+        // 1re image en ~150 ms au lieu de ~400 ms.
+        if playing {
+            c.args(["-hwaccel", "d3d11va"]);
+        }
         c.arg("-i").arg(&file).args(["-map", "0:v:0", "-an", "-sn"]);
-        if !self.playing {
+        if !playing {
             c.args(["-frames:v", "1"]);
         }
-        // Image entière dans le cadre, bandes noires autour si le format diffère. Bicubique : la réduction
-        // bilinéaire rapide rendait l'image floue. En lecture, 60 images/s fixes (cadence connue du fil).
-        let fps = if self.playing { format!("fps={PLAY_FPS},") } else { String::new() };
-        let vf = format!("{fps}scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=bgra");
+        // Image entière dans le cadre, bandes noires autour si le format diffère. Lanczos : réduction la
+        // plus nette (bicubique laissait l'aperçu un peu flou). En lecture, 60 images/s fixes (cadence du fil).
+        let fps = if playing { format!("fps={PLAY_FPS},") } else { String::new() };
+        let vf = format!("{fps}scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=bgra");
         let step = Duration::from_secs_f64(1.0 / (PLAY_FPS * self.rate.max(0.1) as f64));
         c.args(["-vf", &vf, "-f", "rawvideo", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         if let Ok(mut child) = c.spawn() {
             if let Some(mut out) = child.stdout.take() {
-                let (cur, frame, ended, wake, playing, t0) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.playing, self.t0.clone());
+                let (cur, frame, ended, wake, t0) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.t0.clone());
                 std::thread::spawn(move || {
                     let mut buf = vec![0u8; (w * h * 4) as usize];
                     let mut i = 0u32;
@@ -250,7 +278,7 @@ impl Player {
             }
             self.kids.push(child);
         }
-        if self.playing && self.audio_tracks > 0 {
+        if playing && self.audio_tracks > 0 {
             self.spawn_audio(&file, run);
         }
     }

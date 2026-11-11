@@ -525,9 +525,9 @@ impl<'a> Ui<'a> {
         let max = (content_h - view.h).max(0.0);
         let mut pos = self.s.scroll.get(&wid).copied().unwrap_or(0.0);
         let over = view.has(self.i.mouse) && self.s.popup.is_none() && self.s.block.is_none_or(|b| !b.has(self.i.mouse));
-        // Molette : 42 px par cran (100 px sautaient trop loin), avec un glissé de 0,14 s vers la cible.
+        // Molette : 30 px par cran (42 montaient encore trop d'un petit coup), avec un glissé vers la cible.
         // Position changée ailleurs (retour en haut d'une page…) : la cible la suit, sans animation.
-        const STEP: f32 = 42.0;
+        const STEP: f32 = 30.0;
         let akey = wid ^ 0x5C_0011_u64;
         let shown = self.s.anims.get(&akey).map(|a| a.v);
         let mut target = self.s.scroll_to.get(&wid).copied().unwrap_or(pos);
@@ -555,7 +555,7 @@ impl<'a> Ui<'a> {
         }
         target = target.clamp(0.0, max);
         self.s.scroll_to.insert(wid, target);
-        pos = self.anim(akey, target, if snap { 0.0 } else { 0.14 });
+        pos = self.anim(akey, target, if snap { 0.0 } else { 0.16 });
         if max > 0.0 {
             let th = (view.h * view.h / content_h).max(28.0);
             let ty = view.y + (view.h - th) * (pos / max).clamp(0.0, 1.0);

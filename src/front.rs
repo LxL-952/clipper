@@ -92,9 +92,9 @@ pub struct Tools {
 }
 
 /// Réglages appliqués sans relancer la capture (même liste que dans main.rs).
-const LIVE: [&str; 23] = [
+const LIVE: [&str; 24] = [
     "driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_gpus",
-    "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "mic_muted", "minimize_to_tray",
+    "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "mic_muted", "minimize_to_tray", "key_clipping",
 ];
 
 pub struct Front {
@@ -123,7 +123,7 @@ pub struct Front {
     save_msg: Option<(String, String, Option<Instant>)>,
     pub folds: HashMap<String, bool>,
     // raccourcis
-    pub hk: [Option<String>; 4],
+    pub hk: [Option<String>; 5],
     pub conflicts: Vec<String>,
     pub hk_wait: Option<usize>,
     // barre de titre
@@ -162,8 +162,10 @@ pub struct Front {
     pub t_start: Instant,
 }
 
-pub const HK: [(&str, &str, &str); 4] =
-    [("clip", "key_clip", "Enregistrer un clip"), ("rec", "key_rec", "Démarrer / arrêter le REC"), ("bar", "key_bar", "Ouvrir la barre"), ("overlay", "key_overlay", "Afficher les statistiques")];
+pub const HK: [(&str, &str, &str); 5] = [
+    ("clip", "key_clip", "Enregistrer un clip"), ("rec", "key_rec", "Démarrer / arrêter le REC"), ("bar", "key_bar", "Ouvrir la barre"),
+    ("overlay", "key_overlay", "Afficher les statistiques"), ("clipping", "key_clipping", "Activer / désactiver le clipping"),
+];
 
 /// « Alt+KeyX » -> « Alt+X ».
 pub fn pretty(k: &str) -> String {
@@ -288,7 +290,7 @@ impl Front {
             flush_at: None,
             save_msg: None,
             folds,
-            hk: [hk("clip"), hk("rec"), hk("bar"), hk("overlay")],
+            hk: [hk("clip"), hk("rec"), hk("bar"), hk("overlay"), hk("clipping")],
             conflicts: init["hotkey_conflicts"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(pretty)).collect(),
             hk_wait: None,
             update: init["update"].as_str().map(String::from),
@@ -438,7 +440,7 @@ impl Front {
             }
             "hotkeys" => {
                 let hk = |k: &str| m["hotkeys"][k].as_str().map(String::from);
-                self.hk = [hk("clip"), hk("rec"), hk("bar"), hk("overlay")];
+                self.hk = [hk("clip"), hk("rec"), hk("bar"), hk("overlay"), hk("clipping")];
                 self.conflicts = m["conflicts"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(pretty)).collect();
             }
             "update_state" => {

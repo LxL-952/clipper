@@ -311,7 +311,9 @@ pub fn output_args(tracks: &[Track]) -> Vec<String> {
         a.extend(["-map".into(), format!("{i}:a")]);
     }
     if !tracks.is_empty() {
-        a.extend(["-c:a", "aac", "-b:a", "160k"].map(String::from));
+        // Codeur AAC « fast » au lieu de « twoloop » (défaut) : nettement moins de processeur pour 3 pistes
+        // encodées en continu, sans différence audible à 160 kb/s.
+        a.extend(["-c:a", "aac", "-aac_coder", "fast", "-b:a", "160k"].map(String::from));
     }
     for (i, t) in tracks.iter().enumerate() {
         a.extend([format!("-metadata:s:a:{i}"), format!("title={}", t.title())]);

@@ -73,6 +73,8 @@ pub fn apply(cfg: &Config, shown: bool) {
         gpus: cfg.overlay_gpus.clone(),
     });
     REFRESH_MS.store(cfg.overlay_refresh_ms.clamp(100, 5000), Ordering::Relaxed);
+    // Mesure : fichier « fps-log » présent dans %APPDATA%Clipper -> FPS écrits au journal toutes les 2 s.
+    BENCH.store(crate::config::dir().join("fps-log").exists(), Ordering::Relaxed);
     ENABLED.store(cfg.overlay_mode == "always" || cfg.overlay_mode == "hotkey", Ordering::Relaxed);
     let v = cfg.overlay_mode == "always" || (cfg.overlay_mode == "hotkey" && shown);
     VISIBLE.store(v, Ordering::Relaxed);
@@ -124,6 +126,8 @@ struct Nvml {
     util: unsafe extern "C" fn(*mut core::ffi::c_void, *mut [u32; 2]) -> i32,
     temp: unsafe extern "C" fn(*mut core::ffi::c_void, u32, *mut u32) -> i32,
     mem: unsafe extern "C" fn(*mut core::ffi::c_void, *mut [u64; 3]) -> i32,
+    /// Charge du bloc d'encodage NVENC (%, période d'échantillonnage en µs).
+    enc: Option<unsafe extern "C" fn(*mut core::ffi::c_void, *mut u32, *mut u32) -> i32>,
 }
 
 /// Températures GPU (NVML) et CPU (capteur Windows) pour le menu de la zone de notification.
@@ -138,6 +142,22 @@ pub fn temps() -> (Option<u32>, Option<f64>) {
             (unsafe { (n.temp)(n.dev(), 0, &mut t) } == 0).then_some(t)
         });
         (gpu, th.as_ref().and_then(Thermal::celsius))
+    })
+}
+
+/// Charge de l'encodeur NVENC le plus occupé (%), lue par NVML : simple lecture de compteur du pilote,
+/// rien d'ouvert dans le jeu. None sans carte NVIDIA. Sert au garde-fou de la capture (capture.rs).
+pub fn encoder_load() -> Option<u32> {
+    thread_local! {
+        static NV: Option<Nvml> = Nvml::load();
+    }
+    NV.with(|nv| {
+        let n = nv.as_ref()?;
+        let f = n.enc?;
+        n.devs.iter().filter_map(|&d| {
+            let (mut u, mut p) = (0u32, 0u32);
+            (unsafe { f(d, &mut u, &mut p) } == 0).then_some(u)
+        }).max()
     })
 }
 
@@ -207,6 +227,7 @@ impl Nvml {
                 util: std::mem::transmute(sym(b"nvmlDeviceGetUtilizationRates\0")?),
                 temp: std::mem::transmute(sym(b"nvmlDeviceGetTemperature\0")?),
                 mem: std::mem::transmute(sym(b"nvmlDeviceGetMemoryInfo\0")?),
+                enc: sym(b"nvmlDeviceGetEncoderUtilization\0").map(|f| std::mem::transmute(f)),
             })
         }
     }
@@ -278,7 +299,7 @@ static PM_TABLE: Mutex<Option<std::collections::HashMap<u32, (u32, String)>>> = 
 static GAME: AtomicU32 = AtomicU32::new(0);
 
 /// Programmes qui affichent des images sans être des jeux : jamais pris pour « le jeu en cours ».
-const NOT_GAMES: [&str; 40] = [
+pub const NOT_GAMES: [&str; 40] = [
     "explorer.exe", "dwm.exe", "clipper.exe", "msedgewebview2.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
     "vivaldi.exe", "discord.exe", "code.exe", "spotify.exe", "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe", "riotclientux.exe",
     "riotclientuxrender.exe", "riotclientservices.exe", "battle.net.exe", "taskmgr.exe", "obs64.exe", "vlc.exe", "slack.exe", "teams.exe",
@@ -433,13 +454,16 @@ fn game_monitor(game: u32) -> Option<RECT> {
         (GetMonitorInfoW(MonitorFromWindow(s.best.1, MONITOR_DEFAULTTONEAREST), &mut mi) != 0).then_some(mi.rcMonitor)
     }
 }
+/// Mode mesure (scripts de banc) : FPS, temps d'image et 1 % low du jeu écrits au journal toutes les 2 s.
+static BENCH: AtomicBool = AtomicBool::new(false);
+
 /// Fréquence de mise à jour de l'overlay (réglage « Mise à jour »), en ms.
 static REFRESH_MS: AtomicU32 = AtomicU32::new(500);
 /// Dernière appli pour laquelle des FPS ont été affichés (journal, une ligne par appli).
 static PM_SHOWN: AtomicU32 = AtomicU32::new(0);
 
 /// Table processus -> (parent, nom de l'exe), lue par un instantané Toolhelp (lecture seule, aucun handle ouvert).
-fn process_table() -> std::collections::HashMap<u32, (u32, String)> {
+pub fn process_table() -> std::collections::HashMap<u32, (u32, String)> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
     let mut m = std::collections::HashMap::new();
@@ -550,8 +574,8 @@ fn run_presentmon() -> bool {
     let watcher = std::thread::spawn(move || {
         let w = std::thread::current();
         WAKE.lock().unwrap().push(w.clone());
-        // PresentMon tourne tant que l'overlay est activé avec des mesures d'images, affiché ou non : Alt+F
-        // montre des FPS à jour tout de suite (avant : arrêt / relance à chaque fois, « 0 » pendant ~1 s).
+        // PresentMon tourne seulement overlay affiché avec des mesures d'images (voir `fps_wanted`) : masqué,
+        // il est arrêté et ne coûte plus rien. Alt+F le relance (« — » pendant ~1 s, choix assumé).
         while matches!(c.lock().unwrap().try_wait(), Ok(None)) && fps_wanted() {
             std::thread::park_timeout(std::time::Duration::from_secs(1));
         }
@@ -734,6 +758,17 @@ fn pm_text() -> FpsText {
     if PM_SHOWN.swap(src, Ordering::Relaxed) != src {
         let generated = q.iter().filter(|f| f.2 == src && f.1 == 0.0).count();
         crate::log(&format!("FPS : overlay affiche {fps:.0} FPS{} / {ft:.1} ms (processus {src}, {generated} images générées sur {} vues)", dlss_tag(src), all.len()));
+    }
+    if BENCH.load(Ordering::Relaxed) {
+        static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+        let mut l = LAST.lock().unwrap();
+        if l.is_none_or(|t| t.elapsed().as_secs_f64() >= 2.0) {
+            *l = Some(now);
+            // Sur 2 s : moyenne des temps d'image ; 1 % low sur les 10 s gardées.
+            let recent: Vec<f64> = all.iter().rev().scan(0.0, |s, v| { *s += v; (*s <= 2000.0).then_some(*v) }).collect();
+            let avg = recent.iter().sum::<f64>() / recent.len().max(1) as f64;
+            crate::log(&format!("BENCH fps {:.1} ft {avg:.2} low1 {} n {} capture {}", 1000.0 / avg.max(0.001), low.map_or("-".into(), |l| format!("{l:.1}")), recent.len(), !crate::capture::is_idle()));
+        }
     }
     FpsText {
         // « 114 DLSS FG » : comme le compteur NVIDIA, quand le jeu a chargé le DLSS.
@@ -1246,8 +1281,10 @@ pub fn shutdown() {
 }
 
 /// Mesure des images active : overlay activé (raccourci ou toujours) avec FPS, temps d'image ou 1 % low.
+/// PresentMon et la session ETW ne tournent que pendant que l'overlay est affiché : masqué, il ne coûte rien
+/// (avant : ils restaient actifs pour un Alt+F instantané ; le prix est ~1 s de « — » à l'ouverture).
 fn fps_wanted() -> bool {
-    ENABLED.load(Ordering::Relaxed) && LOOK.lock().unwrap().as_ref().is_some_and(|l| l.items.iter().any(|i| i == "fps" || i == "frametime" || i == "low1"))
+    VISIBLE.load(Ordering::Relaxed) && ENABLED.load(Ordering::Relaxed) && LOOK.lock().unwrap().as_ref().is_some_and(|l| l.items.iter().any(|i| i == "fps" || i == "frametime" || i == "low1"))
 }
 
 fn etw_thread() {

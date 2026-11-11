@@ -18,6 +18,8 @@ pub struct Config {
     pub encoder: String,
     /// Multiplicateur de débit, 0.5 à 1.5.
     pub quality: f32,
+    /// Profil d'encodage : "perf" (Performance maximale, défaut), "balanced" (Équilibré) ou "quality".
+    pub profile: String,
     /// "mp4", "mkv" ou "mov" : commun au Clip et au REC.
     pub container: String,
     /// Ancien réglage ("none", "mixed", "split") : sert seulement à migrer vers `audio_tracks`.
@@ -49,6 +51,10 @@ pub struct Config {
     /// "hidden", "hotkey" ou "always".
     pub overlay_mode: String,
     pub key_overlay: String,
+    /// Interrupteur général : faux = aucune capture, aucun encodage, aucun son capté, buffer vidé.
+    pub clipping: bool,
+    /// Raccourci qui active / désactive le clipping.
+    pub key_clipping: String,
     pub overlay_items: Vec<String>,
     /// Mesures de l'overlay accompagnées d'une courbe des 15 dernières secondes.
     pub overlay_graphs: Vec<String>,
@@ -91,6 +97,7 @@ impl Default for Config {
             rec: Quality { height: 1080, fps: 60 },
             encoder: "h264_nvenc".into(),
             quality: 1.0,
+            profile: "perf".into(),
             container: "mp4".into(),
             audio_mode: "mixed".into(),
             audio_tracks: vec!["mix".into()],
@@ -113,6 +120,8 @@ impl Default for Config {
             buffer_dir: std::env::temp_dir().join("Clipper").join("buf"),
             overlay_mode: "hotkey".into(),
             key_overlay: "Alt+KeyF".into(),
+            clipping: true,
+            key_clipping: "Alt+Shift+KeyX".into(),
             overlay_items: vec!["fps".into(), "frametime".into(), "cpu".into(), "gpu".into()],
             overlay_graphs: vec![],
             overlay_corner: "tl".into(),
@@ -161,6 +170,9 @@ impl Config {
 
     /// JSON illisible : valeurs par défaut. Ancien `audio_mode` sans `audio_tracks` : converti.
     fn parse(s: &str) -> Self {
+        // BOM UTF-8 en tête (fichier réenregistré par le Bloc-notes ou PowerShell) : ignoré, sinon le JSON était
+        // refusé et tous les réglages repartaient aux valeurs par défaut.
+        let s = s.trim_start_matches('﻿');
         let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return Self::default() };
         let mut c: Self = serde_json::from_value(v.clone()).unwrap_or_default();
         if v.get("audio_tracks").is_none() {
@@ -200,5 +212,6 @@ mod tests {
         assert!(Config::parse(r#"{"audio_mode":"none"}"#).audio_tracks.is_empty());
         assert_eq!(Config::parse(r#"{"audio_mode":"split","audio_tracks":["mix","mic"]}"#).audio_tracks, ["mix", "mic"]);
         assert_eq!(Config::parse("pas du json").audio_tracks, ["mix"]);
+        assert_eq!(Config::parse("﻿{\"buffer_secs\":60}").buffer_secs, 60);
     }
 }
