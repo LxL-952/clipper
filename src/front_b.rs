@@ -4,9 +4,6 @@ use crate::gfx::{F, R, hex, md, pal, r, scene, text_w};
 use crate::widgets::{Btn, Note, Seg, Ui, id, idn, so};
 use serde_json::json;
 
-/// Diagnostic temporaire : temps (ms) du lecteur, de la colonne de gauche, de la grille.
-pub static PROF: std::sync::Mutex<[f32; 4]> = std::sync::Mutex::new([0.0; 4]);
-
 const RATES: [f32; 5] = [1.0, 1.5, 2.0, 0.25, 0.5];
 
 fn dur_words(s: u32) -> String {
@@ -46,12 +43,19 @@ impl Front {
         }
         self.player.set_size(q.w * ui.c.s, q.h * ui.c.s);
         let open = self.player.file.is_some();
-        let has = open && self.player.draw(ui.c, q, rad);
-        if has && rad > 0.0 {
+        // En attendant la 1re image du clip : sa miniature (plus de cadre noir « Préparation… » qui
+        // clignotait à chaque clic), puis fondu vers la vidéo.
+        let fade = self.player.fade();
+        let mut thumb = open && fade < 1.0 && self.player_thumb(ui, q);
+        let has = open && self.player.draw(ui.c, q, fade);
+        if open && !has {
+            thumb = self.player_thumb(ui, q);
+        }
+        if (has || thumb) && rad > 0.0 {
             ui.c.corners(q, rad, pal::PANEL);
             ui.c.outline(q, rad, 1.0, pal::LINE2);
         }
-        if !has {
+        if !has && !thumb {
             let t = if open { "Préparation de la lecture…" } else if self.cur().is_some() { "" } else if self.vids.as_ref().is_some_and(|v| !v.is_empty()) { "Choisissez une vidéo à droite." } else { "" };
             ui.c.text_in(q, 0, t, F::s(12.5, 400), pal::TEXT3);
         }
@@ -91,9 +95,16 @@ impl Front {
             if ui.s.active == id("pSeek") {
                 used = true;
                 p = ((ui.mouse().0 - sk.x) / sk.w).clamp(0.0, 1.0);
-                if ui.i.down || ui.i.released {
-                    self.player.seek(p as f64 * d);
+                // Glissement : images fixes seules, la dernière position gagne ; la lecture reprend au lâcher.
+                // Avant : un saut complet (vidéo + son relancés) à chaque image du geste.
+                let t = p as f64 * d;
+                if (t - pos).abs() > 0.03 || !self.p_scrub {
+                    self.player.scrub(t);
                 }
+                self.p_scrub = true;
+            } else if self.p_scrub {
+                self.p_scrub = false;
+                self.player.scrub_end();
             }
             let th = if hot { 5.0 } else { 3.0 };
             let tr = r(sk.x, sk.cy() - th / 2.0, sk.w, th);
@@ -184,6 +195,16 @@ impl Front {
                     used = true;
                 }
             }
+            // Aperçu du point survolé sur la barre de temps (dessiné en dernier, par-dessus les commandes).
+            if hot {
+                let mx = ui.mouse().0.clamp(sk.x, sk.right());
+                let t = ((mx - sk.x) / sk.w).clamp(0.0, 1.0) as f64 * d;
+                if let Some(path) = self.player.file.clone() {
+                    if self.preview.show(ui, &self.cfg, &path, self.player.dur, t, mx, sk, q) {
+                        self.wake_in(std::time::Duration::from_millis(300));
+                    }
+                }
+            }
             ui.c.restore_clip(old);
         }
         // Clic sur l'image : lecture / pause. Double-clic : plein écran.
@@ -225,9 +246,7 @@ impl Front {
         let (x, w) = (body.x + 16.0, 297.0);
         let mut y = body.y + 16.0;
         let pq = r(x, y, w, (w * 9.0 / 16.0).round());
-        let t0 = std::time::Instant::now();
         self.player_view(ui, pq, 6.0);
-        PROF.lock().unwrap()[0] = t0.elapsed().as_secs_f32() * 1000.0;
         y = pq.bottom() + 14.0;
         if let Some((name, rec, secs, size, date, video, path)) = self.cur().map(|v| (v.name.clone(), v.rec, v.secs, v.bytes, v.date, v.video, v.path.clone())) {
             let sp = vec![crate::gfx::Span { t: name.clone(), f: F::s(15.0, 600).ls(-0.01), c: pal::TEXT }];
@@ -322,7 +341,6 @@ impl Front {
             }
         }
         ui.scroll_end(id("mon-vid"), view, y + 16.0 - body.y, clip);
-        PROF.lock().unwrap()[1] = t0.elapsed().as_secs_f32() * 1000.0;
 
         // ---------- colonne de droite : grille ----------
         let list = r(body.x + 330.0, body.y, body.w - 330.0, body.h);
@@ -408,7 +426,6 @@ impl Front {
                 ctx = Some(i);
             }
         }
-        PROF.lock().unwrap()[2] = t0.elapsed().as_secs_f32() * 1000.0;
         let rows = n.div_ceil(cols) as f32;
         ui.scroll_end(id("vgrid"), view, 16.0 + rows * (ch + 14.0) + 10.0, clip);
         if let Some(i) = pick {

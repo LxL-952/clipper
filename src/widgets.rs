@@ -193,8 +193,9 @@ impl<'a> Ui<'a> {
 
     /// Paragraphe balisé (`**gras**`, `` `mono` ``) ; renvoie la hauteur.
     pub fn hint(&mut self, x: f32, y: f32, w: f32, text: &str) -> f32 {
-        let sp = md(text, F::s(12.0, 400), pal::TEXT3, 500, pal::TEXT2);
-        self.c.para(x, y, w, 17.4, &sp, true)
+        // 12,5 px (avant 12) : taille minimale des textes d'aide, lisible à 100 % comme à 150 %.
+        let sp = md(text, F::s(12.5, 400), pal::TEXT3, 600, pal::TEXT2);
+        self.c.para(x, y, w, 18.0, &sp, true)
     }
 
     /// Petit titre en capitales espacées (.sc).

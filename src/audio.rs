@@ -87,12 +87,14 @@ fn capture(src: Arc<Source>, dir: Direction, id: Option<String>, stop: Arc<Atomi
                 let n = bytes.len() / 4;
                 let mut peak = 0f32;
                 let mut q = src.queue.lock().unwrap();
-                for _ in 0..n {
-                    let b = [bytes.pop_front().unwrap(), bytes.pop_front().unwrap(), bytes.pop_front().unwrap(), bytes.pop_front().unwrap()];
-                    let s = f32::from_le_bytes(b);
+                // Par blocs de 4 octets d'une zone contiguë (avant : 4 pop_front par échantillon, ~400 000 par
+                // seconde et par source pendant le jeu). Un reste incomplet attend la lecture suivante.
+                for c in bytes.make_contiguous()[..n * 4].chunks_exact(4) {
+                    let s = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                     peak = peak.max(s.abs());
                     q.push_back(s);
                 }
+                bytes.drain(..n * 4);
                 let over = q.len().saturating_sub(MAX_QUEUE);
                 q.drain(..over);
                 drop(q);
@@ -116,11 +118,15 @@ pub struct Audio {
     /// Chaque slot reçoit un pipe par piste activée : (piste, pipe).
     slots: Arc<Mutex<[Vec<(Track, File)>; 2]>>,
     stop: Arc<AtomicBool>,
+    /// Volume du PC, gain du micro (volume x boost, 0 = coupé) et boost, en bits f32 : changés en direct par
+    /// `levels` (avant : chaque changement relançait ffmpeg, ~1 s de trou dans le buffer).
+    gains: [AtomicU32; 3],
 }
 
 impl Audio {
     pub fn start(cfg: &Config) -> Arc<Self> {
-        let a = Arc::new(Self { game: Arc::default(), mic: Arc::default(), slots: Arc::default(), stop: Arc::default() });
+        let a = Arc::new(Self { game: Arc::default(), mic: Arc::default(), slots: Arc::default(), stop: Arc::default(), gains: Default::default() });
+        a.levels(cfg);
         capture(a.game.clone(), Direction::Render, cfg.out_device.clone(), a.stop.clone());
         capture(a.mic.clone(), Direction::Capture, cfg.mic_device.clone(), a.stop.clone());
         let (w, cfg) = (a.clone(), cfg.clone());
@@ -128,16 +134,24 @@ impl Audio {
         a
     }
 
+    /// Sourdine, volumes et boost du micro, appliqués au prochain tour du mélangeur (20 ms).
+    pub fn levels(&self, cfg: &Config) {
+        // Boost du micro en dB, en plus du volume (+6 dB = x2, +20 dB = x10).
+        let boost = 10f32.powf(cfg.mic_boost_db.clamp(0.0, 30.0) / 20.0);
+        let mv = if cfg.mic_muted { 0.0 } else { cfg.mic_volume * boost };
+        for (g, v) in self.gains.iter().zip([cfg.game_volume, mv, boost]) {
+            g.store(v.to_bits(), Ordering::Relaxed);
+        }
+    }
+
     /// Toutes les 20 ms : envoie exactement le nombre d'échantillons dû selon l'horloge.
     /// Les trous (silence, micro absent) sont comblés par des zéros : l'audio ne dérive jamais.
     /// Le même morceau part vers chaque ffmpeg connecté (buffer et, pendant un REC, la 2e capture).
     fn mix_loop(&self, cfg: &Config) {
-        // Boost du micro en dB, en plus du volume (+6 dB = x2, +20 dB = x10).
-        let boost = 10f32.powf(cfg.mic_boost_db.clamp(0.0, 30.0) / 20.0);
-        let (gv, mv) = (cfg.game_volume, if cfg.mic_muted { 0.0 } else { cfg.mic_volume * boost });
         // Seulement si le micro finit dans un clip (piste Tout ou Micro) : sinon aucun calcul.
         let mic_recorded = tracks(cfg).iter().any(|t| matches!(t, Track::Mix | Track::Mic));
-        let mut denoiser = (cfg.mic_denoise && !cfg.mic_muted && mic_recorded).then(Denoiser::new);
+        // Créé même micro coupé (la sourdine se lève en direct) ; coupé, il ne calcule rien (voir plus bas).
+        let mut denoiser = (cfg.mic_denoise && mic_recorded).then(Denoiser::new);
         let epoch = Instant::now();
         let mut sent = 0usize;
         while !self.stop.load(Ordering::Relaxed) {
@@ -148,6 +162,7 @@ impl Audio {
             if n == 0 {
                 continue;
             }
+            let [gv, mv, boost] = self.gains.each_ref().map(|g| f32::from_bits(g.load(Ordering::Relaxed)));
             let take = |s: &Source, g: f32| -> Vec<f32> {
                 let mut q = s.queue.lock().unwrap();
                 if !s.primed.load(Ordering::Relaxed) {
@@ -167,13 +182,13 @@ impl Audio {
             let g = take(&self.game, gv);
             // Réduction de bruit : sur le micro brut (RNNoise attend des niveaux naturels), puis volume et boost.
             let mut m = match denoiser.as_mut() {
-                Some(d) => {
+                Some(d) if mv > 0.0 => {
                     let mut m = take(&self.mic, 1.0);
                     d.process(&mut m);
                     m.iter_mut().for_each(|s| *s *= mv);
                     m
                 }
-                None => take(&self.mic, mv),
+                _ => take(&self.mic, mv),
             };
             if boost > 1.0 {
                 m.iter_mut().for_each(|s| *s = soft_limit(*s));

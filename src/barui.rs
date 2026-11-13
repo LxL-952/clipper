@@ -48,6 +48,8 @@ pub struct BarUi {
     tap: Option<(Instant, bool)>,
     /// Glissement en cours sur la barre de temps du lecteur.
     scrubbing: bool,
+    /// Aperçu au survol de la barre de temps.
+    preview: crate::preview::Preview,
 }
 
 const BUF: [u32; 6] = [60, 90, 120, 180, 300, 600];
@@ -82,6 +84,7 @@ impl BarUi {
             player_t0: now,
             tap: None,
             scrubbing: false,
+            preview: Default::default(),
         }
     }
 
@@ -485,15 +488,22 @@ impl BarUi {
             let video = self.clips.iter().find(|c| c.path == path).is_none_or(|c| c.video);
             if !video {
                 ui.c.text_in(scr, 0, "Ce fichier ne contient aucune image.", F::s(13.0, 500), pal::TEXT2);
-            } else if !self.player.draw(ui.c, scr, 6.0) {
-                // En attendant la 1re image : la miniature du clip, agrandie (plus de texte qui clignote).
+            } else {
+                // En attendant la 1re image : la miniature du clip, agrandie (plus de texte qui clignote), puis
+                // fondu vers la vidéo (la miniature est prise à 1 s : sans fondu, l'image sautait).
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
                 let (tw, th) = ((sh * 16.0 / 9.0 * ui.c.s).round() as u32, (sh * ui.c.s).round() as u32);
                 let x0 = scr.x + (scr.w - sh * 16.0 / 9.0) / 2.0;
-                let c = &mut *ui.c;
-                match self.thumb(&stem, tw, th, true) {
-                    Some(img) => c.blit(img.data(), img.width(), img.height(), x0, scr.y),
+                let fade = self.player.fade();
+                let thumb = |me: &mut Self, ui: &mut Ui| match me.thumb(&stem, tw, th, true) {
+                    Some(img) => ui.c.blit(img.data(), img.width(), img.height(), x0, scr.y),
                     None => ui.c.text_in(scr, 0, "Préparation de la lecture…", F::s(13.0, 500), pal::TEXT2),
+                };
+                if fade < 1.0 {
+                    thumb(self, ui);
+                }
+                if !self.player.draw(ui.c, scr, fade) {
+                    thumb(self, ui);
                 }
             }
             if ui.click(id("pl-img"), scr) {
@@ -556,6 +566,14 @@ impl BarUi {
             ui.c.rrect(r(sk.x, sk.cy() - 1.5, sk.w, 3.0), 2.0, pal::TEXT.a(0.2));
             ui.c.rrect(r(sk.x, sk.cy() - 1.5, sk.w * p, 3.0), 2.0, pal::SIGNAL);
             ui.c.circle(sk.x + sk.w * p, sk.cy(), 5.5, pal::SIGNAL);
+            // Aperçu du point survolé (planche d'aperçus du clip, aucun décodage au survol).
+            if ui.hot(sk) || ui.s.active == id("seek") {
+                let mx = ui.mouse().0.clamp(sk.x, sk.right());
+                let t = ((mx - sk.x) / sk.w).clamp(0.0, 1.0) as f64 * d;
+                if self.preview.show(ui, &self.cfg, &path, self.player.dur, t, mx, sk, scr) {
+                    self.wake_in(Duration::from_millis(300));
+                }
+            }
             let quiet = self.player.muted || self.player.vol == 0.0;
             if ui.hot(mb) {
                 ui.c.rrect(mb, 6.0, pal::RAISE_H);

@@ -49,13 +49,25 @@ static ETW_LOGGED: AtomicBool = AtomicBool::new(false);
 /// Diagnostic : « Present » de tous les processus depuis le début de la session ETW.
 static ALL_PRESENTS: AtomicU32 = AtomicU32::new(0);
 
-/// Capteur de température CPU présent (sinon l'UI grise l'option).
+/// Capteur de température CPU : 0 pas encore lu, 1 présent, 2 absent.
+static CPU_TEMP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Lit le capteur une fois, dans un fil : il demande deux lectures à 100 ms d'écart, ce qui retardait
+/// l'ouverture de la fenêtre de 270 ms quand c'était fait au démarrage.
+pub fn cpu_temp_probe() {
+    std::thread::spawn(|| {
+        let ok = Thermal::open().is_some_and(|t| {
+            t.celsius();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            t.celsius().is_some()
+        });
+        CPU_TEMP.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
+    });
+}
+
+/// Capteur de température CPU présent (sinon l'UI grise l'option). Pas encore lu : supposé présent.
 pub fn cpu_temp_available() -> bool {
-    Thermal::open().is_some_and(|t| {
-        t.celsius();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        t.celsius().is_some()
-    })
+    CPU_TEMP.load(Ordering::Relaxed) != 2
 }
 /// Fenêtre de l'overlay : apply() lui poste WM_APP pour la réveiller.
 static OV: std::sync::atomic::AtomicPtr<core::ffi::c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
@@ -735,7 +747,10 @@ fn pm_text() -> FpsText {
     let was_dx = LAST_SRC.load(Ordering::Relaxed) == 1;
     let from_dx = if was_dx { pm_n <= dx_n + dx_n / 10 } else { dx_n > pm_n + pm_n / 10 };
     {
-        if LAST_SRC.swap(from_dx as u32, Ordering::Relaxed) != from_dx as u32 {
+        // Changement de source journalisé au plus toutes les 30 s (avant : une ligne toutes les ~2 s quand
+        // les deux sources se suivaient de près).
+        static SRC_LOGGED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+        if LAST_SRC.swap(from_dx as u32, Ordering::Relaxed) != from_dx as u32 && SRC_LOGGED.lock().unwrap().replace(now).is_none_or(|t| now.duration_since(t).as_secs() >= 30) {
             crate::log(&format!("FPS : source {} (2 s : PresentMon {pm_n} images, DXGI {dx_n})", if from_dx { "DXGI" } else { "PresentMon" }));
         }
     }
@@ -941,12 +956,28 @@ fn refresh(cpu: &mut Cpu, nv: &Option<Nvml>, th: &Option<Thermal>, gc: &Option<c
 
 // ---------- Fenêtre ----------
 
+/// Mise à l'échelle Windows de l'écran du jeu, en % (100, 125, 150…), relue par `place`.
+static SCALE: AtomicU32 = AtomicU32::new(100);
+
+/// Taille du texte en pixels réels : 13, 16 ou 20 px à 100 %, multipliée par la mise à l'échelle de l'écran
+/// du jeu (avant : pixels fixes, l'overlay était minuscule à 125 % et 150 %).
 fn font_px(size: &str) -> i32 {
-    match size {
+    let base = match size {
         "s" => 13,
         "l" => 20,
         _ => 16,
-    }
+    };
+    (base * SCALE.load(Ordering::Relaxed) as i32 + 50) / 100
+}
+
+/// Mise à l'échelle (%) de l'écran qui contient `r`.
+fn monitor_scale(r: &RECT) -> u32 {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    let c = POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+    let (mut dx, mut dy) = (96u32, 96u32);
+    unsafe { GetDpiForMonitor(MonitorFromPoint(c, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut dx, &mut dy) };
+    (dx.max(96) * 100 / 96).clamp(100, 400)
 }
 
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -964,7 +995,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             let old = SelectObject(dc, font as _);
             SetBkMode(dc, TRANSPARENT as i32);
             let pad = px / 2;
-            let row = px + 6;
+            let row = px + 6 * SCALE.load(Ordering::Relaxed) as i32 / 100;
             let graphs = LOOK.lock().unwrap().as_ref().map(|l| l.graphs.clone()).unwrap_or_default();
             let keys = KEYS.lock().unwrap().clone();
             let gw = graph_width(px, &keys, &graphs);
@@ -989,7 +1020,6 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             }
             drop(hist);
             SelectObject(dc, old);
-            DeleteObject(font as _);
             EndPaint(h, &ps);
             return 0;
         }
@@ -1034,10 +1064,25 @@ unsafe fn draw_graph(dc: HDC, r: RECT, q: &VecDeque<f32>) {
     }
 }
 
-/// Police à chiffres fixes : les colonnes restent alignées quand les valeurs changent.
+/// Police à chiffres fixes : les colonnes restent alignées quand les valeurs changent. Gardée tant que la
+/// taille ne change pas (fil de la fenêtre de l'overlay seulement) ; l'appelant ne la détruit pas.
 unsafe fn make_font(px: i32) -> HFONT {
-    let face: Vec<u16> = "Consolas".encode_utf16().chain(Some(0)).collect();
-    unsafe { CreateFontW(-px, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, CLEARTYPE_QUALITY as u32, 0, face.as_ptr()) }
+    thread_local! {
+        static FONT: std::cell::Cell<(i32, usize)> = const { std::cell::Cell::new((0, 0)) };
+    }
+    FONT.with(|f| {
+        let (cur, h) = f.get();
+        if cur == px && h != 0 {
+            return h as HFONT;
+        }
+        let face: Vec<u16> = "Consolas".encode_utf16().chain(Some(0)).collect();
+        let new = unsafe { CreateFontW(-px, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, CLEARTYPE_QUALITY as u32, 0, face.as_ptr()) };
+        if h != 0 {
+            unsafe { DeleteObject(h as _) };
+        }
+        f.set((px, new as usize));
+        new
+    })
 }
 
 /// Largeur = libellé le plus long + écart + valeur la plus longue, mesurés avec la vraie police.
@@ -1056,7 +1101,6 @@ fn measure(h: HWND, px: i32) -> i32 {
         let (kl, vl) = rows.iter().fold((0, 0), |(a, b), (k, v)| (a.max(w(k)), b.max(w(v))));
         drop(rows);
         SelectObject(dc, old);
-        DeleteObject(font as _);
         ReleaseDC(h, dc);
         let graphs = LOOK.lock().unwrap().as_ref().map(|l| l.graphs.clone()).unwrap_or_default();
         px / 2 * 2 + kl + px + vl + graph_width(px, &KEYS.lock().unwrap(), &graphs)
@@ -1066,12 +1110,6 @@ fn measure(h: HWND, px: i32) -> i32 {
 /// Coin choisi de l'écran du jeu.
 fn place(h: HWND, rows: usize, look: &Look) {
     unsafe {
-        let px = font_px(&look.size);
-        // Largeur qui ne rétrécit jamais tant que l'overlay reste affiché avec les mêmes réglages :
-        // « 3 » puis « 144 » ne fait plus sauter le cadre à chaque rafraîchissement.
-        let m = measure(h, px);
-        let w = WIDTH.fetch_max(m, Ordering::Relaxed).max(m);
-        let hgt = px / 2 * 2 + rows as i32 * (px + 6);
         // Écran du jeu : celui de l'appli plein écran au premier plan. Sans jeu plein écran (clic sur
         // l'autre écran, fenêtre de Clipper…), l'overlay reste où il était au lieu de sauter d'écran.
         static SCREEN: Mutex<Option<RECT>> = Mutex::new(None);
@@ -1092,7 +1130,19 @@ fn place(h: HWND, rows: usize, look: &Look) {
         }
         let m = screen.unwrap();
         drop(screen);
-        let margin = 12;
+        // Échelle de cet écran : texte, interligne et marge suivent (100 %, 125 %, 150 %…). Changement
+        // d'échelle (jeu passé sur l'autre écran) : largeur remesurée.
+        let sc = monitor_scale(&m);
+        if SCALE.swap(sc, Ordering::Relaxed) != sc {
+            WIDTH.store(0, Ordering::Relaxed);
+        }
+        let px = font_px(&look.size);
+        // Largeur qui ne rétrécit jamais tant que l'overlay reste affiché avec les mêmes réglages :
+        // « 3 » puis « 144 » ne fait plus sauter le cadre à chaque rafraîchissement.
+        let mw = measure(h, px);
+        let w = WIDTH.fetch_max(mw, Ordering::Relaxed).max(mw);
+        let hgt = px / 2 * 2 + rows as i32 * (px + 6 * sc as i32 / 100);
+        let margin = 12 * sc as i32 / 100;
         // « tl », « tc », « tr », « bl », « bc », « br » : haut ou bas, puis gauche, milieu ou droite.
         let x = match look.corner.chars().nth(1) {
             Some('r') => m.right - w - margin,

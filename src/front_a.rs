@@ -29,7 +29,7 @@ pub fn enc_label(e: &str) -> String {
     .to_string()
 }
 
-fn vendor(e: &str) -> Option<&'static str> {
+pub fn vendor(e: &str) -> Option<&'static str> {
     if e.ends_with("_nvenc") {
         Some("nvidia")
     } else if e.ends_with("_amf") {
@@ -41,10 +41,10 @@ fn vendor(e: &str) -> Option<&'static str> {
     }
 }
 
-const ITEMS: [(&str, &str); 9] =
+pub const ITEMS: [(&str, &str); 9] =
     [("fps", "FPS"), ("low1", "1% low"), ("frametime", "Temps d'image"), ("cpu", "CPU"), ("gpu", "GPU"), ("cpu_temp", "Temp. CPU"), ("gpu_temp", "Temp. GPU"), ("vram", "VRAM"), ("ram", "RAM")];
 
-fn ov_sample(k: &str) -> Option<(&'static str, &'static str, bool)> {
+pub fn ov_sample(k: &str) -> Option<(&'static str, &'static str, bool)> {
     Some(match k {
         "fps" => ("FPS", "142", true),
         "low1" => ("1% LOW", "98", false),
@@ -71,7 +71,7 @@ impl Front {
         (w, (w as f32 * self.native.1 as f32 / self.native.0 as f32 / 2.0).round() as u32 * 2)
     }
     /// Débit plafond en Mb/s (même formule que capture::bitrate_kbps).
-    fn mbps(&self) -> f32 {
+    pub fn mbps(&self) -> f32 {
         let base = match self.cfg.clip.height {
             720 => 10.0,
             1440 => 35.0,
@@ -82,7 +82,7 @@ impl Front {
         base * if self.cfg.clip.fps <= 30 { 0.65 } else { 1.0 } * self.cfg.quality.clamp(0.5, 2.0) * codec
     }
     /// NVENC / x264 en qualité constante : le débit est un plafond, la dépense réelle tourne autour de 40 %.
-    fn typical(&self) -> f32 {
+    pub fn typical(&self) -> f32 {
         if self.cfg.encoder.ends_with("_nvenc") || self.cfg.encoder == "libx264" { 0.4 } else { 1.0 }
     }
     pub fn chip_eff(&self) -> Option<String> {
@@ -98,7 +98,7 @@ impl Front {
         }
         if has("nvidia") { Some("nvidia".into()) } else { self.gpus.first().map(|g| g.0.clone()) }
     }
-    fn enc_ok(&self, e: &str) -> bool {
+    pub fn enc_ok(&self, e: &str) -> bool {
         match (vendor(e), self.chip_eff()) {
             (Some(v), Some(c)) => v == c,
             _ => true,
@@ -106,11 +106,14 @@ impl Front {
     }
 
     /// Curseur avec sa valeur à droite (.fader) et sa règle. Renvoie (résultat, hauteur).
-    fn fader(&mut self, ui: &mut Ui, wid: u64, x: f32, y: f32, w: f32, v: f32, range: (f32, f32, f32), out: (&str, &str), labels: Option<[&str; 3]>) -> (Slide, f32) {
-        let sw = w - 92.0 - 12.0;
+    pub fn fader(&mut self, ui: &mut Ui, wid: u64, x: f32, y: f32, w: f32, v: f32, range: (f32, f32, f32), out: (&str, &str), labels: Option<[&str; 3]>) -> (Slide, f32) {
+        let (a, b) = (text_w(out.0, F::m(12.5, 400)), text_w(out.1, F::m(11.0, 400)));
+        // Place de la valeur mesurée (avant : 92 px fixes, « ×1,00 · max 20 Mb/s » chevauchait le curseur et
+        // touchait le bord). Arrondie par paliers de 16 px : le curseur ne change pas de taille à chaque cran.
+        let rw = ((a + b).max(92.0) / 16.0).ceil() * 16.0;
+        let sw = w - rw - 12.0;
         let s = ui.slider(wid, r(x, y, sw, 32.0), v, range.0, range.1, range.2);
         ui.ruler(x, y + 26.0, sw);
-        let (a, b) = (text_w(out.0, F::m(12.5, 400)), text_w(out.1, F::m(11.0, 400)));
         ui.c.text(x + w - a - b, y, 32.0, out.0, F::m(12.5, 400), pal::TEXT);
         ui.c.text(x + w - b, y + 1.0, 32.0, out.1, F::m(11.0, 400), pal::TEXT3);
         let mut h = 32.0;
@@ -125,8 +128,8 @@ impl Front {
     }
 
     /// Groupe segmenté lié à un réglage texte. Renvoie la largeur.
-    fn seg_cfg(&mut self, ui: &mut Ui, key: &'static str, x: f32, y: f32, opts: &[(&'static str, serde_json::Value)], mono: bool) -> f32 {
-        let cur = serde_json::to_value(&self.cfg).ok().and_then(|v| v.get(key).cloned());
+    pub fn seg_cfg(&mut self, ui: &mut Ui, key: &'static str, x: f32, y: f32, opts: &[(&'static str, serde_json::Value)], mono: bool) -> f32 {
+        let cur = self.cfg_get(key);
         let sel = opts.iter().position(|(_, v)| Some(v) == cur.as_ref() || (v.is_number() && cur.as_ref().and_then(|c| c.as_f64()) == v.as_f64()));
         let so_: Vec<SegOpt> = opts.iter().map(|(l, _)| if mono { son(l) } else { so(l) }).collect();
         let (hit, w) = ui.seg(id(key), x, y, &so_, sel, Seg::D);
@@ -155,36 +158,7 @@ impl Front {
                 ui.c.rect(r(if dx > 0.0 { cx } else { cx - 12.0 }, if dy > 0.0 { cy } else { cy - 1.0 }, 12.0, 1.0), mk);
                 ui.c.rect(r(if dx > 0.0 { cx } else { cx - 1.0 }, if dy > 0.0 { cy } else { cy - 12.0 }, 1.0, 12.0), mk);
             }
-            // statistiques à l'écran, comme elles apparaîtront
-            if self.cfg.overlay_mode != "hidden" {
-                let fs = match self.cfg.overlay_size.as_str() {
-                    "s" => 9.0,
-                    "l" => 11.5,
-                    _ => 10.0,
-                };
-                let f = F::m(fs, 400);
-                let rows: Vec<_> = self.cfg.overlay_items.iter().filter_map(|k| ov_sample(k)).collect();
-                if !rows.is_empty() {
-                    let lh = fs * 1.35;
-                    let bw = rows.iter().map(|(a, b, _)| text_w(a, f) + 10.0 + text_w(b, f)).fold(0.0, f32::max) + 14.0;
-                    let bh = rows.len() as f32 * lh + 10.0;
-                    let cn = self.cfg.overlay_corner.as_str();
-                    let tx = match cn.chars().nth(1) {
-                        Some('r') => m.right() - 22.0 - bw,
-                        Some('c') => m.x + (m.w - bw) / 2.0,
-                        _ => m.x + 22.0,
-                    };
-                    let ty = if cn.starts_with('b') { m.bottom() - 32.0 - bh } else { m.y + 22.0 };
-                    let ax = ui.anim(id("ov-x"), tx, 0.3);
-                    let ay = ui.anim(id("ov-y"), ty, 0.3);
-                    ui.c.rrect(r(ax, ay, bw, bh), 3.0, hex(0x080a08).a(self.cfg.overlay_opacity));
-                    for (i, (a, b, hi)) in rows.iter().enumerate() {
-                        let ry = ay + 5.0 + i as f32 * lh;
-                        ui.c.text(ax + 7.0, ry, lh, a, f, pal::TEXT2);
-                        ui.c.text(ax + bw - 7.0 - text_w(b, f), ry, lh, b, f, if *hi { pal::OK } else { pal::TEXT });
-                    }
-                }
-            }
+            // (Aperçu des statistiques à l'écran : onglet Statistiques.)
             let f = F::m(11.0, 400);
             let hud = pal::TEXT.a(0.85);
             ui.led(m.x + 17.5, m.bottom() - 20.0, 7.0, pal::OK);
@@ -267,19 +241,9 @@ impl Front {
             }
             y += 14.0;
         }
-        // Interrupteur général : coupé, plus aucune capture ni encodage ni son capté (buffer vidé).
-        let hint = if self.cfg.clipping { "Activé : les dernières minutes sont gardées pour Clip et REC." } else { "Désactivé : aucune capture, aucun encodage, 0 % processeur et GPU. Clip et REC ne font rien." };
-        let (hit, hh) = self.sw_row(ui, id("clipping"), x, y, w, "Clipping", hint, self.cfg.clipping, false);
-        if hit {
-            self.set("clipping", json!(!self.cfg.clipping));
-        }
-        y += hh;
-        let hint = if self.cfg.desktop_capture { "Activée : le buffer tourne en permanence, même sur le bureau." } else { "Désactivée : le buffer ne tourne que pendant un jeu plein écran. 0 % GPU sur le bureau." };
-        let (hit, hh) = self.sw_row(ui, id("desktop_capture"), x, y, w, "Capture du bureau", hint, self.cfg.desktop_capture, false);
-        if hit {
-            self.set("desktop_capture", json!(!self.cfg.desktop_capture));
-        }
-        y += hh;
+        // Interrupteurs « Clipping » et « Capture du bureau », dans une carte : avant, empilés sans marge, le
+        // titre du second touchait le texte du premier et les interrupteurs flottaient en haut à droite.
+        y = self.capture_card(ui, x, y, w);
         ui.scroll_end(id("mon-clip"), view, y + 16.0 - body.y, clip);
 
         // ---------- colonne de droite : réglages ----------
@@ -306,7 +270,7 @@ impl Front {
         if open {
             let iw = w - 24.0;
             let hint_txt = "Même qualité pour le Clip et le REC : le REC réutilise le buffer, sans 2ᵉ capture ni coût en plus.";
-            let hh = { let sp = crate::gfx::md(hint_txt, F::s(12.0, 400), pal::TEXT3, 500, pal::TEXT2); ui.c.para(0.0, 0.0, iw, 17.4, &sp, false) };
+            let hh = { let sp = crate::gfx::md(hint_txt, F::s(12.5, 400), pal::TEXT3, 600, pal::TEXT2); ui.c.para(0.0, 0.0, iw, 18.0, &sp, false) };
             let card = r(x, cy, w, 12.0 + 19.0 + 10.0 + 62.0 + 10.0 + 17.0 + 10.0 + hh + 12.0);
             ui.c.rrect(card, 7.0, pal::WHITE.a(0.012));
             ui.c.border(card, 7.0, 1.0, pal::LINE);
@@ -422,37 +386,12 @@ impl Front {
         // Raccourcis
         let (open, mut cy) = self.grp(ui, "clip:k", "Raccourcis", x, y, w);
         if open {
-            for (i, (_, key, label)) in HK.iter().enumerate() {
-                let want = pretty(&serde_json::to_value(&self.cfg).ok().and_then(|v| v[*key].as_str().map(String::from)).unwrap_or_default());
-                let act = self.hk[i].clone();
-                let wait = self.hk_wait == Some(i);
-                ui.c.text(x, cy + 6.0, 32.0, label, F::s(13.0, 400), pal::TEXT);
-                let bl = if wait { "Annuler" } else { "Modifier" };
-                let bw = Ui::btn_w(bl, false, Btn::G);
-                if ui.btn(idn("hkedit", i), r(x + w - bw, cy + 6.0, bw, 32.0), bl, None, Btn::G) {
-                    self.hk_wait = if wait { None } else { Some(i) };
-                }
-                let (kt, kc, kf) = if wait { ("Appuyez…".to_string(), pal::SIGNAL, F::s(12.0, 600).ls(0.06)) } else { match &act { Some(a) => (a.clone(), pal::TEXT, F::s(12.0, 600).ls(0.06)), None => ("aucun".into(), pal::TEXT3, F::s(12.0, 500).ls(0.06)) } };
-                let kw = text_w(&kt, kf) + 16.0;
-                let kb = r(x + w - bw - 12.0 - kw, cy + 11.0, kw, 22.0);
-                ui.c.rrect(r(kb.x, kb.y + 1.0, kb.w, kb.h), 4.0, pal::LINE2);
-                ui.c.rrect(kb, 4.0, pal::WELL);
-                ui.c.border(kb, 4.0, 1.0, if wait { pal::SIGNAL } else { pal::LINE2 });
-                ui.c.text(kb.x + 8.0, kb.y + 1.0, 21.0, &kt, kf, kc);
-                cy += 44.0;
-                if self.conflicts.contains(&want) {
-                    let t = format!(
-                        "{want} est déjà pris par une autre application (souvent l'overlay NVIDIA ou AMD Adrenalin). {}",
-                        match &act {
-                            Some(a) if *a != want => format!("Clipper utilise {a} à la place."),
-                            _ => "Aucun raccourci actif : choisissez-en un autre.".into(),
-                        }
-                    );
-                    ui.c.icon("warn", x, cy - 4.0, 14.0, pal::WARN);
-                    let sp = vec![crate::gfx::Span { t, f: F::s(12.0, 400), c: pal::WARN }];
-                    cy += ui.c.para(x + 21.0, cy - 6.0, w - 21.0, 17.4, &sp, true) + 2.0;
-                }
-                if i < 3 {
+            // Le raccourci des statistiques (n° 3) est réglé dans l'onglet Statistiques.
+            let shown: Vec<usize> = (0..HK.len()).filter(|i| *i != 3).collect();
+            for (n, &i) in shown.iter().enumerate() {
+                cy = self.hk_row(ui, i, x, cy, w);
+                // Filet entre deux raccourcis (avant : « i < 3 », le dernier séparateur manquait).
+                if n + 1 < shown.len() {
                     ui.c.rect(r(x, cy - 1.0, w, 1.0), pal::LINE);
                 }
             }
@@ -494,145 +433,6 @@ impl Front {
         }
         y = self.grp_end(ui, open, x, cy, w, false);
 
-        // Statistiques à l'écran
-        let (open, mut cy) = self.grp(ui, "clip:s", "Statistiques à l'écran", x, y, w);
-        if open {
-            self.lab(ui.c, x, cy, 38.0, "Affichage", None);
-            self.seg_cfg(ui, "overlay_mode", fx, cy, &[("Masqué", json!("hidden")), ("Avec raccourci", json!("hotkey")), ("Toujours", json!("always"))], false);
-            cy += 38.0 + 6.0;
-            let ovk = self.hk[3].clone().unwrap_or_else(|| pretty(&self.cfg.key_overlay));
-            let t = match self.cfg.overlay_mode.as_str() {
-                "hidden" => "Aucune statistique à l'écran.".to_string(),
-                "always" => "Visible en permanence par-dessus le jeu.".to_string(),
-                _ => format!("Affichez ou masquez pendant le jeu avec {ovk}."),
-            };
-            cy += ui.hint(fx, cy, fw, &t);
-            if self.cfg.overlay_mode != "hidden" {
-                cy += 12.0;
-                for (which, label, key) in [(0, "Mesures", "overlay_items"), (1, "Graphique", "overlay_graphs")] {
-                    let list = if which == 0 { self.cfg.overlay_items.clone() } else { self.cfg.overlay_graphs.clone() };
-                    let (mut px, mut py) = (fx, cy);
-                    let mut toggled = None;
-                    for (i, (k, l)) in ITEMS.iter().enumerate() {
-                        let on = list.iter().any(|x| x == k);
-                        // Graphique : seulement pour une mesure affichée. Temp. CPU sans capteur : décochable, pas cochable.
-                        let off = if which == 1 { !self.cfg.overlay_items.iter().any(|x| x == k) } else { *k == "cpu_temp" && !self.cpu_temp && !on };
-                        let cwid = (37.0 + text_w(l, F::s(12.5, 400)) + 2.0).ceil();
-                        if px + cwid > fx + fw + 0.5 {
-                            (px, py) = (fx, py + 38.0);
-                        }
-                        let (hit, cw_) = ui.chip(idn(key, i), px, py, l, on, off);
-                        if hit {
-                            toggled = Some(*k);
-                        }
-                        px += cw_ + 6.0;
-                    }
-                    self.lab(ui.c, x, cy, py + 32.0 - cy, label, None);
-                    if let Some(k) = toggled {
-                        let mut on: Vec<&str> = list.iter().map(String::as_str).collect();
-                        if on.contains(&k) { on.retain(|x| *x != k) } else { on.push(k) }
-                        let ordered: Vec<&str> = ITEMS.iter().map(|i| i.0).filter(|i| on.contains(i)).collect();
-                        self.set(key, json!(ordered));
-                    }
-                    cy = py + 32.0 + 12.0;
-                }
-                cy -= 4.0;
-                cy += ui.hint(fx, cy, fw, "Courbe des 15 dernières secondes à côté de la valeur, comme Afterburner.") + 12.0;
-                // position : haut ou bas, gauche, milieu ou droite
-                self.lab(ui.c, x, cy, 75.0, "Position", None);
-                let cb_ = r(fx, cy, 134.0, 75.0);
-                ui.c.rrect(cb_, 6.0, pal::WELL);
-                ui.c.border(cb_, 6.0, 1.0, pal::LINE);
-                let mut pick = None;
-                for (i, v) in ["tl", "tc", "tr", "bl", "bc", "br"].iter().enumerate() {
-                    let cell = r(fx + 4.0 + (i % 3) as f32 * 43.0, cy + 4.0 + (i / 3) as f32 * 35.0, 40.0, 32.0);
-                    let on = self.cfg.overlay_corner == *v;
-                    if on || ui.hot(cell) {
-                        ui.c.rrect(cell, 3.0, pal::RAISE);
-                    }
-                    if ui.click(idn("corner", i), cell) {
-                        pick = Some(*v);
-                    }
-                    let mx = match i % 3 {
-                        0 => cell.x + 6.0,
-                        1 => cell.x + (cell.w - 9.0) / 2.0,
-                        _ => cell.right() - 15.0,
-                    };
-                    let my = if i / 3 == 0 { cell.y + 6.0 } else { cell.bottom() - 13.0 };
-                    ui.c.rrect(r(mx, my, 9.0, 7.0), 1.0, if on { pal::SIGNAL } else { pal::LINE2 });
-                }
-                if let Some(v) = pick {
-                    self.set("overlay_corner", json!(v));
-                }
-                cy += 75.0 + 12.0;
-                self.lab(ui.c, x, cy, 38.0, "Taille", None);
-                self.seg_cfg(ui, "overlay_size", fx, cy, &[("Petite", json!("s")), ("Moyenne", json!("m")), ("Grande", json!("l"))], false);
-                cy += 38.0 + 12.0;
-                // Cartes mesurées (GPU %, température, VRAM) : une ou plusieurs, puce intégrée comprise.
-                let names = self.gpu_names.clone();
-                if names.len() > 1 {
-                    // Aucune cochée = la carte NVIDIA (ou la première) : affichée cochée.
-                    let chosen: Vec<String> = if self.cfg.overlay_gpus.iter().any(|g| names.contains(g)) {
-                        self.cfg.overlay_gpus.iter().filter(|g| names.contains(g)).cloned().collect()
-                    } else {
-                        names.iter().find(|n| n.contains("NVIDIA")).or(names.first()).cloned().into_iter().collect()
-                    };
-                    let (mut px, mut py) = (fx, cy);
-                    let mut toggled = None;
-                    for (i, n) in names.iter().enumerate() {
-                        let l = n.strip_prefix("NVIDIA ").unwrap_or(n);
-                        let cwid = (37.0 + text_w(l, F::s(12.5, 400)) + 2.0).ceil();
-                        if px + cwid > fx + fw + 0.5 {
-                            (px, py) = (fx, py + 38.0);
-                        }
-                        let (hit, cw_) = ui.chip(idn("gpus", i), px, py, l, chosen.contains(n), false);
-                        if hit {
-                            toggled = Some(n.clone());
-                        }
-                        px += cw_ + 6.0;
-                    }
-                    self.lab(ui.c, x, cy, py + 32.0 - cy, "Cartes mesurées", None);
-                    if let Some(n) = toggled {
-                        let mut on = chosen.clone();
-                        if on.contains(&n) {
-                            // Toujours au moins une carte.
-                            if on.len() > 1 {
-                                on.retain(|g| *g != n);
-                            }
-                        } else {
-                            on.push(n);
-                        }
-                        let ordered: Vec<&String> = names.iter().filter(|g| on.contains(g)).collect();
-                        self.set("overlay_gpus", json!(ordered));
-                    }
-                    cy = py + 32.0 + 6.0;
-                }
-                let t = if names.is_empty() {
-                    "GPU, température GPU et VRAM : aucune carte graphique trouvée.".to_string()
-                } else {
-                    "GPU, température GPU et VRAM : une ligne par carte cochée. Température : cartes NVIDIA seulement (« n/d » pour une puce AMD ou Intel, illisible sans le logiciel du fabricant).".to_string()
-                };
-                cy += ui.hint(fx, cy, fw, &t) + 12.0;
-                self.lab(ui.c, x, cy, 38.0, "Mise à jour", Some("des chiffres"));
-                self.seg_cfg(ui, "overlay_refresh_ms", fx, cy, &[("0,25 s", json!(250)), ("0,5 s", json!(500)), ("1 s", json!(1000)), ("2 s", json!(2000))], true);
-                cy += 38.0 + 12.0;
-                cy += ui.hint(fx, cy, fw, "FPS et MS/IMG (temps moyen d'une image, 1000 ÷ FPS) comptent les images du frame gen (DLSS, FSR) comme le compteur NVIDIA. Le 1 % low est calculé sur les 10 dernières secondes : la moyenne des 1 % d'images les plus lentes, comme Afterburner et CapFrameX.") + 12.0;
-                self.lab(ui.c, x, cy, 34.0, "Opacité du fond", None);
-                let pct = (self.cfg.overlay_opacity * 100.0).round();
-                let (s, _) = self.fader(ui, id("op"), fx, cy + 1.0, fw, pct, (0.0, 100.0, 5.0), (&format!("{pct:.0}"), " %"), None);
-                if s.changed {
-                    self.cfg.overlay_opacity = s.v / 100.0;
-                }
-                if s.done {
-                    self.set("overlay_opacity", json!(s.v / 100.0));
-                }
-                cy += 34.0 + 12.0;
-                cy += ui.note(x, cy, w, Note::Warn, "lock", "**FPS et temps d'image demandent les droits administrateur** (ou le groupe « Utilisateurs du journal de performances »). Sans eux, seuls CPU, GPU, températures et mémoire s'affichent.", 0.0).0 + 12.0;
-                cy += ui.hint(x, cy, w, "Fenêtre Windows séparée, rien n'est injecté dans le jeu. Invisible en plein écran exclusif. Pas incrustée dans les clips.");
-            }
-        }
-        y = self.grp_end(ui, open, x, cy, w, false);
-
         // Interface
         let (open, mut cy) = self.grp(ui, "clip:ui", "Interface", x, y, w);
         if open {
@@ -654,136 +454,44 @@ impl Front {
                 }
             }
         }
-        y = self.grp_end(ui, open, x, cy, w, false);
-
-        // Avancé
-        let (open, mut cy) = self.grp(ui, "clip:adv", "Avancé", x, y, w);
-        if open {
-            let (hit, hh) = self.sw_row(ui, id("autoSw"), x, cy, w, "Ouvrir au démarrage", "Clipper se lance avec Windows, réduit dans la zone de notification.", self.autostart, false);
-            if hit {
-                self.autostart = !self.autostart;
-                let v = self.autostart;
-                self.send(json!({"cmd": "autostart", "value": v}));
-            }
-            cy = self.sw_sep(ui.c, x, cy + hh, w);
-            let tray = self.cfg.minimize_to_tray;
-            let (hit, hh) = self.sw_row(ui, id("traySw"), x, cy, w, "Réduire dans la zone de notification", "Le bouton « – » range Clipper près de l'horloge (flèche en bas à droite), sans icône dans la barre des tâches.", tray, false);
-            if hit {
-                self.set("minimize_to_tray", json!(!tray));
-            }
-            cy = self.sw_sep(ui.c, x, cy + hh, w);
-            let on = self.cfg.admin_mode;
-            let hint = if self.admin_busy {
-                "En attente de l'autorisation Windows…"
-            } else if on && self.elevated {
-                "Actif : Clipper tourne en administrateur, sans demande à chaque lancement. Les FPS de l'overlay fonctionnent."
-            } else if on {
-                "Activé. Relancez Clipper pour passer en administrateur."
-            } else {
-                "Windows demande l'autorisation une seule fois. Ensuite, plus aucune demande au lancement (FPS de l'overlay, nettoyage)."
-            };
-            let (hit, hh) = self.sw_row(ui, id("adminSw"), x, cy, w, "Démarrer en administrateur", hint, on, self.admin_busy);
-            if hit {
-                self.admin_busy = true;
-                self.send(json!({"cmd": "admin_mode", "value": !on}));
-            }
-            cy += hh;
-            if on && !self.elevated {
-                cy += 8.0;
-                if ui.btn(id("adminRel"), r(x, cy, Ui::btn_w("Relancer en administrateur", true, Btn::N), 32.0), "Relancer en administrateur", Some("refresh"), Btn::N) {
-                    self.send(json!({"cmd": "relaunch_admin"}));
-                }
-                cy += 32.0 + 12.0;
-            }
-            cy += 18.0;
-            // Puce d'encodage
-            let ce = self.chip_eff();
-            let chip_name = self.gpus.iter().find(|g| Some(&g.0) == ce.as_ref()).map_or("Processeur".to_string(), |g| g.1.clone());
-            let (o, mut dy) = self.details(ui, "adv:chip", "Puce d'encodage", &chip_name, false, x, cy, w);
-            if o {
-                let (ix, iw) = (x + 12.0, w - 24.0);
-                // Noms de cartes : libellés dynamiques, dessinés comme un groupe segmenté.
-                let names: Vec<String> = if self.gpus.is_empty() { vec!["Processeur".into()] } else { self.gpus.iter().map(|g| g.1.clone()).collect() };
-                let mut sx = ix + 4.0;
-                let total: f32 = names.iter().map(|n| (32.0 + text_w(n, F::s(13.0, 400))).ceil() + 2.0).sum::<f32>() + 6.0;
-                let bx = r(ix, dy, total.min(iw), 38.0);
-                ui.c.rrect(bx, 6.0, pal::WELL);
-                ui.c.border(bx, 6.0, 1.0, pal::LINE);
-                let mut pick = None;
-                for (i, n) in names.iter().enumerate() {
-                    let cwid = (32.0 + text_w(n, F::s(13.0, 400))).ceil();
-                    let cell = r(sx, dy + 4.0, cwid, 30.0);
-                    let on = self.gpus.get(i).is_none_or(|g| Some(&g.0) == ce.as_ref());
-                    if on {
-                        ui.c.rrect(cell, 4.0, pal::RAISE);
-                    }
-                    if !self.gpus.is_empty() && ui.click(idn("chip", i), cell) {
-                        pick = Some(i);
-                    }
-                    ui.c.circle(cell.x + 12.5, cell.cy(), 2.5, if on { pal::SIGNAL } else { pal::LINE2 });
-                    ui.c.text(cell.x + 22.0, cell.y, 30.0, n, F::s(13.0, 400), if on || ui.hot(cell) { pal::TEXT } else { pal::TEXT2 });
-                    sx += cwid + 2.0;
-                }
-                if let Some(i) = pick {
-                    let gid = self.gpus[i].0.clone();
-                    self.set("encode_chip", json!(gid));
-                    if !self.enc_ok(&self.cfg.encoder.clone()) {
-                        let e = self.encoders.iter().find(|e| vendor(e) == Some(gid.as_str()) && e.starts_with("h264")).or_else(|| self.encoders.iter().find(|e| self.enc_ok(e))).cloned();
-                        if let Some(e) = e {
-                            self.set("encoder", json!(e));
-                        }
-                    }
-                }
-                dy += 38.0 + 12.0;
-                dy += ui.hint(ix, dy, iw, "Les encodeurs des autres puces sont grisés dans « Encodeur ». x264 (processeur) reste toujours possible.");
-                if self.gpus.len() >= 2 {
-                    dy += 12.0;
-                    dy += ui.note(ix, dy, iw, Note::Info, "info", "NVENC est déjà une puce séparée des cœurs qui font tourner le jeu (impact typique `1–3 %` de FPS). La puce intégrée libère NVENC mais coûte environ `6 %` de processeur et de la bande passante mémoire. **Si votre jeu est limité par le processeur, restez sur la carte graphique.**", 0.0).0;
-                }
-                dy += 14.0;
-            }
-            cy = self.details_end(ui, x, cy, dy, w) + 10.0;
-            // Mode étiré
-            let st = match self.cfg.stretch.as_str() {
-                "16:9" => "16:9",
-                "16:10" => "16:10",
-                _ => "Désactivé",
-            };
-            let (o, mut dy) = self.details(ui, "adv:str", "Mode étiré (4:3 étiré)", st, false, x, cy, w);
-            if o {
-                let (ix, iw) = (x + 12.0, w - 24.0);
-                self.seg_cfg(ui, "stretch", ix, dy, &[("Désactivé", json!("off")), ("Étirer en 16:9", json!("16:9")), ("Étirer en 16:10", json!("16:10"))], false);
-                dy += 38.0 + 12.0;
-                dy += ui.hint(ix, dy, iw, "Si vous jouez en `1440×1080` étiré, le clip est élargi pour ressembler à ce que vous voyez. Lisible partout (Discord, YouTube).");
-                if self.cfg.stretch != "off" {
-                    dy += 12.0;
-                    dy += ui.note(ix, dy, iw, Note::Warn, "warn", "**Sans coût, sans perte.** L'image garde tous ses pixels ; le fichier est marqué 16:9 et les lecteurs (VLC, Premiere, navigateur, Discord) l'étirent à l'affichage.", 0.0).0;
-                }
-                dy += 14.0;
-            }
-            cy = self.details_end(ui, x, cy, dy, w) + 10.0;
-            // Limites connues
-            let (o, mut dy) = self.details(ui, "adv:lim", "Limites connues", "5", true, x, cy, w);
-            if o {
-                let (ix, iw) = (x + 12.0, w - 24.0);
-                let lims: [(&'static str, String); 5] = [
-                    ("screen", "La barre et les statistiques sont invisibles en **plein écran exclusif**. Si le jeu capture la souris, utilisez les raccourcis : ils marchent toujours.".into()),
-                    ("disk", format!("Le buffer écrit environ **{} Go par heure** sur le disque du buffer, en boucle.", fr(gh as f64, 1))),
-                    ("lock", "Les **FPS** de l'overlay demandent les droits administrateur.".into()),
-                    ("res", "Une résolution autre que celle de l'écran passe par un redimensionnement **processeur**.".into()),
-                    ("chip", "PC hybride : si l'écran est branché sur la puce intégrée, l'encodage NVIDIA sans copie peut échouer ; Clipper bascule alors seul.".into()),
-                ];
-                for (icon, t) in lims {
-                    dy += self.lim(ui, ix, dy, iw, icon, &t) + 8.0;
-                }
-                dy += 4.0;
-                dy += ui.hint(ix, dy, iw, "Clipper n'utilise que des API Windows publiques (comme OBS ou Discord) et ne touche jamais au processus du jeu. Personne ne peut garantir l'absence de ban : chaque éditeur décide seul.");
-                dy += 14.0;
-            }
-            cy = self.details_end(ui, x, cy, dy, w);
-        }
         y = self.grp_end(ui, open, x, cy, w, true);
+
         ui.scroll_end(id("set-clip"), view, y + 28.0 - view.y, clip);
+    }
+
+    /// Ligne d'un raccourci : libellé, touche active, bouton « Modifier » et conflit éventuel. Renvoie le y suivant.
+    pub fn hk_row(&mut self, ui: &mut Ui, i: usize, x: f32, mut y: f32, w: f32) -> f32 {
+        let (_, key, label) = HK[i];
+        let want = pretty(&self.cfg_get(key).and_then(|v| v.as_str().map(String::from)).unwrap_or_default());
+        let act = self.hk[i].clone();
+        let wait = self.hk_wait == Some(i);
+        ui.c.text(x, y + 6.0, 32.0, label, F::s(13.0, 400), pal::TEXT);
+        let bl = if wait { "Annuler" } else { "Modifier" };
+        let bw = Ui::btn_w(bl, false, Btn::G);
+        if ui.btn(idn("hkedit", i), r(x + w - bw, y + 6.0, bw, 32.0), bl, None, Btn::G) {
+            self.hk_wait = if wait { None } else { Some(i) };
+        }
+        let (kt, kc, kf) = if wait { ("Appuyez…".to_string(), pal::SIGNAL, F::s(12.0, 600).ls(0.06)) } else { match &act { Some(a) => (a.clone(), pal::TEXT, F::s(12.0, 600).ls(0.06)), None => ("aucun".into(), pal::TEXT3, F::s(12.0, 500).ls(0.06)) } };
+        let kw = text_w(&kt, kf) + 16.0;
+        let kb = r(x + w - bw - 12.0 - kw, y + 11.0, kw, 22.0);
+        ui.c.rrect(r(kb.x, kb.y + 1.0, kb.w, kb.h), 4.0, pal::LINE2);
+        ui.c.rrect(kb, 4.0, pal::WELL);
+        ui.c.border(kb, 4.0, 1.0, if wait { pal::SIGNAL } else { pal::LINE2 });
+        ui.c.text(kb.x + 8.0, kb.y + 1.0, 21.0, &kt, kf, kc);
+        y += 44.0;
+        if self.conflicts.contains(&want) {
+            let t = format!(
+                "{want} est déjà pris par une autre application (souvent l'overlay NVIDIA ou AMD Adrenalin). {}",
+                match &act {
+                    Some(a) if *a != want => format!("Clipper utilise {a} à la place."),
+                    _ => "Aucun raccourci actif : choisissez-en un autre.".into(),
+                }
+            );
+            ui.c.icon("warn", x, y - 4.0, 14.0, pal::WARN);
+            let sp = vec![crate::gfx::Span { t, f: F::s(12.0, 400), c: pal::WARN }];
+            y += ui.c.para(x + 21.0, y - 6.0, w - 21.0, 17.4, &sp, true) + 2.0;
+        }
+        y
     }
 
     /// Ligne d'une liste à icône (.lims li). Renvoie la hauteur.
@@ -794,7 +502,7 @@ impl Front {
     }
 
     /// Volet dépliable (details.more) : en-tête de 42 px. Renvoie (ouvert, y du contenu).
-    fn details(&mut self, ui: &mut Ui, key: &str, title: &str, side: &str, mono: bool, x: f32, y: f32, w: f32) -> (bool, f32) {
+    pub fn details(&mut self, ui: &mut Ui, key: &str, title: &str, side: &str, mono: bool, x: f32, y: f32, w: f32) -> (bool, f32) {
         let open = self.fold(key);
         let head = r(x, y, w, 42.0);
         if ui.hot(head) {
@@ -812,7 +520,7 @@ impl Front {
     }
 
     /// Cadre du volet, une fois sa hauteur connue. Renvoie le y sous le volet.
-    fn details_end(&mut self, ui: &mut Ui, x: f32, y0: f32, y1: f32, w: f32) -> f32 {
+    pub fn details_end(&mut self, ui: &mut Ui, x: f32, y0: f32, y1: f32, w: f32) -> f32 {
         ui.c.border(r(x, y0, w, y1 - y0), 7.0, 1.0, pal::LINE);
         y1
     }

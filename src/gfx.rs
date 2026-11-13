@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tiny_skia::{
-    Color, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, PixmapRef,
+    Color, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
     Point, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
 
@@ -44,10 +44,12 @@ pub mod pal {
     pub const RAISE_H: Col = hex(0x2a3327);
     pub const LINE: Col = hex(0x2b3429);
     pub const LINE2: Col = hex(0x3c4739);
-    pub const TEXT: Col = hex(0xe9ece2);
-    pub const TEXT2: Col = hex(0xb3bba9);
-    pub const TEXT3: Col = hex(0x8d9786);
-    pub const OFF: Col = hex(0x7a8572);
+    // Texte éclairci (lisibilité) : sur BODY, TEXT ≈ 16:1, TEXT2 ≈ 12:1, TEXT3 ≈ 8,4:1, OFF ≈ 5,7:1 (WCAG AA
+    // demande 4,5:1). Avant : TEXT2 9:1 et TEXT3 5,9:1, les textes d'aide paraissaient éteints.
+    pub const TEXT: Col = hex(0xf3f5ee);
+    pub const TEXT2: Col = hex(0xcfd6c6);
+    pub const TEXT3: Col = hex(0xabb5a2);
+    pub const OFF: Col = hex(0x8a957f);
     pub const SIGNAL: Col = hex(0xff7d2e);
     pub const SIGNAL_INK: Col = hex(0x1d0e03);
     pub const SIGNAL_SOFT: Col = Col(255, 125, 46, 41);
@@ -214,6 +216,15 @@ fn glyph(fi: usize, ch: char, px: f32) -> std::rc::Rc<Glyph> {
     })
 }
 
+/// Couverture des glyphes corrigée pour du texte clair sur fond sombre. fontdue rend une couverture
+/// linéaire : mélangée telle quelle, le bord des lettres tombait trop vite vers le fond et le texte
+/// paraissait fin, gris et un peu flou (même effet que sans correction gamma dans un navigateur).
+/// Courbe en puissance 0,72 : traits pleins et bords plus francs, les pixels vides restent vides.
+fn ink() -> &'static [u8; 256] {
+    static LUT: OnceLock<[u8; 256]> = OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|i| ((i as f32 / 255.0).powf(0.72) * 255.0).round() as u8))
+}
+
 /// Largeur d'un texte, en pixels logiques.
 pub fn text_w(s: &str, f: F) -> f32 {
     let font = &fonts()[f.idx()];
@@ -239,7 +250,7 @@ pub fn md(text: &str, f: F, c: Col, bw: u16, bc: Col) -> Vec<Span> {
     let (mut bold, mut mono) = (false, false);
     let mut cur = String::new();
     let mut it = text.chars().peekable();
-    let mut flush = |cur: &mut String, bold: bool, mono: bool, out: &mut Vec<Span>| {
+    let flush = |cur: &mut String, bold: bool, mono: bool, out: &mut Vec<Span>| {
         if !cur.is_empty() {
             let mut ff = if bold { f.wt(bw) } else { f };
             if mono {
@@ -291,6 +302,9 @@ fn icon_src(name: &str) -> &'static [(&'static str, IconKind)] {
         "info" => &[("O12 12 8.5", S(1.6)), ("M12 11v5.5M12 7.8v.1", S(1.6))],
         "chev" => &[("M9.5 6l6 6-6 6", S(1.6))],
         "min" => &[("M6 12h12", S(1.6))],
+        // Agrandir : un carré ; restaurer : deux carrés décalés (convention de Windows).
+        "max" => &[("R6 6 12 12 1.5", S(1.6))],
+        "restore" => &[("R5.5 8.5 10 10 1.5", S(1.6)), ("M9 5.5h8a1.5 1.5 0 0 1 1.5 1.5v8", S(1.6))],
         "x" => &[("M6.5 6.5l11 11M17.5 6.5l-11 11", S(1.6))],
         "arrow" => &[("M4 12h15M14 7l5 5-5 5", S(1.6))],
         "dl" => &[("M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14", S(1.6))],
@@ -497,12 +511,39 @@ pub struct Canvas {
     clip: (i32, i32, i32, i32),
     mask: Mask,
     masked: bool,
+    /// Le masque correspond à la découpe en cours. Il n'est rempli que quand un dessin à cheval sur le
+    /// bord en a besoin : avant, chaque changement de découpe réécrivait tout le masque (~1 Mo, plusieurs
+    /// fois par image), même quand rien ne dépassait.
+    mask_ok: bool,
 }
 
 impl Canvas {
     pub fn new(w: u32, h: u32, s: f32) -> Canvas {
         let (w, h) = (w.max(1), h.max(1));
-        Canvas { pm: Pixmap::new(w, h).expect("tampon"), s, ox: 0.0, oy: 0.0, clip: (0, 0, w as i32, h as i32), mask: Mask::new(w, h).expect("masque"), masked: false }
+        Canvas { pm: Pixmap::new(w, h).expect("tampon"), s, ox: 0.0, oy: 0.0, clip: (0, 0, w as i32, h as i32), mask: Mask::new(w, h).expect("masque"), masked: false, mask_ok: true }
+    }
+
+    /// Faut-il le masque pour un dessin de visibilité `vis` ? Rempli à la demande.
+    fn need(&mut self, vis: u8) -> bool {
+        if vis != 2 || !self.masked {
+            return false;
+        }
+        if !self.mask_ok {
+            let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
+            let (x0, y0, x1, y1) = self.clip;
+            let d = self.mask.data_mut();
+            // Seules les lignes de la découpe sont ouvertes ; le reste fermé.
+            d[..(y0.clamp(0, h) * w) as usize].fill(0);
+            for y in y0..y1 {
+                let row = &mut d[(y * w) as usize..((y + 1) * w) as usize];
+                row[..x0 as usize].fill(0);
+                row[x0 as usize..x1 as usize].fill(255);
+                row[x1 as usize..].fill(0);
+            }
+            d[(y1.clamp(0, h) * w) as usize..].fill(0);
+            self.mask_ok = true;
+        }
+        true
     }
 
     /// Taille logique du tampon.
@@ -542,10 +583,6 @@ impl Canvas {
         }
     }
 
-    fn m(&self) -> Option<&Mask> {
-        self.masked.then_some(&self.mask)
-    }
-
     /// Aligne un rectangle sur les pixels de l'écran (filets nets).
     fn snap(&self, q: R) -> R {
         let f = |v: f32| (v * self.s).round() / self.s;
@@ -583,14 +620,7 @@ impl Canvas {
         let (w, h) = (self.pm.width() as i32, self.pm.height() as i32);
         let (x0, y0, x1, y1) = self.clip;
         self.masked = (x0, y0, x1, y1) != (0, 0, w, h);
-        if !self.masked {
-            return;
-        }
-        let d = self.mask.data_mut();
-        d.fill(0);
-        for y in y0..y1 {
-            d[(y * w + x0) as usize..(y * w + x1) as usize].fill(255);
-        }
+        self.mask_ok = false; // rempli à la demande (`need`)
     }
 
     fn paint(c: Col) -> Paint<'static> {
@@ -615,7 +645,7 @@ impl Canvas {
             if let Some(rc) = tiny_skia::Rect::from_xywh(q.x, q.y, q.w, q.h) {
                 let mut p = Self::paint(c);
                 p.anti_alias = false;
-                let m = (vis == 2 && self.masked).then_some(&self.mask);
+                let m = self.need(vis).then_some(&self.mask);
                 self.pm.fill_rect(rc, &p, tf, m);
             }
             return;
@@ -623,7 +653,7 @@ impl Canvas {
         let mut pb = PathBuilder::new();
         push_rrect(&mut pb, q, rad);
         if let Some(path) = pb.finish() {
-            let m = (vis == 2 && self.masked).then_some(&self.mask);
+            let m = self.need(vis).then_some(&self.mask);
             self.pm.fill_path(&path, &Self::paint(c), FillRule::Winding, tf, m);
         }
     }
@@ -646,7 +676,7 @@ impl Canvas {
         push_rrect(&mut pb, q, (rad - w / 2.0).max(0.0));
         if let Some(path) = pb.finish() {
             let st = Stroke { width: w, ..Default::default() };
-            let (tf, m) = (self.tf(), (vis == 2 && self.masked).then_some(&self.mask));
+            let (tf, m) = (self.tf(), self.need(vis).then_some(&self.mask));
             self.pm.stroke_path(&path, &Self::paint(c), &st, tf, m);
         }
     }
@@ -672,7 +702,7 @@ impl Canvas {
         let mut pb = PathBuilder::new();
         push_rrect(&mut pb, q, rad);
         if let Some(path) = pb.finish() {
-            let (tf, m) = (self.tf(), (vis == 2 && self.masked).then_some(&self.mask));
+            let (tf, m) = (self.tf(), self.need(vis).then_some(&self.mask));
             self.pm.fill_path(&path, &p, FillRule::Winding, tf, m);
         }
     }
@@ -691,7 +721,7 @@ impl Canvas {
         let mut pb = PathBuilder::new();
         pb.push_circle(cx, cy, rad);
         if let Some(path) = pb.finish() {
-            let (tf, m) = (self.tf(), (vis == 2 && self.masked).then_some(&self.mask));
+            let (tf, m) = (self.tf(), self.need(vis).then_some(&self.mask));
             self.pm.fill_path(&path, &p, FillRule::Winding, tf, m);
         }
     }
@@ -704,7 +734,7 @@ impl Canvas {
         let mut pb = PathBuilder::new();
         pb.push_circle(cx, cy, rad);
         if let Some(path) = pb.finish() {
-            let (tf, m) = (self.tf(), (vis == 2 && self.masked).then_some(&self.mask));
+            let (tf, m) = (self.tf(), self.need(vis).then_some(&self.mask));
             self.pm.fill_path(&path, &Self::paint(c), FillRule::Winding, tf, m);
         }
     }
@@ -750,7 +780,7 @@ impl Canvas {
             push_rrect(&mut pb, o, rad + g);
             push_rrect(&mut pb, self.snap(q), rad);
             if let Some(path) = pb.finish() {
-                let m = (vis == 2 && self.masked).then_some(&self.mask);
+                let m = self.need(vis).then_some(&self.mask);
                 self.pm.fill_path(&path, &Self::paint(col), FillRule::EvenOdd, tf, m);
             }
         }
@@ -761,7 +791,7 @@ impl Canvas {
         if vis == 0 {
             return;
         }
-        let (tf, m) = (self.tf().pre_concat(extra), (vis == 2 && self.masked).then_some(&self.mask));
+        let (tf, m) = (self.tf().pre_concat(extra), self.need(vis).then_some(&self.mask));
         self.pm.fill_path(path, &Self::paint(c), FillRule::Winding, tf, m);
     }
 
@@ -771,7 +801,7 @@ impl Canvas {
             return;
         }
         let st = Stroke { width: w, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
-        let (tf, m) = (self.tf().pre_concat(extra), (vis == 2 && self.masked).then_some(&self.mask));
+        let (tf, m) = (self.tf().pre_concat(extra), self.need(vis).then_some(&self.mask));
         self.pm.stroke_path(path, &Self::paint(c), &st, tf, m);
     }
 
@@ -787,7 +817,7 @@ impl Canvas {
         p.shader = sh;
         p.anti_alias = true;
         let stroke = Stroke { width: w, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
-        let (tf, m) = (self.tf().pre_concat(extra), (vis == 2 && self.masked).then_some(&self.mask));
+        let (tf, m) = (self.tf().pre_concat(extra), self.need(vis).then_some(&self.mask));
         self.pm.stroke_path(path, &p, &stroke, tf, m);
     }
 
@@ -859,7 +889,7 @@ impl Canvas {
                     if xx < cx0 || xx >= cx1 {
                         continue;
                     }
-                    let cov = g.cov[(row as usize) * g.w + col as usize] as u32;
+                    let cov = ink()[g.cov[(row as usize) * g.w + col as usize] as usize] as u32;
                     if cov == 0 {
                         continue;
                     }
@@ -894,14 +924,15 @@ impl Canvas {
             self.text(x, top, lh, s, f, c);
             return;
         }
-        let mut cut = String::new();
+        // Largeur cumulée caractère par caractère (avant : texte recopié et remesuré à chaque lettre).
+        let (ell, mut used, mut cut) = (text_w("…", f), 0.0, String::new());
         for ch in s.chars() {
-            let mut t = cut.clone();
-            t.push(ch);
-            if text_w(&t, f) + text_w("…", f) > maxw {
+            let cw = text_w(ch.encode_utf8(&mut [0u8; 4]), f);
+            if used + cw + ell > maxw {
                 break;
             }
-            cut = t;
+            used += cw;
+            cut.push(ch);
         }
         cut.push('…');
         self.text(x, top, lh, &cut, f, c);
@@ -973,6 +1004,31 @@ impl Canvas {
         }
     }
 
+    /// Comme `blit`, mêlée à ce qui est déjà dessiné avec l'opacité `a` (fondu de la miniature vers la vidéo).
+    pub fn blit_alpha(&mut self, data: &[u8], w: u32, h: u32, x: f32, y: f32, a: f32) {
+        let (px, py) = (((x + self.ox) * self.s).round() as i32, ((y + self.oy) * self.s).round() as i32);
+        let (cx0, cy0, cx1, cy1) = self.clip;
+        let (x0, x1) = (px.max(cx0), (px + w as i32).min(cx1));
+        if x1 <= x0 || data.len() < (w * h * 4) as usize {
+            return;
+        }
+        let k = (a.clamp(0.0, 1.0) * 256.0) as u32;
+        let pw = self.pm.width() as i32;
+        let dst = self.pm.data_mut();
+        for row in 0..h as i32 {
+            let yy = py + row;
+            if yy < cy0 || yy >= cy1 {
+                continue;
+            }
+            let s0 = ((row * w as i32 + (x0 - px)) * 4) as usize;
+            let d0 = ((yy * pw + x0) * 4) as usize;
+            let n = ((x1 - x0) * 4) as usize;
+            for (d, s) in dst[d0..d0 + n].iter_mut().zip(&data[s0..s0 + n]) {
+                *d = ((*s as u32 * k + *d as u32 * (256 - k)) >> 8) as u8;
+            }
+        }
+    }
+
     /// Copie agrandie ou réduite d'une image opaque (plus proche voisin) dans `dst` : quelques
     /// millisecondes même en plein écran, là où le filtrage de tiny-skia prenait plus de 150 ms par image.
     pub fn blit_scaled(&mut self, data: &[u8], w: u32, h: u32, dst: R) {
@@ -1028,46 +1084,9 @@ impl Canvas {
         }
         push_rrect(&mut pb, q, rad);
         if let Some(path) = pb.finish() {
-            let (tf, m) = (self.tf(), (vis == 2 && self.masked).then_some(&self.mask));
+            let (tf, m) = (self.tf(), self.need(vis).then_some(&self.mask));
             self.pm.fill_path(&path, &Self::paint(bg), FillRule::EvenOdd, tf, m);
         }
-    }
-
-    /// Image (tampon BGRA prémultiplié) dans `dst`, coins arrondis ; `cover` : recadrée pour remplir.
-    pub fn image(&mut self, img: PixmapRef, dst: R, rad: f32, cover: bool) {
-        if self.vis(dst) == 0 {
-            return;
-        }
-        let (iw, ih) = (img.width() as f32, img.height() as f32);
-        if iw < 1.0 || ih < 1.0 || dst.w < 1.0 || dst.h < 1.0 {
-            return;
-        }
-        let k = if cover { (dst.w / iw).max(dst.h / ih) } else { (dst.w / iw).min(dst.h / ih) };
-        let (dw, dh) = (iw * k, ih * k);
-        let (dx, dy) = (dst.x + (dst.w - dw) / 2.0, dst.y + (dst.h - dh) / 2.0);
-        // Masque = rectangle arrondi de destination, limité à la découpe en cours.
-        let old = self.clip;
-        let tf = self.tf();
-        let (pw, ph) = (self.pm.width() as i32, self.pm.height() as i32);
-        self.mask.data_mut().fill(0);
-        let mut pb = PathBuilder::new();
-        push_rrect(&mut pb, dst, rad);
-        if let Some(path) = pb.finish() {
-            self.mask.fill_path(&path, FillRule::Winding, true, tf);
-        }
-        let d = self.mask.data_mut();
-        for y in 0..ph {
-            if y < old.1 || y >= old.3 {
-                d[(y * pw) as usize..((y + 1) * pw) as usize].fill(0);
-            } else {
-                d[(y * pw) as usize..(y * pw + old.0) as usize].fill(0);
-                d[(y * pw + old.2) as usize..((y + 1) * pw) as usize].fill(0);
-            }
-        }
-        let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-        let itf = Transform::from_row(k * self.s, 0.0, 0.0, k * self.s, (dx + self.ox) * self.s, (dy + self.oy) * self.s);
-        self.pm.draw_pixmap(0, 0, img, &paint, itf, Some(&self.mask));
-        self.restore_clip(old);
     }
 }
 
@@ -1122,7 +1141,7 @@ mod tests {
 
     #[test]
     fn every_icon_path_parses() {
-        for name in ["play", "pause", "mute", "full", "unfull", "clip", "spk", "mic", "micoff", "folder", "hdd", "disk", "warn", "info", "chev", "min", "x", "arrow", "dl", "lock", "screen", "res", "trash", "pen", "refresh", "chip", "check", "down", "b-clip", "b-buf", "b-res", "b-fps", "b-aud", "b-stats", "b-set", "spk1", "logo"] {
+        for name in ["play", "pause", "mute", "full", "unfull", "clip", "spk", "mic", "micoff", "folder", "hdd", "disk", "warn", "info", "chev", "min", "max", "restore", "x", "arrow", "dl", "lock", "screen", "res", "trash", "pen", "refresh", "chip", "check", "down", "b-clip", "b-buf", "b-res", "b-fps", "b-aud", "b-stats", "b-set", "spk1", "logo"] {
             let src = icon_src(name);
             assert!(!src.is_empty(), "{name} absente");
             for (d, _) in src {

@@ -28,6 +28,29 @@ pub struct Win {
     pub st: UiState,
     last_click: Option<(Instant, (f32, f32))>,
     hand: bool,
+    /// Barre : image GDI gardée d'une image à l'autre (même taille). Avant, une image de ~5 Mo était créée
+    /// puis détruite à chaque dessin, 60 fois par seconde pendant la lecture d'un clip.
+    layered: Option<Layered>,
+}
+
+/// DC mémoire + DIB de la barre, à la taille du tampon.
+struct Layered {
+    mem: windows_sys::Win32::Graphics::Gdi::HDC,
+    bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
+    old: windows_sys::Win32::Graphics::Gdi::HGDIOBJ,
+    bits: *mut u8,
+    size: (i32, i32),
+}
+
+impl Drop for Layered {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Graphics::Gdi::{DeleteDC, DeleteObject, SelectObject};
+        unsafe {
+            SelectObject(self.mem, self.old);
+            DeleteObject(self.bmp as _);
+            DeleteDC(self.mem);
+        }
+    }
 }
 
 impl Win {
@@ -47,6 +70,7 @@ impl Win {
     /// Libère le tampon (fenêtre cachée) : il sera recréé par `fit` au prochain affichage.
     pub fn release(&mut self) {
         self.canvas = Canvas::new(1, 1, 1.0);
+        self.layered = None;
     }
 
     /// Traduit un événement de fenêtre. Vrai : l'interface doit être redessinée.
@@ -125,7 +149,7 @@ impl Win {
     }
 
     /// Affiche le tampon dans la fenêtre.
-    pub fn present(&self) {
+    pub fn present(&mut self) {
         use windows_sys::Win32::Graphics::Gdi::*;
         let (w, h) = (self.canvas.pm.width() as i32, self.canvas.pm.height() as i32);
         let hwnd = self.window.hwnd() as windows_sys::Win32::Foundation::HWND;
@@ -146,23 +170,28 @@ impl Win {
             use windows_sys::Win32::Foundation::{POINT, SIZE};
             use windows_sys::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
             let screen = GetDC(std::ptr::null_mut());
-            let mem = CreateCompatibleDC(screen);
-            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-            let bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
-            if !bmp.is_null() && !bits.is_null() {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), bits as *mut u8, data.len());
-                let old = SelectObject(mem, bmp as _);
+            if self.layered.as_ref().is_none_or(|l| l.size != (w, h)) {
+                self.layered = None; // ancienne taille libérée d'abord
+                let mem = CreateCompatibleDC(screen);
+                let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+                let bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+                if bmp.is_null() || bits.is_null() {
+                    DeleteDC(mem);
+                } else {
+                    let old = SelectObject(mem, bmp as _);
+                    self.layered = Some(Layered { mem, bmp, old, bits: bits as *mut u8, size: (w, h) });
+                }
+            }
+            if let Some(l) = &self.layered {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), l.bits, data.len());
                 let size = SIZE { cx: w, cy: h };
                 let src = POINT { x: 0, y: 0 };
                 let blend = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: 1 };
                 // tao réécrit le style étendu à chaque set_visible / set_focus… et retire WS_EX_LAYERED :
                 // sans lui, UpdateLayeredWindow échoue (erreur 87) et la barre reste invisible.
                 layered_tool_window(&self.window);
-                UpdateLayeredWindow(hwnd, screen, std::ptr::null(), &size, mem, &src, 0, &blend, ULW_ALPHA);
-                SelectObject(mem, old);
-                DeleteObject(bmp as _);
+                UpdateLayeredWindow(hwnd, screen, std::ptr::null(), &size, l.mem, &src, 0, &blend, ULW_ALPHA);
             }
-            DeleteDC(mem);
             ReleaseDC(std::ptr::null_mut(), screen);
         }
     }
@@ -172,7 +201,7 @@ pub fn open<T: 'static>(kind: Kind, target: &EventLoopWindowTarget<T>) -> Option
     use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
     let mut wb = WindowBuilder::new().with_title("Clipper").with_decorations(false).with_window_icon(tao::window::Icon::from_resource(1, None).ok()).with_visible(false);
     wb = match kind {
-        Kind::Main => wb.with_inner_size(LogicalSize::new(900.0, 620.0)).with_min_inner_size(LogicalSize::new(760.0, 520.0)),
+        Kind::Main => wb.with_inner_size(LogicalSize::new(900.0, 620.0)).with_min_inner_size(LogicalSize::new(840.0, 520.0)),
         Kind::Bar => wb.with_inner_size(LogicalSize::new(BAR_W, BAR_H)).with_always_on_top(true).with_skip_taskbar(true).with_focused(false).with_resizable(false).with_undecorated_shadow(false),
     };
     let window = wb.build(target).ok()?;
@@ -181,7 +210,7 @@ pub fn open<T: 'static>(kind: Kind, target: &EventLoopWindowTarget<T>) -> Option
     }
     let sz = window.inner_size();
     let canvas = if kind == Kind::Main { Canvas::new(sz.width, sz.height, window.scale_factor() as f32) } else { Canvas::new(1, 1, 1.0) };
-    Some(Win { window, kind, canvas, input: Input { mouse: (-1.0, -1.0), ..Default::default() }, st: UiState::default(), last_click: None, hand: false })
+    Some(Win { window, kind, canvas, input: Input { mouse: (-1.0, -1.0), ..Default::default() }, st: UiState::default(), last_click: None, hand: false, layered: None })
 }
 
 /// WS_EX_TOOLWINDOW : ni barre des tâches ni Alt+Tab. WS_EX_LAYERED : transparence par pixel.

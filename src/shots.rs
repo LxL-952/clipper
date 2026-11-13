@@ -68,6 +68,16 @@ fn every_tab() {
     let tall = if open { 3300 } else { 620 };
     f.tab = Tab::Clip;
     shot(&mut f, "clip", 900, tall, 1.0, &none);
+    f.tab = Tab::Stats;
+    shot(&mut f, "stats", 900, if open { 1500 } else { 1250 }, 1.0, &none);
+    f.cfg.overlay_graphs = vec!["fps".into()];
+    shot(&mut f, "stats-125", 1125, 775, 1.25, &none);
+    f.tab = Tab::Advanced;
+    shot(&mut f, "advanced", 900, if open { 1500 } else { 900 }, 1.0, &none);
+    // Largeur minimale de la fenêtre, 125 % : sept onglets, rien ne se chevauche.
+    f.update = Some("1.2.0".into());
+    shot(&mut f, "advanced-min", 1050, 650, 1.25, &none);
+    f.update = None;
     f.tab = Tab::Audio;
     f.levels = (0.55, 0.3);
     shot(&mut f, "audio", 900, if open { 1100 } else { 620 }, 1.0, &none);
@@ -149,5 +159,111 @@ fn player_rate() {
         println!("seconde {s} : {} images, position {:.1} s", c - last, p.pos());
         last = c;
     }
+    p.close();
+}
+
+/// Délais du lecteur sur un vrai clip (CLIPPER_CLIP) : clic sur un clip -> 1re image, lecture -> mouvement,
+/// saut pendant la lecture, saut à l'arrêt, glissement sur la barre (images vues pendant le geste).
+/// `tick` est appelé toutes les 2 ms, comme le ferait l'interface.
+#[test]
+#[ignore = "lit un vrai clip avec ffmpeg"]
+fn player_latency() {
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    use std::time::{Duration, Instant};
+    let Ok(clip) = std::env::var("CLIPPER_CLIP") else { return };
+    let n = Arc::new(AtomicU32::new(0));
+    let n2 = n.clone();
+    let mut p = crate::player::Player::new("ffmpeg", Arc::new(move || { n2.fetch_add(1, Relaxed); }));
+    p.set_size(384.0, 216.0);
+    let wait = |p: &mut crate::player::Player, ok: &dyn Fn(&crate::player::Player, u32) -> bool| -> u128 {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(5) {
+            p.tick();
+            if ok(p, n.load(Relaxed)) {
+                return t.elapsed().as_millis();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        9999
+    };
+    for round in 0..3 {
+        p.open(std::path::Path::new(&clip), 48.0, 3);
+        let n0 = n.load(Relaxed);
+        let first = wait(&mut p, &|_, c| c > n0);
+        p.toggle();
+        let play = wait(&mut p, &|p, _| p.pos() > 0.001);
+        std::thread::sleep(Duration::from_millis(500));
+        p.seek(20.0);
+        let n1 = n.load(Relaxed);
+        let seek_img = wait(&mut p, &|_, c| c > n1);
+        let seek_play = wait(&mut p, &|p, _| p.pos() > 20.001);
+        std::thread::sleep(Duration::from_millis(300));
+        p.pause();
+        std::thread::sleep(Duration::from_millis(100));
+        let n2 = n.load(Relaxed);
+        p.seek(30.0);
+        let seek_paused = wait(&mut p, &|_, c| c > n2);
+        // Glissement de 5 s à 35 s en 1 s (une position toutes les 16 ms), puis lâcher en lecture.
+        p.toggle();
+        std::thread::sleep(Duration::from_millis(400));
+        let n3 = n.load(Relaxed);
+        let t = Instant::now();
+        let mut i = 0;
+        while t.elapsed() < Duration::from_secs(1) {
+            p.scrub(5.0 + 30.0 * t.elapsed().as_secs_f64());
+            p.tick();
+            i += 1;
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        let seen = n.load(Relaxed) - n3;
+        p.scrub_end();
+        let end = p.pos();
+        let release = wait(&mut p, &|p, _| p.pos() > end + 0.001);
+        println!("tour {round} : 1re image {first} ms, lecture {play} ms, saut en lecture : image {seek_img} ms puis mouvement {seek_play} ms, saut à l'arrêt {seek_paused} ms, glissement : {seen} images sur {i} positions, reprise au lâcher {release} ms");
+        p.close();
+    }
+}
+
+/// cuda refusé (carte NVIDIA absente ou pilote trop ancien) : la lecture repart seule en d3d11va.
+#[test]
+#[ignore = "lit un vrai clip avec ffmpeg"]
+fn player_fallback() {
+    use std::time::{Duration, Instant};
+    let Ok(clip) = std::env::var("CLIPPER_CLIP") else { return };
+    crate::player::BREAK_CUDA.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut p = crate::player::Player::new("ffmpeg", Arc::new(|| {}));
+    p.set_size(384.0, 216.0);
+    p.open(std::path::Path::new(&clip), 48.0, 0);
+    p.toggle();
+    let t = Instant::now();
+    while p.pos() < 0.001 && t.elapsed() < Duration::from_secs(5) {
+        p.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    println!("décodeur {} (2 = d3d11va), mouvement après {} ms", crate::player::decoder(), t.elapsed().as_millis());
+    assert_eq!(crate::player::decoder(), 2);
+    assert!(p.pos() > 0.0);
+}
+
+/// Lecture de 5 s au rythme réel (taille CLIPPER_SIZE, ex. 384x216) : le processeur des ffmpeg est relevé
+/// à côté (scratchpad/cpu.ps1).
+#[test]
+#[ignore = "lit un vrai clip avec ffmpeg"]
+fn player_cpu() {
+    use std::time::{Duration, Instant};
+    let Ok(clip) = std::env::var("CLIPPER_CLIP") else { return };
+    let (w, h) = std::env::var("CLIPPER_SIZE").ok().and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap()))).unwrap_or((384.0, 216.0));
+    let mut p = crate::player::Player::new("ffmpeg", Arc::new(|| {}));
+    p.set_size(w, h);
+    p.open(std::path::Path::new(&clip), 48.0, 3);
+    std::thread::sleep(Duration::from_millis(300));
+    p.toggle();
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(5) {
+        p.tick();
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    println!("position {:.2} s", p.pos());
+    std::thread::sleep(Duration::from_millis(300)); // relevé final avant l'arrêt
     p.close();
 }

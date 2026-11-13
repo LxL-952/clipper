@@ -120,6 +120,11 @@ impl TrayMenu {
 
     /// Au survol de l'icône : dernières températures connues, sans aucune lecture de capteur (instantané).
     pub fn refresh_temps(&self) {
+        // Le fil des capteurs se réveille et lit pendant 30 s (menu peut-être ouvert).
+        *HOVER.lock().unwrap() = Some(std::time::Instant::now());
+        if let Some(t) = SENSOR.get() {
+            t.unpark();
+        }
         self.temps.set_text(temps_text());
         redraw_open_menu();
     }
@@ -158,17 +163,28 @@ fn temps_text() -> String {
     format!("CPU {c}   ·   GPU {g}")
 }
 
-/// Lecture des capteurs en tâche de fond, toutes les 5 s, hors du fil de l'interface (le capteur ACPI peut
-/// mettre du temps à répondre). Pendant un jeu plein écran : aucune lecture, la dernière valeur reste.
+/// Dernier survol de l'icône : les capteurs ne sont lus que dans les 30 s qui suivent.
+static HOVER: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+static SENSOR: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+/// Lecture des capteurs en tâche de fond, hors du fil de l'interface (le capteur ACPI peut mettre du temps à
+/// répondre) : une fois au lancement, puis toutes les 5 s seulement pendant 30 s après un survol de l'icône
+/// (avant : toutes les 5 s en permanence, pour un menu rarement ouvert). Jeu plein écran : aucune lecture.
 pub fn start_temp_cache() {
-    std::thread::spawn(|| loop {
+    let h = std::thread::spawn(|| loop {
         let never = TEMPS.lock().unwrap().1.is_none() && TEMPS.lock().unwrap().0.is_none();
-        if never || !crate::capture::fullscreen_foreground() {
+        let recent = HOVER.lock().unwrap().is_some_and(|t| t.elapsed().as_secs() < 30);
+        if never || (recent && !crate::capture::fullscreen_foreground()) {
             let (gpu, cpu) = crate::overlay::temps();
             let mut t = TEMPS.lock().unwrap();
             t.0 = gpu.or(t.0);
             t.1 = cpu.or(t.1);
         }
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        if recent {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        } else {
+            std::thread::park(); // réveillé par un survol (refresh_temps)
+        }
     });
+    let _ = SENSOR.set(h.thread().clone());
 }

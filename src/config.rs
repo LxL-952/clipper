@@ -1,6 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Réglages appliqués sans relancer la capture (aucun trou dans le buffer). Une seule liste pour la fenêtre
+/// et pour main.rs : avant, deux copies divergeaient (« mic_muted » instantané pour l'une, relance pour l'autre).
+/// Volumes, boost et sourdine du micro : appliqués en direct par le mélangeur audio (audio::Audio::levels).
+pub const LIVE: [&str; 27] = [
+    "driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms",
+    "overlay_gpus", "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar",
+    "key_overlay", "admin_mode", "minimize_to_tray", "key_clipping", "mic_muted", "game_volume", "mic_volume", "mic_boost_db",
+];
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct Quality {
     /// Classe de hauteur : 1080, 1440 ou 2160 (la largeur suit le ratio de l'écran).

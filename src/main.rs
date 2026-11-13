@@ -9,10 +9,12 @@ mod elevate;
 mod front;
 mod front_a;
 mod front_b;
+mod front_c;
 mod gfx;
 mod gpus;
 mod overlay;
 mod player;
+mod preview;
 #[cfg(test)]
 mod shots;
 mod sounds;
@@ -42,10 +44,12 @@ pub enum UserEvent {
     Ipc(ui::Kind, String),
     /// Message à envoyer à toutes les fenêtres ouvertes (`window.__on`).
     Push(Value),
-    /// Fin d'un clip / REC lancé dans un fil (toast + son).
-    Saved(Result<PathBuf, String>, &'static str),
+    /// Fin d'un clip / REC lancé dans un fil (toast + son) : fichier et durée réelle, sondée dans ce fil.
+    Saved(Result<(PathBuf, f64), String>, &'static str),
     /// Une fenêtre doit être redessinée (image du lecteur arrivée, fin de lecture).
     Redraw(ui::Kind),
+    /// Lancement avec Windows : 20 s après, la capture et la recherche des jeux démarrent.
+    BootDone,
     Quit,
 }
 
@@ -135,6 +139,23 @@ fn log(msg: &str) {
         };
         let _ = writeln!(f, "{:02}/{:02} {:02}:{:02}:{:02} {msg}", t.wDay, t.wMonth, t.wHour, t.wMinute, t.wSecond);
     }
+}
+
+/// Chrono du démarrage : (début, fin de la phase précédente, détail). Une seule ligne au journal, écrite
+/// quand la fenêtre (ou l'icône seule, lancement réduit) est prête : « démarrage : ffmpeg 57 ms, … ».
+static BOOT: std::sync::Mutex<Option<(Instant, Instant, String)>> = std::sync::Mutex::new(None);
+
+fn phase(name: &str) {
+    let now = Instant::now();
+    let mut b = BOOT.lock().unwrap();
+    let (_, last, text) = b.get_or_insert_with(|| (now, now, String::new()));
+    text.push_str(&format!("{name} {} ms, ", now.duration_since(*last).as_millis()));
+    *last = now;
+}
+
+fn boot_done(what: &str) {
+    let Some((t0, _, text)) = BOOT.lock().unwrap().take() else { return };
+    log(&format!("démarrage : {text}{what} à {} ms", t0.elapsed().as_millis()));
 }
 
 /// Son de confirmation, sauf si l'utilisateur les a coupés (Avancé > Sons).
@@ -322,8 +343,6 @@ struct App {
     /// Version plus récente trouvée sur GitHub (bandeau « Nouvelle version »).
     update: Option<String>,
     gpus: Vec<capture::Gpu>,
-    /// Capteur de température CPU lisible par Windows (souvent absent sur PC de bureau).
-    cpu_temp: bool,
     native: (u32, u32),
     monitors: Vec<Value>,
     buffer: Arc<capture::Buffer>,
@@ -343,8 +362,6 @@ struct App {
     wake: [Option<Instant>; 2],
     /// Dernier dessin de chaque fenêtre (plafond de cadence, voir `draw`).
     last_draw: [Option<Instant>; 2],
-    /// Diagnostic : (dessins, temps cumulé en ms, début de la période).
-    perf: (u32, f32, Instant),
     /// Fenêtre au premier plan (le jeu) quand la barre s'est ouverte : elle reprend le focus à la fermeture.
     bar_prev: isize,
     /// Dossier (du jeu) où le REC en cours sera enregistré.
@@ -421,7 +438,7 @@ impl App {
             "elevated": elevate::is_elevated(),
             "gpu_scale": capture::gpu_scaling(),
             "gpus": self.gpus, "chip": capture::effective_chip(&self.cfg, &self.gpus),
-            "cpu_temp": self.cpu_temp, "gpu_names": overlay::gpu_names(), "autostart": elevate::autostart(),
+            "cpu_temp": overlay::cpu_temp_available(), "gpu_names": overlay::gpu_names(), "autostart": elevate::autostart(),
         })
     }
 
@@ -457,7 +474,9 @@ impl App {
             ui::Kind::Main => {
                 self.main = w;
                 if self.main.is_some() {
+                    phase("création fenêtre");
                     let init = self.init_json("index", tab);
+                    phase("état initial");
                     let mut f = front::Front::new(&init, redraw_fn(&self.proxy, ui::Kind::Main));
                     if f.intro.is_some() {
                         sounds::play(sounds::Sound::Intro);
@@ -470,8 +489,10 @@ impl App {
                     }
                     *self.front.borrow_mut() = Some(f);
                     eco(false);
+                    phase("interface");
                     // Première image dessinée avant d'afficher la fenêtre : jamais de cadre vide.
                     self.draw(ui::Kind::Main, target);
+                    phase("1re image");
                     if let Some(w) = &self.main {
                         w.window.set_visible(true);
                         w.window.set_focus();
@@ -502,13 +523,15 @@ impl App {
         }
         self.last_draw[i] = Some(now);
         win.fit();
-        let t_frame = Instant::now();
+        let maximized = kind == ui::Kind::Main && win.window.is_maximized();
         let (cmds, next) = {
             let mut u = widgets::Ui { c: &mut win.canvas, i: &win.input, s: &mut win.st, now };
             match kind {
                 ui::Kind::Main => {
                     let mut f = self.front.borrow_mut();
                     let Some(f) = f.as_mut() else { return };
+                    // Agrandie ou non : relu de Windows (Win+↑, aimantation en haut de l'écran comptent aussi).
+                    f.maximized = maximized;
                     f.frame(&mut u);
                     (std::mem::take(&mut f.out), f.next)
                 }
@@ -519,7 +542,6 @@ impl App {
                 }
             }
         };
-        front_b::PROF.lock().unwrap()[3] = t_frame.elapsed().as_secs_f32() * 1000.0;
         let (hand, animating) = (win.st.hand, win.st.animating);
         // Un clic, une touche ou la molette changent l'état pendant le dessin (section dépliée, liste
         // ouverte…) : l'image suivante montre le résultat tout de suite, sans attendre un mouvement de souris.
@@ -527,15 +549,6 @@ impl App {
         win.input.end_frame();
         win.set_hand(hand);
         win.present();
-        // Diagnostic du lecteur : images reçues de ffmpeg et dessins réellement faits, toutes les 2 s.
-        self.perf.0 += 1;
-        self.perf.1 += now.elapsed().as_secs_f32() * 1000.0;
-        if self.perf.2.elapsed().as_secs_f32() >= 2.0 {
-            let got = player::FRAMES.swap(0, std::sync::atomic::Ordering::Relaxed);
-            // Plus écrit dans le journal (une ligne toutes les 2 s pendant la lecture) : gardé pour le débogage.
-            let _ = got;
-            self.perf = (0, 0.0, Instant::now());
-        }
         self.wake[i] = if animating || acted || !cmds.is_empty() { Some(now + std::time::Duration::from_millis(15)) } else { next.map(|d| now + d) };
         for c in cmds {
             self.ipc(kind, &c.to_string(), target);
@@ -617,7 +630,8 @@ impl App {
         }
         let (c, b, p) = (self.cfg_for_game(), self.buffer.clone(), self.proxy.clone());
         std::thread::spawn(move || {
-            let _ = p.send_event(UserEvent::Saved(capture::save_clip(&c, &b.dir), "clip"));
+            let r = capture::save_clip(&c, &b.dir).map(|p| { let s = capture::probe(&c, &p).secs; (p, s) });
+            let _ = p.send_event(UserEvent::Saved(r, "clip"));
         });
     }
 
@@ -647,7 +661,9 @@ impl App {
             }
             let (c, b, p) = (c, self.buffer.clone(), self.proxy.clone());
             std::thread::spawn(move || {
-                let _ = p.send_event(UserEvent::Saved(capture::rec_stop(&c, &b), "rec"));
+                // Durée sondée ici (ffprobe) : avant, dans le fil de l'interface, fenêtre et barre se figeaient.
+                let r = capture::rec_stop(&c, &b).map(|p| { let s = capture::probe(&c, &p).secs; (p, s) });
+                let _ = p.send_event(UserEvent::Saved(r, "rec"));
             });
         }
         self.push(&json!({"type": "state", "recording": self.recording.is_some(), "rec_secs": 0}));
@@ -676,6 +692,14 @@ impl App {
                 if let Some(w) = &self.main {
                     let on = m["on"].as_bool().unwrap_or(false);
                     w.window.set_fullscreen(on.then_some(tao::window::Fullscreen::Borderless(None)));
+                }
+            }
+            // Bouton carré, F11, double-clic sur la barre de titre. Ni recréation de la fenêtre ni animation :
+            // Windows la redimensionne, l'interface est redessinée une fois à la nouvelle taille.
+            "maximize" => {
+                if let Some(w) = &self.main {
+                    w.window.set_maximized(m["on"].as_bool().unwrap_or(!w.window.is_maximized()));
+                    w.window.request_redraw();
                 }
             }
             "overlay_toggle" => self.toggle_overlay(),
@@ -736,12 +760,10 @@ impl App {
                 });
             }
             "ffmpeg_installed" => {
-                self.ffmpeg_ok = capture::locate_ffmpeg(&self.cfg);
+                (self.ffmpeg_ok, self.encoders, self.monitors) = capture::startup_probes(&self.cfg, true);
                 if self.ffmpeg_ok {
-                    self.encoders = capture::probe_encoders(&self.cfg);
                     self.cfg.encoder = capture::resolve_encoder(&self.cfg, &self.encoders, &self.gpus);
-                    self.native = capture::native_size(&self.cfg).unwrap_or((1920, 1080));
-                    self.monitors = capture::monitors(&self.cfg);
+                    self.native = capture::native_of(&self.monitors, self.cfg.monitor).unwrap_or((1920, 1080));
                     self.restart_capture(false);
                     self.push(&json!({"type": "toast", "kind": "ok", "text": "FFmpeg installé : Clipper enregistre."}));
                 } else {
@@ -937,7 +959,7 @@ impl App {
     /// Plusieurs réglages d'un coup (bouton « Enregistrer ») : une seule relance de ffmpeg au plus.
     fn set_many(&mut self, items: &[(String, Value)]) {
         // Réglages sans effet sur ffmpeg : pas de relance (pas de trou dans le buffer).
-        let live = ["driver_branch", "out_dir", "container", "overlay_mode", "overlay_items", "overlay_corner", "overlay_size", "overlay_opacity", "overlay_refresh_ms", "overlay_gpus", "overlay_graphs", "intro", "sounds", "update_check", "delete_permanent", "delete_confirm", "key_clip", "key_rec", "key_bar", "key_overlay", "admin_mode", "minimize_to_tray", "key_clipping"];
+        let live = config::LIVE;
         let mut v = serde_json::to_value(&self.cfg).unwrap_or_default();
         let mut restart = false;
         let reprobe = items.iter().any(|(k, _)| k == "monitor");
@@ -967,6 +989,8 @@ impl App {
         }
         if restart {
             self.restart_capture(reprobe);
+        } else if let Some(a) = &self.audio {
+            a.levels(&self.cfg); // sourdine, volumes, boost : en direct, sans relance
         }
         overlay::apply(&self.cfg, self.overlay_shown);
         self.push(&json!({"type": "config", "config": self.cfg}));
@@ -1035,6 +1059,7 @@ impl App {
                 let gone = if self.cfg.delete_permanent { std::fs::remove_file(path).is_ok() } else { to_recycle_bin(path) };
                 if gone {
                     let _ = std::fs::remove_file(thumb(path));
+                    let _ = std::fs::remove_file(capture::strip_path(path));
                 }
             }
             "rename" => {
@@ -1046,6 +1071,7 @@ impl App {
                 let to = path.with_file_name(format!("{}.{ext}", clean.trim_end_matches(&format!(".{ext}"))));
                 if !to.exists() && std::fs::rename(path, &to).is_ok() {
                     let _ = std::fs::rename(thumb(path), thumb(&to));
+                    let _ = std::fs::rename(capture::strip_path(path), capture::strip_path(&to));
                 }
             }
             _ => {}
@@ -1093,18 +1119,26 @@ fn main() {
     kill_children_with_us();
     let ev = ev as usize;
     lower_priority();
+    phase("lancement");
     let mut cfg = Config::load();
-    let ffmpeg_ok = capture::locate_ffmpeg(&cfg);
-    let encoders = capture::probe_encoders(&cfg);
+    // ffmpeg, encodeurs et écrans : relus du lancement précédent si rien n'a changé (sinon sondés en parallèle).
+    let (ffmpeg_ok, encoders, monitors) = capture::startup_probes(&cfg, false);
+    phase("sondes");
     let gpus = capture::gpus();
     cfg.encoder = capture::resolve_encoder(&cfg, &encoders, &gpus);
-    let native = capture::native_size(&cfg).unwrap_or((1920, 1080));
-    let monitors = capture::monitors(&cfg);
+    let native = capture::native_of(&monitors, cfg.monitor).unwrap_or((1920, 1080));
     log(&format!("encodeurs {encoders:?}, choisi {}, écran {native:?}", cfg.encoder));
-    overlay::scan_installed_games();
+    // Lancé avec Windows (icône seule, PC démarré depuis moins de 3 min) : la capture et la recherche des jeux
+    // attendent 20 s, pour ne pas ralentir l'ouverture de la session. Clipper n'est encore utile à personne.
+    let boot = tray_start && unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() } < 180_000;
+    overlay::cpu_temp_probe();
+    if !boot {
+        overlay::scan_installed_games();
+    }
     // Une seule fois au lancement : jamais pendant qu'un clip s'assemble.
     capture::clean_leftovers(&cfg.out_dir);
-    let (buffer, audio) = App::start_capture(&cfg, native);
+    let (buffer, audio) = if boot { (Arc::new(capture::Buffer::idle(cfg.buffer_dir.clone())), None) } else { App::start_capture(&cfg, native) };
+    phase("capture");
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -1154,14 +1188,26 @@ fn main() {
 
     let hotkeys = GlobalHotKeyManager::new().expect("gestionnaire de raccourcis");
     let keys = register_keys(&hotkeys, &cfg);
+    phase("raccourcis");
 
     overlay::apply(&cfg, false);
     overlay::start();
-    // Une fois les sondes de démarrage finies, leur RAM ne sert plus.
+    // Une fois les sondes de démarrage finies, leur RAM ne sert plus. Deux passes : à 10 s, puis à 60 s,
+    // quand la recherche des jeux installés et le chargement des sondes de l'overlay sont terminés (mesuré :
+    // la passe de 10 s seule laissait ~145 Mo en mémoire vive jusqu'à la première fermeture de la fenêtre).
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        trim_self();
+        for wait in [10, 50] {
+            std::thread::sleep(std::time::Duration::from_secs(wait));
+            trim_self();
+        }
     });
+    if boot {
+        let p = event_loop.create_proxy();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            let _ = p.send_event(UserEvent::BootDone);
+        });
+    }
     let bar_ui = barui::BarUi::new(&cfg, redraw_fn(&event_loop.create_proxy(), ui::Kind::Bar));
     let mut app = App {
         cfg,
@@ -1169,7 +1215,6 @@ fn main() {
         ffmpeg_ok,
         update: None,
         gpus,
-        cpu_temp: overlay::cpu_temp_available(),
         native,
         monitors,
         buffer,
@@ -1184,7 +1229,6 @@ fn main() {
         barui: std::cell::RefCell::new(bar_ui),
         wake: [None, None],
         last_draw: [None, None],
-        perf: (0, 0.0, Instant::now()),
         bar_prev: 0,
         rec_dir: PathBuf::new(),
         bar_gen: 0,
@@ -1203,6 +1247,7 @@ fn main() {
     // Inverse de l'état réel : le texte de l'interrupteur du menu est posé au premier tour.
     let mut shown_clipping = !app.cfg.clipping;
     let mut tray = None;
+    phase("pilote et menu");
 
     event_loop.run(move |event, target, flow| {
         *flow = ControlFlow::Wait;
@@ -1238,8 +1283,12 @@ fn main() {
                     .with_menu(Box::new(tm.menu.clone()))
                     .build()
                     .ok();
+                phase("icône");
                 if !tray_start {
                     app.open(ui::Kind::Main, target, None);
+                    boot_done("fenêtre affichée");
+                } else {
+                    boot_done("icône prête");
                 }
                 // Barre créée d'avance, cachée : Alt+Z l'affiche sans attendre WebView2.
                 app.open(ui::Kind::Bar, target, None);
@@ -1290,9 +1339,9 @@ fn main() {
                 }
                 log(&format!("{kind} : {r:?}"));
                 let msg = match &r {
-                    Ok(p) => {
+                    Ok((p, secs)) => {
                         // Durée réelle du fichier (pas celle du réglage) : un clip trop court se voit tout de suite.
-                        let secs = capture::probe(&app.cfg, p).secs.round() as u64;
+                        let secs = secs.round() as u64;
                         let len = if secs >= 60 { format!("{} min {:02} s", secs / 60, secs % 60) } else { format!("{secs} s") };
                         log(&format!("{kind} : {len}"));
                         json!({"type": "toast", "kind": kind, "path": p,
@@ -1340,6 +1389,11 @@ fn main() {
                 if let Some(w) = if kind == ui::Kind::Main { &app.main } else { &app.bar } {
                     w.window.request_redraw();
                 }
+            }
+            Event::UserEvent(UserEvent::BootDone) => {
+                overlay::scan_installed_games();
+                app.restart_capture(false);
+                log("démarrage avec Windows : capture lancée");
             }
             Event::UserEvent(UserEvent::TrayClick) => app.open(ui::Kind::Main, target, None),
             Event::UserEvent(UserEvent::TrayHover) => tm.refresh_temps(),
