@@ -184,7 +184,8 @@ impl BarUi {
                     .map(|v| {
                         let path = PathBuf::from(v["path"].as_str().unwrap_or(""));
                         Clip {
-                            stem: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                            // Clé de la miniature (stable au renommage), sinon le nom du fichier.
+                            stem: v["thumb"].as_str().map(String::from).unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned()),
                             path,
                             name: v["name"].as_str().unwrap_or("").into(),
                             secs: v["secs"].as_f64().unwrap_or(0.0),

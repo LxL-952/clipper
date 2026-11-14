@@ -70,16 +70,13 @@ impl Front {
         let w = class_w(c).min(self.native.0);
         (w, (w as f32 * self.native.1 as f32 / self.native.0 as f32 / 2.0).round() as u32 * 2)
     }
-    /// Débit plafond en Mb/s (même formule que capture::bitrate_kbps).
+    /// Débit plafond en Mb/s : le calcul de la capture elle-même (hauteur réellement enregistrée, profil,
+    /// curseur Qualité). Avant, une copie à part (20 Mb/s en 1080p au lieu de 28, profil ignoré) : la barre,
+    /// le profil et la taille d'un clip annonçaient trois débits différents.
     pub fn mbps(&self) -> f32 {
-        let base = match self.cfg.clip.height {
-            720 => 10.0,
-            1440 => 35.0,
-            2160 => 70.0,
-            _ => 20.0,
-        };
-        let codec = if self.cfg.encoder.starts_with("hevc") || self.cfg.encoder.starts_with("av1") { 0.7 } else { 1.0 };
-        base * if self.cfg.clip.fps <= 30 { 0.65 } else { 1.0 } * self.cfg.quality.clamp(0.5, 2.0) * codec
+        let h = self.out_dims(self.cfg.clip.height).1;
+        let k = self.cfg.quality * crate::capture::profile_k(&self.cfg.profile);
+        crate::capture::bitrate_kbps(h, self.cfg.clip.fps, &self.cfg.encoder, k) as f32 / 1000.0
     }
     /// NVENC / x264 en qualité constante : le débit est un plafond, la dépense réelle tourne autour de 40 %.
     pub fn typical(&self) -> f32 {
@@ -111,8 +108,19 @@ impl Front {
         // Place de la valeur mesurée (avant : 92 px fixes, « ×1,00 · max 20 Mb/s » chevauchait le curseur et
         // touchait le bord). Arrondie par paliers de 16 px : le curseur ne change pas de taille à chaque cran.
         let rw = ((a + b).max(92.0) / 16.0).ceil() * 16.0;
+        // Pendant le glissement, largeur figée : la valeur affichée qui s'allonge (9 -> 10 Mb/s) ne rétrécit plus
+        // la barre sous la souris (le curseur sautait).
+        let rw = match self.fader_hold {
+            Some((h, held)) if h == wid && ui.held(wid) => held,
+            _ => rw,
+        };
         let sw = w - rw - 12.0;
         let s = ui.slider(wid, r(x, y, sw, 32.0), v, range.0, range.1, range.2);
+        if ui.held(wid) {
+            self.fader_hold = Some((wid, rw));
+        } else if self.fader_hold.is_some_and(|(h, _)| h == wid) {
+            self.fader_hold = None;
+        }
         ui.ruler(x, y + 26.0, sw);
         ui.c.text(x + w - a - b, y, 32.0, out.0, F::m(12.5, 400), pal::TEXT);
         ui.c.text(x + w - b, y + 1.0, 32.0, out.1, F::m(11.0, 400), pal::TEXT3);
@@ -265,6 +273,9 @@ impl Front {
             y += 14.0 + nh + 4.0;
         }
 
+        // Sous-catégories : une seule à la fois (avant : les cinq sections empilées, trop d'informations d'un coup).
+        y = self.subtabs(ui, "clip", &[("clip:cap", "Capture"), ("clip:q", "Qualité et fichier"), ("clip:k", "Raccourcis"), ("clip:l", "Emplacements"), ("clip:ui", "Interface")], x, y + 8.0, w);
+
         // Capture
         let (open, mut cy) = self.grp(ui, "clip:cap", "Capture", x, y, w);
         if open {
@@ -288,7 +299,10 @@ impl Front {
             let c2 = iw - 12.0 - c1;
             ui.sc(ix, iy, 16.0, "Résolution", pal::TEXT3, 500);
             ui.sc(ix + c1 + 12.0, iy, 16.0, "Images/s", pal::TEXT3, 500);
-            let opts: Vec<SegOpt> = CLASSES.iter().zip(RES_LABELS).map(|(c, l)| SegOpt { label: l, enabled: self.avail(*c), mono: true }).collect();
+            // Toutes cliquables : l'écran change de taille en cours de route (jeu en 4:3 étiré, Res+). Une
+            // résolution plus grande que l'écran actuel enregistre à la taille de l'écran, sans agrandir, et
+            // revient d'elle-même quand l'écran la permet (avant : grisée, impossible de remettre 1080p).
+            let opts: Vec<SegOpt> = CLASSES.iter().zip(RES_LABELS).map(|(_, l)| SegOpt { label: l, enabled: true, mono: true }).collect();
             let (hit, _) = ui.seg(id("res"), ix, iy + 24.0, &opts, CLASSES.iter().position(|c| *c == self.cfg.clip.height), Seg { fill: Some(c1), dot: false, res: true });
             if let Some(i) = hit {
                 self.set("clip.height", json!(CLASSES[i]));
@@ -310,13 +324,15 @@ impl Front {
                 format!("Toutes les résolutions tiennent dans votre écran (`{nw}×{nh_}`). {nc}p = taille native, sans copie GPU.")
             } else {
                 format!(
-                    "{} {} votre écran (`{nw}×{nh_}`). Agrandir n'ajoute aucun détail. {nc}p garde le format de l'écran, soit `{ow}×{oh}` natif, sans copie GPU.",
+                    "{} {} votre écran actuel (`{nw}×{nh_}`) : {} à la taille de l'écran, sans agrandir, et {} dès que l'écran le permet. {nc}p = `{ow}×{oh}` natif, sans copie GPU.",
                     above.join(" et "),
-                    if above.len() > 1 { "sont grisés : ils dépassent" } else { "est grisé : il dépasse" }
+                    if above.len() > 1 { "dépassent" } else { "dépasse" },
+                    if above.len() > 1 { "choisis, ils enregistrent" } else { "choisi, il enregistre" },
+                    if above.len() > 1 { "reviennent" } else { "revient" }
                 )
             };
             cy += ui.note(x, cy, w, Note::Info, "info", &nat, 0.0).0;
-            if self.cfg.clip.height != nc && self.gpu_scale != Some(true) {
+            if self.cfg.clip.height < nc && self.gpu_scale != Some(true) {
                 let t = format!("**Passage par le processeur.** La réduction sur la carte graphique n'a pas marché sur ce PC : chaque image de l'écran est copiée vers le processeur pour être réduite (jusqu'à un cœur entier à 60 i/s). À {nc}p (taille de l'écran), aucun coût en plus.");
                 cy += 10.0;
                 cy += ui.note(x, cy, w, Note::Warn, "warn", &t, 0.0).0;
@@ -340,15 +356,18 @@ impl Front {
             const PROFILES: [(&str, &str); 3] = [("perf", "Compétitif (recommandé)"), ("balanced", "Équilibré"), ("quality", "Qualité max")];
             let opts: Vec<(String, bool)> = PROFILES.iter().map(|p| (p.1.to_string(), true)).collect();
             if let Some(i) = ui.select(id("profile"), r(fx, cy, fw, 34.0), &opts, PROFILES.iter().position(|p| p.0 == self.cfg.profile).or(Some(0))) {
+                // Nouveau profil : c'est lui qui fixe le débit, le réglage fin « Qualité » repart de ×1,00.
+                if PROFILES[i].0 != self.cfg.profile {
+                    self.set("quality", json!(1.0));
+                }
                 self.set("profile", json!(PROFILES[i].0));
             }
             cy += 34.0 + 6.0;
             // Détail du profil choisi : ce qui est réellement enregistré.
-            let k = crate::capture::profile_k(&self.cfg.profile) * self.cfg.quality;
-            let mbps = crate::capture::bitrate_kbps(self.cfg.clip.height, self.cfg.clip.fps, &self.cfg.encoder, k) as f32 / 1000.0;
+            let mbps = self.mbps();
             let what = match self.cfg.profile.as_str() {
-                "quality" => "préréglage p2 + AQ spatiale, débit +20 % : plus de détails, fichiers plus lourds, même charge d'encodeur.",
-                "balanced" => "préréglage p1 + AQ spatiale, débit +18 % : un peu plus de détails dans l'action rapide.",
+                "quality" => "préréglage p2 + AQ spatiale, débit +40 % par rapport à Compétitif : plus de détails, fichiers plus lourds, même charge d'encodeur.",
+                "balanced" => "préréglage p1 + AQ spatiale, débit +18 % par rapport à Compétitif : un peu plus de détails dans l'action rapide.",
                 _ => "préréglage p1 + AQ spatiale : environ 8 % du bloc d'encodage (séparé du rendu du jeu), pensé pour Valorant.",
             };
             let line = format!("{}p · {} i/s · {} · jusqu'à {:.0} Mb/s · {what} Si l'encodeur sature, Clipper s'allège tout seul.", self.cfg.clip.height, self.cfg.clip.fps, enc_label(&self.cfg.encoder), mbps);
@@ -526,8 +545,10 @@ impl Front {
     }
 
     /// Vu-mètre segmenté (.vu) : vert, jaune au-delà de 66 %, rouge au-delà de 86 %.
+    /// `level` : pic linéaire (0-1), affiché en décibels de -40 à 0 dB, comme Discord ou OBS. Avant : échelle
+    /// linéaire, une voix normale (pic ~0,1 soit -20 dB) n'allumait que 10 % de la barre.
     fn vu(&mut self, ui: &mut Ui, wid: u64, q: R, level: f32) {
-        let v = ui.anim(wid, level.clamp(0.0, 1.0), 0.08);
+        let v = ui.anim(wid, vu_db(level), 0.08);
         let mut sx = 0.0;
         while sx < q.w {
             let sw = (q.w - sx).min(6.0);
@@ -580,6 +601,8 @@ impl Front {
         let (x, w) = (view.x + 22.0, view.w - 44.0 - 10.0);
         let (fx, fw) = (x + 132.0, w - 132.0);
         let mut y = view.y + 4.0;
+        let subs: &[(&str, &str)] = if tracks.is_empty() { &[("aud:a", "Pistes")] } else { &[("aud:a", "Pistes"), ("aud:g", "Environnement"), ("aud:m", "Micro")] };
+        y = self.subtabs(ui, "aud", subs, x, y + 8.0, w);
         let (open, mut cy) = self.grp(ui, "aud:a", "Pistes", x, y, w);
         if open {
             let cw = ((w - 20.0) / 3.0).floor();
@@ -668,5 +691,22 @@ impl Front {
             y = self.grp_end(ui, open, x, cy, w, true);
         }
         ui.scroll_end(id("set-aud"), view, y + 28.0 - view.y, clip);
+    }
+}
+
+/// Pic linéaire -> position sur un vu-mètre de -40 dB (vide) à 0 dB (plein). -60 dB montait trop haut (le
+/// moindre bruit allumait la barre), l'échelle linéaire trop bas : une voix normale (-20 dB) en remplit la moitié.
+fn vu_db(peak: f32) -> f32 {
+    if peak <= 0.0 { 0.0 } else { ((20.0 * peak.log10() + 40.0) / 40.0).clamp(0.0, 1.0) }
+}
+
+#[cfg(test)]
+mod vu_tests {
+    #[test]
+    fn levels_use_a_decibel_scale() {
+        assert_eq!(super::vu_db(0.0), 0.0);
+        assert_eq!(super::vu_db(1.0), 1.0);
+        assert!((super::vu_db(0.1) - 0.5).abs() < 0.001); // -20 dB : la moitié de la barre
+        assert_eq!(super::vu_db(0.005), 0.0); // sous -40 dB : rien
     }
 }

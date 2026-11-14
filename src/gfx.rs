@@ -1109,6 +1109,15 @@ pub fn logo(c: &mut Canvas, x: f32, y: f32, size: f32, alpha: f32, extra: Transf
     c.stroke_grad(&p, 2.1, (6.0, 2.0), (18.0, 22.0), &[(0.0, hex(0xffb46a).a(alpha)), (0.55, hex(0xff7d2e).a(alpha)), (1.0, hex(0xc44a06).a(alpha))], tf);
 }
 
+/// Petit cœur (page de mise à jour) : même trait en dégradé orange que le trombone du logo, fond à peine teinté.
+pub fn heart(c: &mut Canvas, x: f32, y: f32, size: f32, alpha: f32) {
+    let Some(p) = svg_path("M12 20C12 20 3.5 14.8 3.5 9.3C3.5 6.6 5.6 4.5 8.1 4.5C9.8 4.5 11.2 5.4 12 6.8C12.8 5.4 14.2 4.5 15.9 4.5C18.4 4.5 20.5 6.6 20.5 9.3C20.5 14.8 12 20 12 20Z") else { return };
+    let k = size / 24.0;
+    let tf = Transform::from_row(k, 0.0, 0.0, k, x, y);
+    c.fill(&p, hex(0xff7d2e).a(0.16 * alpha), tf);
+    c.stroke_grad(&p, 2.1, (6.0, 2.0), (18.0, 22.0), &[(0.0, hex(0xffb46a).a(alpha)), (0.55, hex(0xff7d2e).a(alpha)), (1.0, hex(0xc44a06).a(alpha))], tf);
+}
+
 /// Paysage de l'aperçu (ciel, soleil, quatre lignes de crêtes), repère 1600x1000 recadré dans `dst`.
 pub fn scene(c: &mut Canvas, dst: R, rad: f32) {
     if c.vis(dst) == 0 {

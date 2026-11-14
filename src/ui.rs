@@ -90,6 +90,7 @@ impl Win {
                     (MouseButton::Left, ElementState::Pressed) => {
                         self.input.down = true;
                         self.input.pressed = true;
+                        (self.input.click_ctrl, self.input.click_shift) = (self.input.ctrl, self.input.shift);
                         let now = Instant::now();
                         let m = self.input.mouse;
                         self.input.dbl = self.last_click.is_some_and(|(t, p)| now.duration_since(t).as_millis() < 400 && (p.0 - m.0).abs() < 4.0 && (p.1 - m.1).abs() < 4.0);

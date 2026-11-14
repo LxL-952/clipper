@@ -23,6 +23,10 @@ pub struct Input {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    /// Ctrl et Maj tels qu'ils étaient à l'appui du clic gauche : un Ctrl+clic rapide (touche relâchée avant
+    /// le dessin suivant) reste un Ctrl+clic.
+    pub click_ctrl: bool,
+    pub click_shift: bool,
 }
 
 impl Input {
@@ -78,6 +82,13 @@ pub struct UiState {
     pub picked: Option<(u64, usize)>,
     /// Champ de texte actif.
     pub focus: u64,
+    /// Cadres dessinés par-dessus à l'image précédente (bandeau, notifications) : les contrôles en dessous
+    /// n'y réagissent pas (avant, fermer le bandeau cochait aussi la vidéo cachée dessous).
+    pub covers: Vec<R>,
+    /// Les mêmes, relevés pendant l'image en cours (voir `cover`).
+    covers_next: Vec<R>,
+    /// Champ dont tout le texte est sélectionné (Ctrl+A, ou ouverture de « Renommer ») : taper le remplace.
+    pub sel_all: u64,
     /// Glissement de la barre de défilement : (zone, écart souris / haut du curseur).
     drag_scroll: Option<(u64, f32)>,
     in_overlay: bool,
@@ -116,6 +127,7 @@ impl<'a> Ui<'a> {
         self.s.animating = false;
         self.s.hand = false;
         self.s.in_overlay = false;
+        self.s.covers = std::mem::take(&mut self.s.covers_next);
         if self.s.popup.is_none() {
             self.s.block = None;
         }
@@ -140,7 +152,15 @@ impl<'a> Ui<'a> {
         if !q.has(m) || !self.c.clip_rect().has(m) {
             return false;
         }
+        if !self.s.in_overlay && self.s.covers.iter().any(|c| c.has(self.i.mouse)) {
+            return false;
+        }
         self.s.in_overlay || self.s.block.is_none_or(|b| !b.has(self.i.mouse)) && self.s.popup.is_none()
+    }
+
+    /// Déclare un cadre dessiné par-dessus le reste : à l'image suivante, rien en dessous ne réagit à la souris.
+    pub fn cover(&mut self, q: R) {
+        self.s.covers_next.push(q);
     }
 
     /// Clic complet (enfoncé puis relâché) sur `q`.
@@ -577,27 +597,43 @@ impl<'a> Ui<'a> {
         let focus = self.s.focus == wid;
         let mut enter = false;
         if focus {
-            for ch in self.i.text.chars().filter(|c| !c.is_control()) {
-                value.push(ch);
+            if self.i.ctrl && self.i.key("KeyA") {
+                self.s.sel_all = wid;
             }
-            for k in &self.i.keys {
-                match k.as_str() {
-                    "Backspace" => {
-                        value.pop();
+            let all = self.s.sel_all == wid;
+            let typed: String = self.i.text.chars().filter(|c| !c.is_control()).collect();
+            // Tout sélectionné : un caractère tapé, Retour arrière ou Suppr remplacent tout le texte.
+            if all && (!typed.is_empty() || self.i.key("Backspace") || self.i.key("Delete")) {
+                value.clear();
+                self.s.sel_all = 0;
+            } else {
+                for k in &self.i.keys {
+                    match k.as_str() {
+                        "Backspace" => {
+                            value.pop();
+                        }
+                        "ArrowLeft" | "ArrowRight" | "Home" | "End" => self.s.sel_all = 0,
+                        _ => {}
                     }
-                    "Enter" | "NumpadEnter" => enter = true,
-                    _ => {}
                 }
             }
+            value.push_str(&typed);
+            enter = self.i.key("Enter") || self.i.key("NumpadEnter");
+        } else if self.s.sel_all == wid {
+            self.s.sel_all = 0;
         }
+        let all = focus && self.s.sel_all == wid;
         self.c.rrect(q, 6.0, pal::WELL);
         self.c.border(q, 6.0, 1.0, if focus { pal::SIGNAL } else { pal::LINE2 });
         let f = F::s(13.0, 400);
         let old = self.c.set_clip(Some(q.inset(2.0).inter(&self.c.clip_rect())));
         let tw = text_w(value, f);
         let x = q.x + 11.0 - (tw - (q.w - 26.0)).max(0.0);
+        if all && !value.is_empty() {
+            self.c.rect(r(x - 1.0, q.y + 8.0, tw + 2.0, q.h - 16.0), pal::SIGNAL.a(0.35));
+        }
         self.c.text(x, q.y, q.h, value, f, pal::TEXT);
-        if focus && clock() % 1.1 < 0.55 {
+        if focus && !all && clock() % 1.1 < 0.55 {
             self.c.rect(r(x + tw + 1.0, q.y + 9.0, 1.0, q.h - 18.0), pal::SIGNAL);
         }
         self.c.restore_clip(old);

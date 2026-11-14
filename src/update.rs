@@ -11,6 +11,8 @@ const UA: &str = concat!("Clipper/", env!("CARGO_PKG_VERSION"));
 
 /// Release trouvée au lancement, en attente du clic « Installer ».
 pub static FOUND: std::sync::Mutex<Option<Release>> = std::sync::Mutex::new(None);
+/// Son installateur, déjà téléchargé et vérifié en tâche de fond : le clic l'installe sans attendre.
+pub static READY: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 #[derive(Clone)]
 pub struct Release {
@@ -56,13 +58,18 @@ fn latest() -> Result<Release, String> {
 /// Télécharge dans %TEMP% en calculant l'empreinte au fil de l'eau ; fichier supprimé si elle diffère.
 pub fn download(r: &Release) -> Result<PathBuf, String> {
     use ureq::ResponseExt;
+    // Déjà là et identique à celui publié (téléchargé au lancement précédent) : rien à refaire.
+    let cached = std::env::temp_dir().join(format!("Clipper-Setup-{}.exe", r.version));
+    if std::fs::read(&cached).is_ok_and(|b| hex_sha256(&b) == r.sha256) {
+        return Ok(cached);
+    }
     let mut resp = ureq::get(&r.url).header("User-Agent", UA).call().map_err(|e| format!("Réseau : {e}"))?;
     // GitHub redirige vers son stockage ; rien d'autre n'est accepté.
     let host = resp.get_uri().host().unwrap_or("").to_string();
     if host != "github.com" && !host.ends_with(".githubusercontent.com") {
         return Err(format!("Redirection refusée : {host}"));
     }
-    let dest = std::env::temp_dir().join(format!("Clipper-Setup-{}.exe", r.version));
+    let dest = cached;
     let mut f = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
     let mut body = resp.body_mut().with_config().limit(u64::MAX).reader();
     let (mut h, mut buf, mut done) = (Sha256::new(), vec![0u8; 1 << 16], 0u64);
@@ -76,12 +83,20 @@ pub fn download(r: &Release) -> Result<PathBuf, String> {
         done += n as u64;
     }
     drop(f);
-    let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let got = hex_digest(h);
     if got != r.sha256 || (r.size > 0 && done != r.size) {
         let _ = std::fs::remove_file(&dest);
         return Err("Fichier téléchargé différent de celui publié (empreinte SHA-256) : supprimé.".into());
     }
     Ok(dest)
+}
+
+fn hex_digest(h: Sha256) -> String {
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_sha256(data: &[u8]) -> String {
+    hex_digest(Sha256::new_with_prefix(data))
 }
 
 /// Lance l'installateur en mode silencieux : il ferme Clipper (--quit), installe, puis le relance.

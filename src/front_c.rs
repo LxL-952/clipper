@@ -13,6 +13,10 @@ const LAB: f32 = 132.0;
 impl Front {
     /// Titre de section fixe (non repliable) : 16 px, graisse 600, filet au-dessus sauf pour la première.
     fn sect(&mut self, ui: &mut Ui, title: &str, x: f32, y: f32, w: f32, first: bool) -> f32 {
+        // Sous-onglets actifs : le sous-onglet sert de titre, la section commence tout de suite.
+        if self.sub_on.is_some() {
+            return y + 12.0;
+        }
         let mut y = y;
         if !first {
             ui.c.rect(r(x, y, w, 1.0), pal::LINE);
@@ -128,135 +132,146 @@ impl Front {
             y += ui.hint(x, y, w, "Onglet **Avancé** : « Démarrer en administrateur » les active sans demande à chaque lancement.");
         }
 
+        // Sous-catégories : une seule à la fois.
+        y = self.subtabs(ui, "stats", &[("stats:aff", "Affichage"), ("stats:mes", "Mesures"), ("stats:pos", "Position et apparence"), ("stats:gpu", "Cartes et mise à jour")], x, y + 10.0, w);
+
         // Affichage
-        y = self.sect(ui, "Affichage et raccourci", x, y + 6.0, w, true);
-        self.lab(ui.c, x, y, 38.0, "Affichage", None);
-        self.seg_cfg(ui, "overlay_mode", fx, y, &[("Masqué", json!("hidden")), ("Avec raccourci", json!("hotkey")), ("Toujours", json!("always"))], false);
-        y += 38.0 + 8.0;
-        let t = match self.cfg.overlay_mode.as_str() {
-            "hidden" => "Aucune statistique à l'écran : rien n'est mesuré, aucun coût.".to_string(),
-            "always" => "Visible en permanence par-dessus le jeu.".to_string(),
-            _ => format!("Affichez ou masquez pendant le jeu avec {ovk}. Masqué, rien n'est mesuré ni dessiné."),
-        };
-        y += ui.hint(fx, y, fw, &t) + 8.0;
-        // Raccourci de l'overlay (déplacé ici depuis « Raccourcis »).
-        y = self.hk_row(ui, 3, x, y, w);
-        y += 4.0;
+        if self.sub_is("stats:aff") {
+            y = self.sect(ui, "Affichage et raccourci", x, y + 6.0, w, true);
+            self.lab(ui.c, x, y, 38.0, "Affichage", None);
+            self.seg_cfg(ui, "overlay_mode", fx, y, &[("Masqué", json!("hidden")), ("Avec raccourci", json!("hotkey")), ("Toujours", json!("always"))], false);
+            y += 38.0 + 8.0;
+            let t = match self.cfg.overlay_mode.as_str() {
+                "hidden" => "Aucune statistique à l'écran : rien n'est mesuré, aucun coût.".to_string(),
+                "always" => "Visible en permanence par-dessus le jeu.".to_string(),
+                _ => format!("Affichez ou masquez pendant le jeu avec {ovk}. Masqué, rien n'est mesuré ni dessiné."),
+            };
+            y += ui.hint(fx, y, fw, &t) + 8.0;
+            // Raccourci de l'overlay (déplacé ici depuis « Raccourcis »).
+            y = self.hk_row(ui, 3, x, y, w);
+            y += 4.0;
 
+        }
         // Mesures
-        y = self.sect(ui, "Mesures", x, y + 12.0, w, false);
-        for (which, label, key) in [(0, "Mesures", "overlay_items"), (1, "Graphique", "overlay_graphs")] {
-            let list = if which == 0 { self.cfg.overlay_items.clone() } else { self.cfg.overlay_graphs.clone() };
-            let items: Vec<(String, bool, bool)> = ITEMS
-                .iter()
-                .map(|(k, l)| {
-                    let on = list.iter().any(|x| x == k);
-                    // Graphique : seulement pour une mesure affichée. Temp. CPU sans capteur : décochable, pas cochable.
-                    let off = if which == 1 { !self.cfg.overlay_items.iter().any(|x| x == k) } else { *k == "cpu_temp" && !self.cpu_temp && !on };
-                    (l.to_string(), on, off)
-                })
-                .collect();
-            let (hit, bottom) = self.chip_rows(ui, key, fx, y, fw, &items);
-            self.lab(ui.c, x, y, 32.0, label, None);
-            if let Some(i) = hit {
-                let k = ITEMS[i].0;
-                let mut on: Vec<&str> = list.iter().map(String::as_str).collect();
-                if on.contains(&k) { on.retain(|x| *x != k) } else { on.push(k) }
-                let ordered: Vec<&str> = ITEMS.iter().map(|i| i.0).filter(|i| on.contains(i)).collect();
-                self.set(key, json!(ordered));
-            }
-            y = bottom + 8.0;
-            let help = if which == 0 {
-                "FPS et MS/IMG (temps moyen d'une image, 1000 ÷ FPS) comptent les images du frame gen (DLSS, FSR) comme le compteur NVIDIA. Le **1 % low** est calculé sur les 10 dernières secondes : la moyenne des 1 % d'images les plus lentes, comme Afterburner et CapFrameX."
-            } else {
-                "Courbe des 15 dernières secondes à côté de la valeur, comme Afterburner. Seulement pour une mesure affichée."
-            };
-            y += ui.hint(fx, y, fw, help) + 14.0;
-        }
-
-        // Apparence
-        y = self.sect(ui, "Position et apparence", x, y, w, false);
-        self.lab(ui.c, x, y, 75.0, "Position", None);
-        let cb = r(fx, y, 134.0, 75.0);
-        ui.c.rrect(cb, 6.0, pal::WELL);
-        ui.c.border(cb, 6.0, 1.0, pal::LINE);
-        let mut pick = None;
-        for (i, v) in ["tl", "tc", "tr", "bl", "bc", "br"].iter().enumerate() {
-            let cell = r(fx + 4.0 + (i % 3) as f32 * 43.0, y + 4.0 + (i / 3) as f32 * 35.0, 40.0, 32.0);
-            let on = self.cfg.overlay_corner == *v;
-            if on || ui.hot(cell) {
-                ui.c.rrect(cell, 3.0, pal::RAISE);
-            }
-            if ui.click(idn("corner", i), cell) {
-                pick = Some(*v);
-            }
-            let mx = match i % 3 {
-                0 => cell.x + 6.0,
-                1 => cell.x + (cell.w - 9.0) / 2.0,
-                _ => cell.right() - 15.0,
-            };
-            let my = if i / 3 == 0 { cell.y + 6.0 } else { cell.bottom() - 13.0 };
-            ui.c.rrect(r(mx, my, 9.0, 7.0), 1.0, if on { pal::SIGNAL } else { pal::LINE2 });
-        }
-        if let Some(v) = pick {
-            self.set("overlay_corner", json!(v));
-        }
-        ui.hint(fx + 134.0 + 14.0, y + 4.0, fw - 148.0, "Coins et milieux de l'écran du jeu, à la bonne échelle sur chaque écran (100 %, 125 %, 150 %).");
-        y += 75.0 + 14.0;
-        self.lab(ui.c, x, y, 38.0, "Taille", None);
-        self.seg_cfg(ui, "overlay_size", fx, y, &[("Petite", json!("s")), ("Moyenne", json!("m")), ("Grande", json!("l"))], false);
-        y += 38.0 + 14.0;
-        self.lab(ui.c, x, y, 34.0, "Opacité du fond", None);
-        let pct = (self.cfg.overlay_opacity * 100.0).round();
-        let (s, _) = self.fader(ui, id("op"), fx, y + 1.0, fw, pct, (0.0, 100.0, 5.0), (&format!("{pct:.0}"), " %"), None);
-        if s.changed {
-            self.cfg.overlay_opacity = s.v / 100.0;
-        }
-        if s.done {
-            self.set("overlay_opacity", json!(s.v / 100.0));
-        }
-        y += 34.0 + 14.0;
-
-        // Cartes et mise à jour
-        y = self.sect(ui, "Cartes et mise à jour", x, y, w, false);
-        // Cartes mesurées (GPU %, température, VRAM) : une ou plusieurs, puce intégrée comprise.
-        let names = self.gpu_names.clone();
-        if names.len() > 1 {
-            // Aucune cochée = la carte NVIDIA (ou la première) : affichée cochée.
-            let chosen: Vec<String> = if self.cfg.overlay_gpus.iter().any(|g| names.contains(g)) {
-                self.cfg.overlay_gpus.iter().filter(|g| names.contains(g)).cloned().collect()
-            } else {
-                names.iter().find(|n| n.contains("NVIDIA")).or(names.first()).cloned().into_iter().collect()
-            };
-            let items: Vec<(String, bool, bool)> = names.iter().map(|n| (n.strip_prefix("NVIDIA ").unwrap_or(n).to_string(), chosen.contains(n), false)).collect();
-            let (hit, bottom) = self.chip_rows(ui, "gpus", fx, y, fw, &items);
-            self.lab(ui.c, x, y, 32.0, "Cartes mesurées", None);
-            if let Some(i) = hit {
-                let n = names[i].clone();
-                let mut on = chosen.clone();
-                if on.contains(&n) {
-                    // Toujours au moins une carte.
-                    if on.len() > 1 {
-                        on.retain(|g| *g != n);
-                    }
-                } else {
-                    on.push(n);
+        if self.sub_is("stats:mes") {
+            y = self.sect(ui, "Mesures", x, y + 12.0, w, false);
+            for (which, label, key) in [(0, "Mesures", "overlay_items"), (1, "Graphique", "overlay_graphs")] {
+                let list = if which == 0 { self.cfg.overlay_items.clone() } else { self.cfg.overlay_graphs.clone() };
+                let items: Vec<(String, bool, bool)> = ITEMS
+                    .iter()
+                    .map(|(k, l)| {
+                        let on = list.iter().any(|x| x == k);
+                        // Graphique : seulement pour une mesure affichée. Temp. CPU sans capteur : décochable, pas cochable.
+                        let off = if which == 1 { !self.cfg.overlay_items.iter().any(|x| x == k) } else { *k == "cpu_temp" && !self.cpu_temp && !on };
+                        (l.to_string(), on, off)
+                    })
+                    .collect();
+                let (hit, bottom) = self.chip_rows(ui, key, fx, y, fw, &items);
+                self.lab(ui.c, x, y, 32.0, label, None);
+                if let Some(i) = hit {
+                    let k = ITEMS[i].0;
+                    let mut on: Vec<&str> = list.iter().map(String::as_str).collect();
+                    if on.contains(&k) { on.retain(|x| *x != k) } else { on.push(k) }
+                    let ordered: Vec<&str> = ITEMS.iter().map(|i| i.0).filter(|i| on.contains(i)).collect();
+                    self.set(key, json!(ordered));
                 }
-                let ordered: Vec<&String> = names.iter().filter(|g| on.contains(g)).collect();
-                self.set("overlay_gpus", json!(ordered));
+                y = bottom + 8.0;
+                let help = if which == 0 {
+                    "FPS et MS/IMG (temps moyen d'une image, 1000 ÷ FPS) comptent les images du frame gen (DLSS, FSR) comme le compteur NVIDIA. Le **1 % low** est calculé sur les 10 dernières secondes : la moyenne des 1 % d'images les plus lentes, comme Afterburner et CapFrameX."
+                } else {
+                    "Courbe des 15 dernières secondes à côté de la valeur, comme Afterburner. Seulement pour une mesure affichée."
+                };
+                y += ui.hint(fx, y, fw, help) + 14.0;
             }
-            y = bottom + 8.0;
+
         }
-        let t = if names.is_empty() {
-            "GPU, température GPU et VRAM : aucune carte graphique trouvée."
-        } else {
-            "GPU, température GPU et VRAM : une ligne par carte cochée. Température : cartes NVIDIA seulement (« n/d » pour une puce AMD ou Intel, illisible sans le logiciel du fabricant)."
-        };
-        y += ui.hint(if names.len() > 1 { fx } else { x }, y, if names.len() > 1 { fw } else { w }, t) + 16.0;
-        self.lab(ui.c, x, y, 38.0, "Mise à jour", Some("des chiffres"));
-        self.seg_cfg(ui, "overlay_refresh_ms", fx, y, &[("0,25 s", json!(250)), ("0,5 s", json!(500)), ("1 s", json!(1000)), ("2 s", json!(2000))], true);
-        y += 38.0 + 8.0;
-        y += ui.hint(fx, y, fw, "Les chiffres et l'overlay ne sont redessinés qu'à cet intervalle, jamais entre deux : 0,25 s reste quasi gratuit, 1 s ou 2 s le rend encore plus discret.");
+        // Apparence
+        if self.sub_is("stats:pos") {
+            y = self.sect(ui, "Position et apparence", x, y, w, false);
+            self.lab(ui.c, x, y, 75.0, "Position", None);
+            let cb = r(fx, y, 134.0, 75.0);
+            ui.c.rrect(cb, 6.0, pal::WELL);
+            ui.c.border(cb, 6.0, 1.0, pal::LINE);
+            let mut pick = None;
+            for (i, v) in ["tl", "tc", "tr", "bl", "bc", "br"].iter().enumerate() {
+                let cell = r(fx + 4.0 + (i % 3) as f32 * 43.0, y + 4.0 + (i / 3) as f32 * 35.0, 40.0, 32.0);
+                let on = self.cfg.overlay_corner == *v;
+                if on || ui.hot(cell) {
+                    ui.c.rrect(cell, 3.0, pal::RAISE);
+                }
+                if ui.click(idn("corner", i), cell) {
+                    pick = Some(*v);
+                }
+                let mx = match i % 3 {
+                    0 => cell.x + 6.0,
+                    1 => cell.x + (cell.w - 9.0) / 2.0,
+                    _ => cell.right() - 15.0,
+                };
+                let my = if i / 3 == 0 { cell.y + 6.0 } else { cell.bottom() - 13.0 };
+                ui.c.rrect(r(mx, my, 9.0, 7.0), 1.0, if on { pal::SIGNAL } else { pal::LINE2 });
+            }
+            if let Some(v) = pick {
+                self.set("overlay_corner", json!(v));
+            }
+            ui.hint(fx + 134.0 + 14.0, y + 4.0, fw - 148.0, "Coins et milieux de l'écran du jeu, à la bonne échelle sur chaque écran (100 %, 125 %, 150 %).");
+            y += 75.0 + 14.0;
+            self.lab(ui.c, x, y, 38.0, "Taille", None);
+            self.seg_cfg(ui, "overlay_size", fx, y, &[("Petite", json!("s")), ("Moyenne", json!("m")), ("Grande", json!("l"))], false);
+            y += 38.0 + 14.0;
+            self.lab(ui.c, x, y, 34.0, "Opacité du fond", None);
+            let pct = (self.cfg.overlay_opacity * 100.0).round();
+            let (s, _) = self.fader(ui, id("op"), fx, y + 1.0, fw, pct, (0.0, 100.0, 5.0), (&format!("{pct:.0}"), " %"), None);
+            if s.changed {
+                self.cfg.overlay_opacity = s.v / 100.0;
+            }
+            if s.done {
+                self.set("overlay_opacity", json!(s.v / 100.0));
+            }
+            y += 34.0 + 14.0;
+
+        }
+        // Cartes et mise à jour
+        if self.sub_is("stats:gpu") {
+            y = self.sect(ui, "Cartes et mise à jour", x, y, w, false);
+            // Cartes mesurées (GPU %, température, VRAM) : une ou plusieurs, puce intégrée comprise.
+            let names = self.gpu_names.clone();
+            if names.len() > 1 {
+                // Aucune cochée = la carte NVIDIA (ou la première) : affichée cochée.
+                let chosen: Vec<String> = if self.cfg.overlay_gpus.iter().any(|g| names.contains(g)) {
+                    self.cfg.overlay_gpus.iter().filter(|g| names.contains(g)).cloned().collect()
+                } else {
+                    names.iter().find(|n| n.contains("NVIDIA")).or(names.first()).cloned().into_iter().collect()
+                };
+                let items: Vec<(String, bool, bool)> = names.iter().map(|n| (n.strip_prefix("NVIDIA ").unwrap_or(n).to_string(), chosen.contains(n), false)).collect();
+                let (hit, bottom) = self.chip_rows(ui, "gpus", fx, y, fw, &items);
+                self.lab(ui.c, x, y, 32.0, "Cartes mesurées", None);
+                if let Some(i) = hit {
+                    let n = names[i].clone();
+                    let mut on = chosen.clone();
+                    if on.contains(&n) {
+                        // Toujours au moins une carte.
+                        if on.len() > 1 {
+                            on.retain(|g| *g != n);
+                        }
+                    } else {
+                        on.push(n);
+                    }
+                    let ordered: Vec<&String> = names.iter().filter(|g| on.contains(g)).collect();
+                    self.set("overlay_gpus", json!(ordered));
+                }
+                y = bottom + 8.0;
+            }
+            let t = if names.is_empty() {
+                "GPU, température GPU et VRAM : aucune carte graphique trouvée."
+            } else {
+                "GPU, température GPU et VRAM : une ligne par carte cochée. Température : cartes NVIDIA seulement (« n/d » pour une puce AMD ou Intel, illisible sans le logiciel du fabricant)."
+            };
+            y += ui.hint(if names.len() > 1 { fx } else { x }, y, if names.len() > 1 { fw } else { w }, t) + 16.0;
+            self.lab(ui.c, x, y, 38.0, "Mise à jour", Some("des chiffres"));
+            self.seg_cfg(ui, "overlay_refresh_ms", fx, y, &[("0,25 s", json!(250)), ("0,5 s", json!(500)), ("1 s", json!(1000)), ("2 s", json!(2000))], true);
+            y += 38.0 + 8.0;
+            y += ui.hint(fx, y, fw, "Les chiffres et l'overlay ne sont redessinés qu'à cet intervalle, jamais entre deux : 0,25 s reste quasi gratuit, 1 s ou 2 s le rend encore plus discret.");
+        }
         ui.scroll_end(id("set-stats"), view, y + 28.0 - view.y, clip);
     }
 
@@ -280,7 +295,8 @@ impl Front {
         let rows: [(&str, String, bool); 5] = [
             ("Administrateur", if self.elevated { "Oui".into() } else { "Non".into() }, self.elevated),
             ("Démarrage avec Windows", if self.autostart { "Oui".into() } else { "Non".into() }, self.autostart),
-            ("Puce d'encodage", chip_name.clone(), true),
+            // Nom compact (« RTX 4060 Laptop ») : le nom complet était coupé en « NVIDIA GeForce RTX … ».
+            ("Puce d'encodage", gpu_label(&chip_name), true),
             ("Mode étiré", stretch.to_string(), self.cfg.stretch != "off"),
             ("Version", env!("CARGO_PKG_VERSION").to_string(), true),
         ];
@@ -465,5 +481,24 @@ impl Front {
             }
         }
         q.bottom()
+    }
+}
+
+/// Nom de carte sans la marque ni les mentions inutiles, pour une colonne étroite :
+/// « NVIDIA GeForce RTX 4060 Laptop GPU » -> « RTX 4060 Laptop », « AMD Radeon(TM) 780M Graphics » -> « Radeon 780M ».
+fn gpu_label(name: &str) -> String {
+    let drop = ["nvidia", "geforce", "amd", "intel(r)", "intel", "gpu", "graphics", "(tm)", "(r)"];
+    let words: Vec<String> = name.replace("(TM)", " ").replace("(R)", " ").split_whitespace().filter(|w| !drop.contains(&w.to_ascii_lowercase().as_str())).map(String::from).collect();
+    if words.is_empty() { name.to_string() } else { words.join(" ") }
+}
+
+#[cfg(test)]
+mod gpu_label_tests {
+    #[test]
+    fn gpu_names_are_short() {
+        assert_eq!(super::gpu_label("NVIDIA GeForce RTX 4060 Laptop GPU"), "RTX 4060 Laptop");
+        assert_eq!(super::gpu_label("AMD Radeon(TM) 780M Graphics"), "Radeon 780M");
+        assert_eq!(super::gpu_label("Intel(R) Arc(TM) A770 Graphics"), "Arc A770");
+        assert_eq!(super::gpu_label("Processeur"), "Processeur");
     }
 }

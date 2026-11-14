@@ -119,11 +119,21 @@ pub struct Front {
     pub elevated: bool,
     pub autostart: bool,
     pub admin_busy: bool,
+    /// Bandeau « pas en mode administrateur » fermé par sa croix : masqué jusqu'au prochain lancement.
+    pub admin_note_closed: bool,
     // réglages
     pending: Map<String, Value>,
     flush_at: Option<Instant>,
     save_msg: Option<(String, String, Option<Instant>)>,
     pub folds: HashMap<String, bool>,
+    /// Sous-onglet choisi dans chaque onglet (« clip » -> « clip:q »).
+    pub subs: HashMap<String, String>,
+    /// Curseur en cours de glissement et largeur de sa barre, figée jusqu'au relâchement.
+    pub fader_hold: Option<(u64, f32)>,
+    /// Sous-onglets de l'onglet affiché : (préfixe, clé choisie). None : onglet sans sous-onglets.
+    pub sub_on: Option<(String, String)>,
+    /// Dernière section ouverte par `grp` en mode sous-onglets : affichée ou non (lu par `grp_end`).
+    grp_sub: Option<bool>,
     // raccourcis
     pub hk: [Option<String>; 5],
     pub conflicts: Vec<String>,
@@ -131,6 +141,10 @@ pub struct Front {
     // barre de titre
     pub update: Option<String>,
     pub upd_text: Option<String>,
+    /// Installateur déjà téléchargé et vérifié en tâche de fond : le clic installe tout de suite.
+    pub upd_ready: bool,
+    /// Échec du dernier essai (réseau…), affiché dans l'encadré de la page de mise à jour.
+    pub upd_err: Option<String>,
     pub recording: bool,
     pub rec_t0: Instant,
     // emplacements
@@ -138,7 +152,11 @@ pub struct Front {
     // vidéos
     pub vids: Option<Vec<Vid>>,
     pub v_sel: Option<PathBuf>,
+    /// Vidéos cochées (Ctrl+clic, Maj+clic, case, Ctrl+A) : supprimées d'un coup.
+    pub v_multi: std::collections::HashSet<PathBuf>,
     pub v_pending: Option<PathBuf>,
+    /// Dernier clip cliqué ou coché : point de départ d'un Maj+clic.
+    pub v_anchor: Option<PathBuf>,
     pub ren: Option<String>,
     pub del_box: bool,
     pub del_ask: bool,
@@ -175,6 +193,9 @@ pub struct Front {
     /// Miniatures encore décodables pendant cette image ; le reste attend l'image suivante (défilement fluide).
     thumb_left: u8,
     thumb_more: bool,
+    /// Miniatures pas encore faites (créées en tâche de fond après le clip) : dernier essai et nombre d'essais.
+    thumb_miss: HashMap<String, (Instant, u8)>,
+    thumb_wait: bool,
     pub t_start: Instant,
 }
 
@@ -302,21 +323,30 @@ impl Front {
             elevated: init["elevated"].as_bool().unwrap_or(false),
             autostart: init["autostart"].as_bool().unwrap_or(false),
             admin_busy: false,
+            admin_note_closed: false,
             pending: Map::new(),
             flush_at: None,
             save_msg: None,
             folds,
+            subs: HashMap::new(),
+            fader_hold: None,
+            sub_on: None,
+            grp_sub: None,
             hk: [hk("clip"), hk("rec"), hk("bar"), hk("overlay"), hk("clipping")],
             conflicts: init["hotkey_conflicts"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(pretty)).collect(),
             hk_wait: None,
             update: init["update"].as_str().map(String::from),
             upd_text: None,
+            upd_ready: init["update_ready"] == true,
+            upd_err: None,
             recording: init["recording"].as_bool().unwrap_or(false),
             rec_t0: now - Duration::from_secs(init["rec_secs"].as_u64().unwrap_or(0)),
             free: HashMap::new(),
             vids: None,
             v_sel: None,
+            v_multi: Default::default(),
             v_pending: None,
+            v_anchor: None,
             ren: None,
             del_box: false,
             del_ask: false,
@@ -342,6 +372,8 @@ impl Front {
             cfg_json: None,
             thumb_left: 2,
             thumb_more: false,
+            thumb_miss: HashMap::new(),
+            thumb_wait: false,
             t_start: now,
             cfg,
         }
@@ -469,12 +501,14 @@ impl Front {
                 self.hk = [hk("clip"), hk("rec"), hk("bar"), hk("overlay"), hk("clipping")];
                 self.conflicts = m["conflicts"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(pretty)).collect();
             }
+            "update_ready" => self.upd_ready = true,
             "update_state" => {
                 if m["ok"] == true {
                     self.upd_text = Some(s("text"));
                 } else {
+                    // Message dans l'encadré de la page de mise à jour (les notifications n'y sont pas dessinées).
                     self.upd_text = None;
-                    self.toast("error", &s("text"), None);
+                    self.upd_err = Some(s("text"));
                 }
             }
             "gpu" => {
@@ -502,6 +536,11 @@ impl Front {
             "disk" => {
                 self.free.insert(PathBuf::from(s("path")), m["free_bytes"].as_u64().unwrap_or(0));
             }
+            "thumbs_ready" => {
+                // Miniatures manquantes refaites en tâche de fond : relues tout de suite.
+                self.thumbs.retain(|_, t| t.is_some());
+                self.thumb_miss.clear();
+            }
             "videos" => {
                 let vids: Vec<Vid> = m["items"]
                     .as_array()
@@ -510,7 +549,8 @@ impl Front {
                     .map(|v| {
                         let path = PathBuf::from(v["path"].as_str().unwrap_or(""));
                         Vid {
-                            stem: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                            // Clé de la miniature (stable au renommage), sinon le nom du fichier.
+                            stem: v["thumb"].as_str().map(String::from).unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned()),
                             path,
                             name: v["name"].as_str().unwrap_or("").into(),
                             rec: v["kind"] == "REC",
@@ -524,7 +564,12 @@ impl Front {
                     .collect();
                 // Miniatures des vidéos disparues : mémoire rendue.
                 self.thumbs.retain(|k, _| vids.iter().any(|v| v.stem == k.trim_end_matches('#')));
+                // Liste relue (nouveau clip, onglet rouvert) : les miniatures absentes sont réessayées.
+                self.thumbs.retain(|_, t| t.is_some());
+                self.thumb_miss.clear();
                 let had = self.v_sel.clone();
+                // Vidéos cochées disparues (supprimées, renommées) : retirées de la sélection.
+                self.v_multi.retain(|p| vids.iter().any(|v| &v.path == p));
                 self.vids = Some(vids);
                 let has = |p: &PathBuf| self.vids.as_ref().is_some_and(|l| l.iter().any(|v| &v.path == p));
                 if let Some(p) = self.v_pending.take().filter(|p| has(p)) {
@@ -631,17 +676,23 @@ impl Front {
         let now = ui.now;
         self.next = None;
         self.cfg_json = None;
-        (self.thumb_left, self.thumb_more) = (2, false);
+        (self.thumb_left, self.thumb_more, self.thumb_wait) = (2, false, false);
         ui.begin();
         ui.c.clear(pal::BODY);
         let (w, h) = ui.c.size();
-        self.keys(ui);
-        if self.fullscreen && self.tab == Tab::Videos {
+        if self.update.is_none() {
+            self.keys(ui);
+        }
+        if let Some(v) = self.update.clone() {
+            // Nouvelle version publiée : page imposée, ni onglets ni raccourcis tant qu'elle n'est pas installée.
+            self.update_page(ui, w, h, &v);
+        } else if self.fullscreen && self.tab == Tab::Videos {
             // Vidéo en grand écran : le lecteur occupe toute la fenêtre.
             self.player_view(ui, r(0.0, 0.0, w, h), 0.0);
         } else {
             self.titlebar(ui, w);
-            let body = r(1.0, 45.0, w - 2.0, h - 46.0);
+            let body = r(1.0, 51.0, w - 2.0, h - 52.0);
+            self.sub_on = None; // chaque onglet déclare ses sous-onglets en se dessinant
             match self.tab {
                 Tab::Clip => self.tab_clip(ui, body),
                 Tab::Audio => self.tab_audio(ui, body),
@@ -697,6 +748,9 @@ impl Front {
         if self.player.tick() {
             self.wake_in(Duration::from_millis(if self.player.playing { 100 } else { 60 }));
         }
+        if self.thumb_wait {
+            self.wake_in(Duration::from_secs(1)); // miniature d'un clip tout neuf : relue dans une seconde
+        }
         if self.thumb_more {
             self.wake_in(Duration::from_millis(16)); // miniatures restantes : image suivante
         }
@@ -751,10 +805,12 @@ impl Front {
         if ui.i.key("Escape") {
             // Échap ferme d'abord ce qui est ouvert (menu, liste, champ, renommage, suppression), puis la
             // vidéo en grand écran, puis restaure la fenêtre agrandie.
-            let busy = self.ctx.is_some() || ui.s.popup.is_some() || ui.s.focus != 0 || self.ren.is_some() || self.del_box;
+            let busy = self.ctx.is_some() || ui.s.popup.is_some() || ui.s.focus != 0 || self.ren.is_some() || self.del_box || !self.v_multi.is_empty();
             self.ctx = None;
             if self.fullscreen {
                 self.set_fullscreen(false);
+            } else if !self.v_multi.is_empty() && !self.del_box && ui.s.focus == 0 {
+                self.v_multi.clear();
             } else if self.maximized && !busy {
                 self.toggle_max();
             }
@@ -797,9 +853,10 @@ impl Front {
 
     fn titlebar(&mut self, ui: &mut Ui, w: f32) {
         let c = &mut *ui.c;
-        c.rect(r(1.0, 44.0, w - 2.0, 1.0), pal::LINE);
-        crate::gfx::logo(c, 15.0, 13.0, 20.0, 1.0, tiny_skia::Transform::identity());
-        c.text(44.0, 1.0, 44.0, "Clipper", F::s(14.0, 600).ls(-0.01), pal::TEXT);
+        // Barre de 51 px (avant 45) : les onglets ne touchent plus le filet, contenu centré (+3 px).
+        c.rect(r(1.0, 50.0, w - 2.0, 1.0), pal::LINE);
+        crate::gfx::logo(c, 15.0, 16.0, 20.0, 1.0, tiny_skia::Transform::identity());
+        c.text(44.0, 4.0, 44.0, "Clipper", F::s(14.0, 600).ls(-0.01), pal::TEXT);
         let mut x = 44.0 + text_w("Clipper", F::s(14.0, 600).ls(-0.01)) + 14.0 + 6.0;
         // onglets
         let tabs: [(Tab, &str); 7] = [
@@ -817,13 +874,13 @@ impl Front {
         // Écarts de 2 px entre onglets : un de moins que le nombre d'onglets (avant : 4 en dur, prévu pour 5
         // onglets ; avec 7, « Avancé » dépassait du cadre).
         let total = widths.iter().sum::<f32>() + 8.0 + 2.0 * (tabs.len() as f32 - 1.0);
-        let bx = r(x, 4.0, total, 38.0);
+        let bx = r(x, 7.0, total, 38.0);
         ui.c.rrect(bx, 7.0, pal::WELL);
         ui.c.border(bx, 7.0, 1.0, pal::LINE);
         x += 4.0;
         let mut pick = None;
         for (i, (t, label)) in tabs.iter().enumerate() {
-            let cell = r(x, 8.0, widths[i], 30.0);
+            let cell = r(x, 11.0, widths[i], 30.0);
             let on = self.tab == *t;
             let hot = ui.hot(cell);
             if ui.click(idn("tab", i), cell) {
@@ -848,10 +905,9 @@ impl Front {
         if let Some(t) = pick {
             self.select_tab(t);
         }
-        let tabs_end = bx.right() + 12.0;
         // côté droit, de droite à gauche
         let mut rx = w - 1.0 - 6.0 - 36.0;
-        let q = r(rx, 6.0, 36.0, 32.0);
+        let q = r(rx, 9.0, 36.0, 32.0);
         if ui.wbtn(id("wClose"), q, "x", true) && self.closing.is_none() {
             self.flush();
             self.player.pause();
@@ -861,13 +917,13 @@ impl Front {
         // Agrandir / restaurer : la fenêtre occupe l'écran où elle se trouve, barre des tâches comprise
         // (tao s'arrête à la zone de travail), à n'importe quelle mise à l'échelle.
         rx -= 4.0 + 36.0;
-        let q = r(rx, 6.0, 36.0, 32.0);
+        let q = r(rx, 9.0, 36.0, 32.0);
         if ui.wbtn(id("wMax"), q, if self.maximized { "restore" } else { "max" }, false) {
             self.toggle_max();
         }
         self.tooltip(ui, id("wMax"), q, if self.maximized { "Restaurer (F11)" } else { "Agrandir (F11)" });
         rx -= 4.0 + 36.0;
-        let q = r(rx, 6.0, 36.0, 32.0);
+        let q = r(rx, 9.0, 36.0, 32.0);
         if ui.wbtn(id("wMin"), q, "min", false) {
             self.send(json!({"cmd": "minimize"}));
         }
@@ -878,40 +934,14 @@ impl Front {
             let tw = text_w("REC ", F::s(12.0, 400)) + text_w(&t, F::m(12.0, 400));
             rx -= 14.0 + tw + 14.0;
             let blink = (self.t_start.elapsed().as_millis() % 1600) < 800;
-            ui.led(rx + 3.5, 23.0, 7.0, pal::REC.a(if blink { 1.0 } else { 0.35 }));
-            let x2 = rx + 14.0 + ui.c.text(rx + 14.0, 1.0, 44.0, "REC ", F::s(12.0, 400), hex(0xffd9d5));
-            ui.c.text(x2, 1.0, 44.0, &t, F::m(12.0, 400), hex(0xffd9d5));
+            ui.led(rx + 3.5, 26.0, 7.0, pal::REC.a(if blink { 1.0 } else { 0.35 }));
+            let x2 = rx + 14.0 + ui.c.text(rx + 14.0, 4.0, 44.0, "REC ", F::s(12.0, 400), hex(0xffd9d5));
+            ui.c.text(x2, 4.0, 44.0, &t, F::m(12.0, 400), hex(0xffd9d5));
         }
-        if let Some(v) = self.update.clone() {
-            // Bandeau de mise à jour : un clic télécharge, vérifie l'empreinte et installe.
-            let busy = self.upd_text.is_some();
-            let f = F::s(12.0, 600);
-            // Libellé selon la place laissée par les onglets : long, court, puis icône seule (jamais par-dessus).
-            let room = rx - 14.0 - 6.0 - tabs_end;
-            let bw_of = |l: &str| if l.is_empty() { 40.0 } else { 22.0 + 18.0 + 7.0 + text_w(l, f) + 2.0 };
-            let label = match self.upd_text.clone() {
-                Some(t) if bw_of(&t) <= room => t,
-                Some(_) => "…".to_string(),
-                None => [format!("Nouvelle version {v} · Installer"), format!("Installer {v}")].into_iter().find(|l| bw_of(l) <= room).unwrap_or_default(),
-            };
-            let bw = bw_of(&label);
-            rx -= 14.0 + 6.0 + bw;
-            let q = r(rx, 8.0, bw, 28.0);
-            let hot = !busy && ui.hot(q);
-            if !busy && ui.click(id("upd"), q) {
-                self.upd_text = Some("Téléchargement et vérification…".into());
-                self.send(json!({"cmd": "update_install"}));
-            }
-            let o = if busy { 0.6 } else { 1.0 };
-            ui.c.rrect(q, 6.0, if hot { pal::SIGNAL } else { pal::SIGNAL_SOFT }.a(o));
-            ui.c.border(q, 6.0, 1.0, pal::SIGNAL.a(o));
-            let fg = if hot { pal::SIGNAL_INK } else { pal::TEXT }.a(o);
-            ui.c.icon("dl", q.x + 11.0, q.y + 5.0, 18.0, fg);
-            ui.c.text(q.x + 36.0, q.y, q.h, &label, f, fg);
-        }
+        // (Nouvelle version : plus de bandeau ici, voir `update_page`.)
         // Glisser la fenêtre : appui dans la barre de titre, hors de tout contrôle. Double-clic : agrandir /
         // restaurer, comme une fenêtre de Windows.
-        if ui.i.pressed && ui.s.active == 0 && ui.i.mouse.1 < 44.0 && ui.i.mouse.1 >= 0.0 && ui.s.popup.is_none() && self.intro.is_none() {
+        if ui.i.pressed && ui.s.active == 0 && ui.i.mouse.1 < 50.0 && ui.i.mouse.1 >= 0.0 && ui.s.popup.is_none() && self.intro.is_none() {
             if ui.i.dbl {
                 self.toggle_max();
             } else {
@@ -930,6 +960,45 @@ impl Front {
                 ui.c.border(b, 6.0, 1.0, pal::LINE2);
                 ui.c.text_in(b, 0, &text, F::s(12.0, 500), pal::TEXT);
             });
+        }
+        // Pas en administrateur : bandeau en haut à droite, sur tous les onglets. La croix le masque jusqu'au
+        // prochain lancement ; sinon il reste, tant que Clipper ne tourne pas en administrateur.
+        if !self.elevated && !self.admin_note_closed {
+            let bw = 340.0;
+            let on = self.cfg.admin_mode;
+            let text = if on {
+                "« Démarrer en administrateur » est activé, mais Clipper n'a pas pu s'élever. **FPS, temps d'image et 1 % low** restent vides."
+            } else {
+                "**FPS, temps d'image et 1 % low** de l'overlay restent vides, et le nettoyage de la RAM demande l'autorisation à chaque fois."
+            };
+            let sp = md(text, F::s(12.0, 400), pal::TEXT2, 600, pal::TEXT);
+            let tw = bw - 33.0 - 46.0;
+            let th = ui.c.para(0.0, 0.0, tw, 17.4, &sp, false);
+            // Sous la barre des sous-onglets (y = 51 + 77) : ne cache pas la navigation.
+            let q = r(w - 16.0 - bw, 51.0 + 77.0, bw, 12.0 + 20.0 + 4.0 + th + 10.0 + 32.0 + 12.0);
+            let label = if on { "Relancer en administrateur" } else { "Activer" };
+            let busy = self.admin_busy;
+            ui.cover(q);
+            let (close, go) = ui.overlay(|ui| {
+                ui.c.shadow(q, 8.0, 8.0, 14.0, pal::BLACK.a(0.5));
+                ui.c.rrect(q, 8.0, hex(0x151a14).a(0.97));
+                ui.c.border(q, 8.0, 1.0, pal::WARN.a(0.4));
+                ui.c.icon("lock", q.x + 11.0, q.y + 15.0, 15.0, pal::WARN);
+                ui.c.text(q.x + 33.0, q.y + 12.0, 20.0, "Pas en mode administrateur", F::s(14.0, 600), pal::TEXT);
+                ui.c.para(q.x + 33.0, q.y + 36.0, tw, 17.4, &sp, true);
+                let close = ui.wbtn(id("adm-x"), r(q.right() - 38.0, q.y + 10.0, 28.0, 28.0), "x", false);
+                let go = ui.btn(id("adm-go"), r(q.x + 33.0, q.bottom() - 44.0, Ui::btn_w(label, false, Btn::P), 32.0), label, None, Btn::P.off(busy));
+                (close, go)
+            });
+            if close {
+                self.admin_note_closed = true;
+            } else if go && on {
+                self.send(json!({"cmd": "relaunch_admin"}));
+            } else if go {
+                // Une seule autorisation Windows, puis relance en administrateur (voir « Avancé »).
+                self.admin_busy = true;
+                self.send(json!({"cmd": "admin_mode", "value": true}));
+            }
         }
         // bandeau des réglages
         let mut bottom = h - 16.0;
@@ -975,6 +1044,7 @@ impl Front {
             let hh = 12.0 + 20.0 + 4.0 + th + if see { 8.0 + 32.0 } else { 0.0 } + 12.0;
             let q = r(w - 16.0 - 340.0, bottom - hh + dy, 340.0, hh);
             let err = t.kind == "error";
+            ui.cover(q);
             let (close, view) = ui.overlay(|ui| {
                 ui.c.shadow(q, 8.0, 8.0, 14.0, pal::BLACK.a(0.5 * alpha));
                 ui.c.rrect(q, 8.0, hex(0x151a14).a(0.97 * alpha));
@@ -1054,7 +1124,7 @@ impl Front {
                     "rename" => {
                         self.pick(Some(path));
                         self.ren = self.cur().map(|v| v.name.rsplit_once('.').map_or(v.name.clone(), |(a, _)| a.to_string()));
-                        ui.s.focus = id("renIn");
+                        (ui.s.focus, ui.s.sel_all) = (id("renIn"), id("renIn"));
                     }
                     _ => {
                         self.pick(Some(path));
@@ -1077,11 +1147,61 @@ impl Front {
     }
 
     pub fn do_delete(&mut self) {
-        if let Some(p) = self.v_sel.clone() {
+        if !self.v_multi.is_empty() {
+            // Plusieurs vidéos : une seule commande, la liste est relue une fois à la fin.
+            if self.v_sel.as_ref().is_some_and(|p| self.v_multi.contains(p)) {
+                self.player.close();
+            }
+            let paths = std::mem::take(&mut self.v_multi);
+            self.send(json!({"cmd": "delete_videos", "paths": paths}));
+        } else if let Some(p) = self.v_sel.clone() {
             self.player.close();
             self.send(json!({"cmd": "video_action", "action": "delete", "path": p}));
         }
         self.del_box = false;
+    }
+
+    /// Nouvelle version disponible : page imposée à l'ouverture (rien d'autre tant qu'elle n'est pas installée).
+    /// Logo en haut à droite, encadré centré en anglais, petit cœur au trait orange du logo. L'installateur est
+    /// le plus souvent déjà téléchargé et vérifié en tâche de fond : le clic l'installe tout de suite.
+    fn update_page(&mut self, ui: &mut Ui, w: f32, h: f32, v: &str) {
+        ui.c.rect(r(0.0, 0.0, w, h), pal::GROUND);
+        ui.c.glow(w / 2.0, h / 2.0, 360.0, pal::SIGNAL.a(0.08));
+        ui.c.border(r(0.0, 0.0, w, h), 0.0, 1.0, hex(0x333d30));
+        // Logo en haut à droite.
+        let lf = F::s(15.0, 700).ls(-0.01);
+        let lx = w - 24.0 - text_w("Clipper", lf) - 30.0;
+        crate::gfx::logo(ui.c, lx, 17.0, 22.0, 1.0, tiny_skia::Transform::identity());
+        ui.c.text(lx + 30.0, 13.0, 30.0, "Clipper", lf, pal::TEXT);
+        // Encadré centré.
+        let q = r(((w - 440.0) / 2.0).round(), ((h - 312.0) / 2.0).round(), 440.0, 312.0);
+        ui.c.shadow(q, 14.0, 18.0, 30.0, pal::BLACK.a(0.5));
+        ui.c.rrect(q, 14.0, pal::PANEL);
+        ui.c.border(q, 14.0, 1.0, pal::LINE2);
+        crate::gfx::heart(ui.c, q.x + (q.w - 36.0) / 2.0, q.y + 30.0, 36.0, 1.0);
+        let centered = |ui: &mut Ui, y: f32, lh: f32, t: &str, f: F, col: Col| {
+            ui.c.text(q.x + ((q.w - text_w(t, f)) / 2.0).round(), y, lh, t, f, col);
+        };
+        centered(ui, q.y + 80.0, 30.0, "A new version is here", F::s(22.0, 700).ls(-0.01), pal::TEXT);
+        let sub = format!("Clipper {v} is ready. You're on {}.", env!("CARGO_PKG_VERSION"));
+        centered(ui, q.y + 114.0, 20.0, &sub, F::s(13.0, 400), pal::TEXT3);
+        let busy = self.upd_text.is_some();
+        let label = self.upd_text.clone().unwrap_or_else(|| "Download the new version".into());
+        let b = r(q.x + 40.0, q.y + 164.0, q.w - 80.0, 46.0);
+        if ui.btn(id("upd-go"), b, &label, (!busy).then_some("dl"), Btn::P.off(busy)) {
+            self.upd_err = None;
+            self.upd_text = Some(if self.upd_ready { "Installing…" } else { "Downloading…" }.into());
+            self.send(json!({"cmd": "update_install"}));
+        }
+        match &self.upd_err {
+            Some(e) => centered(ui, q.y + 226.0, 18.0, e, F::s(12.0, 400), hex(0xffb4a8)),
+            None => centered(ui, q.y + 226.0, 18.0, "Your clips and settings are kept.", F::s(12.0, 400), pal::TEXT3),
+        }
+        centered(ui, q.y + 262.0, 18.0, "Thanks for clipping with us", F::s(12.0, 500), pal::SIGNAL.a(0.85));
+        // Glisser la fenêtre : appui hors de l'encadré.
+        if ui.i.pressed && ui.s.active == 0 && !q.has(ui.i.mouse) && self.intro.is_none() {
+            self.send(json!({"cmd": "drag"}));
+        }
     }
 
     /// Intro : le trombone tombe et se clipse sur la page (2,7 s, un clic la passe).
@@ -1133,6 +1253,16 @@ impl Front {
 
     /// En-tête repliable d'une section (.grp). Renvoie (ouverte, y du contenu).
     pub fn grp(&mut self, ui: &mut Ui, key: &str, title: &str, x: f32, y: f32, w: f32) -> (bool, f32) {
+        // Onglet à sous-onglets : seule la section choisie s'affiche, sans titre ni repli (le sous-onglet
+        // sert de titre).
+        if let Some((pre, sel)) = &self.sub_on {
+            if key.split(':').next() == Some(pre.as_str()) {
+                let shown = key == sel;
+                self.grp_sub = Some(shown);
+                return (shown, if shown { y + 18.0 } else { y });
+            }
+        }
+        self.grp_sub = None;
         let open = self.fold(key);
         // Titre lisible d'un coup d'œil (avant : petites capitales de 11 px, on se perdait entre sections).
         let head = r(x, y + 16.0, w, 34.0);
@@ -1146,8 +1276,62 @@ impl Front {
         (open, y + 16.0 + 34.0 + if open { 14.0 } else { 0.0 })
     }
 
+    /// Sous-onglets en haut d'une colonne de réglages (Capture · Qualité · Raccourcis…) : une seule
+    /// sous-catégorie à l'écran au lieu de toutes les sections empilées. Le choix est gardé par onglet.
+    /// Renvoie le y sous la barre.
+    pub fn subtabs(&mut self, ui: &mut Ui, prefix: &str, items: &[(&str, &str)], x: f32, y: f32, w: f32) -> f32 {
+        let cur = self.subs.get(prefix).filter(|k| items.iter().any(|(i, _)| i == k)).cloned().unwrap_or_else(|| items[0].0.to_string());
+        // Marges : la barre n'est plus collée aux onglets du haut ni au premier encadré.
+        let y = y + 8.0;
+        let f = F::s(13.5, 500);
+        let h = 44.0;
+        let mut cx = x;
+        let mut picked = None;
+        for (i, (k, label)) in items.iter().enumerate() {
+            let tw = text_w(label, f);
+            let q = r(cx - 8.0, y, tw + 16.0, h);
+            let on = *k == cur;
+            let hot = ui.hot(q);
+            if ui.click(idn("sub", i) ^ id(prefix), q) {
+                picked = Some(k.to_string());
+            }
+            ui.c.text(cx, y, h, label, f, if on { pal::TEXT } else if hot { pal::TEXT2 } else { pal::TEXT3 });
+            if on {
+                ui.c.rect(r(cx, y + h - 2.0, tw, 2.0), pal::SIGNAL);
+            }
+            cx += tw + 28.0;
+        }
+        ui.c.rect(r(x, y + h, w, 1.0), pal::LINE);
+        let cur = match picked {
+            Some(k) => {
+                self.subs.insert(prefix.to_string(), k.clone());
+                ui.s.animating = true; // redessin immédiat avec la nouvelle sous-catégorie
+                k
+            }
+            None => cur,
+        };
+        self.sub_on = Some((prefix.to_string(), cur));
+        y + h + 1.0 + 10.0
+    }
+
+    /// Section `key` affichée ? Vrai hors sous-onglets ; sinon seulement la sous-catégorie choisie.
+    pub fn sub_is(&self, key: &str) -> bool {
+        self.sub_on.as_ref().is_none_or(|(pre, sel)| key.split(':').next() != Some(pre.as_str()) || key == sel)
+    }
+
+    /// Titre de section sans repli (même place et même style que `grp`) : la section reste ouverte.
+    pub fn grp_fixed(&mut self, ui: &mut Ui, title: &str, x: f32, y: f32) -> (bool, f32) {
+        ui.c.text(x, y + 16.0, 34.0, title, F::s(16.0, 600).ls(-0.01), pal::TEXT);
+        (true, y + 16.0 + 34.0 + 14.0)
+    }
+
     /// Fin de section : marge basse et filet. Renvoie le y de la section suivante.
     pub fn grp_end(&mut self, ui: &mut Ui, open: bool, x: f32, y: f32, w: f32, last: bool) -> f32 {
+        match self.grp_sub.take() {
+            Some(true) => return y + 20.0,
+            Some(false) => return y,
+            None => {}
+        }
         let y = y + if open { 20.0 } else { 18.0 };
         if !last {
             ui.c.rect(r(x, y, w, 1.0), pal::LINE);
@@ -1201,7 +1385,16 @@ impl Front {
     /// Miniature d'un clip, déjà réduite à `w` x `h` pixels d'écran : décodée et réduite une fois, puis
     /// recopiée telle quelle à chaque dessin (refaite seulement si la taille des cartes change).
     pub fn thumb(&mut self, stem: &str, w: u32, h: u32) -> Option<&tiny_skia::Pixmap> {
-        let stale = self.thumbs.get(stem).is_none_or(|t| t.as_ref().is_some_and(|p| (p.width(), p.height()) != (w, h)));
+        let mut stale = self.thumbs.get(stem).is_none_or(|t| t.as_ref().is_some_and(|p| (p.width(), p.height()) != (w, h)));
+        // Miniature absente : elle est faite juste après le clip, en tâche de fond. Relue une fois par seconde,
+        // 15 fois au plus (un clip fait pendant un jeu plein écran n'a sa miniature qu'au retour au bureau).
+        if matches!(self.thumbs.get(stem), Some(None)) {
+            match self.thumb_miss.get(stem) {
+                Some((_, n)) if *n >= 15 => {}
+                Some((t, _)) if t.elapsed() < Duration::from_secs(1) => self.thumb_wait = true,
+                _ => stale = true,
+            }
+        }
         if stale {
             // Lecture disque + décodage JPEG : au plus 2 par image, sinon le défilement saccadait.
             if self.thumb_left == 0 {
@@ -1209,7 +1402,15 @@ impl Front {
                 return None;
             }
             self.thumb_left -= 1;
-            self.thumbs.insert(stem.to_string(), load_thumb(stem, w, h));
+            let img = load_thumb(stem, w, h);
+            if img.is_none() {
+                let n = self.thumb_miss.get(stem).map_or(0, |m| m.1);
+                self.thumb_miss.insert(stem.to_string(), (Instant::now(), n + 1));
+                self.thumb_wait = n + 1 < 15;
+            } else {
+                self.thumb_miss.remove(stem);
+            }
+            self.thumbs.insert(stem.to_string(), img);
         }
         self.thumbs.get(stem).and_then(|t| t.as_ref())
     }

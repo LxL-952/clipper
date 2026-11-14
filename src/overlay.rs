@@ -114,19 +114,40 @@ pub fn start() {
 
 struct Cpu {
     last: (u64, u64),
+    /// Moment du dernier relevé (horloge monotone) et valeur affichée.
+    at: Option<std::time::Instant>,
+    shown: Option<f32>,
+}
+
+/// Charge CPU en % entre deux relevés (temps d'inactivité, temps total), bornée à 0-100.
+fn cpu_percent(idle: u64, total: u64) -> Option<f32> {
+    (total > 0).then(|| (100.0 * (1.0 - idle as f32 / total as f32)).clamp(0.0, 100.0))
 }
 
 impl Cpu {
-    fn sample(&mut self) -> f32 {
+    fn new() -> Self {
+        Self { last: (0, 0), at: None, shown: None }
+    }
+
+    /// None (« — ») tant qu'aucun intervalle n'est représentatif : premier relevé, ou overlay resté masqué
+    /// (avant : moyenne de toute la période masquée, ou « 0 % » sur un intervalle de quelques ms).
+    fn sample(&mut self) -> Option<f32> {
         use windows_sys::Win32::Foundation::FILETIME;
         use windows_sys::Win32::System::Threading::GetSystemTimes;
         let (mut i, mut k, mut u): (FILETIME, FILETIME, FILETIME) = unsafe { std::mem::zeroed() };
         unsafe { GetSystemTimes(&mut i, &mut k, &mut u) };
         let f = |t: FILETIME| (t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64;
         let (idle, total) = (f(i), f(k) + f(u)); // kernel inclut idle
-        let (di, dt) = (idle - self.last.0, total - self.last.1);
+        let age = self.at.map(|t| t.elapsed());
+        // Les compteurs de Windows avancent par pas de ~16 ms : relevé trop rapproché, valeur précédente gardée.
+        if age.is_some_and(|a| a.as_millis() < 100) {
+            return self.shown;
+        }
+        let v = cpu_percent(idle.saturating_sub(self.last.0), total.saturating_sub(self.last.1));
         self.last = (idle, total);
-        if dt == 0 { 0.0 } else { 100.0 * (1.0 - di as f32 / dt as f32) }
+        self.at = Some(std::time::Instant::now());
+        self.shown = if age.is_some_and(|a| a.as_secs() < 10) { v } else { None };
+        self.shown
     }
 }
 
@@ -311,13 +332,16 @@ static PM_TABLE: Mutex<Option<std::collections::HashMap<u32, (u32, String)>>> = 
 static GAME: AtomicU32 = AtomicU32::new(0);
 
 /// Programmes qui affichent des images sans être des jeux : jamais pris pour « le jeu en cours ».
-pub const NOT_GAMES: [&str; 40] = [
+pub const NOT_GAMES: [&str; 53] = [
     "explorer.exe", "dwm.exe", "clipper.exe", "msedgewebview2.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
     "vivaldi.exe", "discord.exe", "code.exe", "spotify.exe", "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe", "riotclientux.exe",
     "riotclientuxrender.exe", "riotclientservices.exe", "battle.net.exe", "taskmgr.exe", "obs64.exe", "vlc.exe", "slack.exe", "teams.exe",
     "ms-teams.exe", "whatsapp.exe", "telegram.exe", "claude.exe", "searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
     "applicationframehost.exe", "textinputhost.exe", "lockapp.exe", "nvidia overlay.exe", "nvidia app.exe", "widgets.exe", "notepad.exe",
-    "windowsterminal.exe",
+    "windowsterminal.exe", "riot client.exe", "launcher.exe", "rockstarservice.exe",
+    // Lecteurs vidéo et fonds animés : affichent sans arrêt, parfois en plein écran, jamais des jeux.
+    "mpv.exe", "potplayermini64.exe", "mpc-hc64.exe", "microsoft.media.player.exe", "wmplayer.exe", "photos.exe",
+    "wallpaper32.exe", "wallpaper64.exe", "losslessscaling.exe", "wwahost.exe",
 ];
 
 /// Choix du jeu parmi les processus qui affichent des images (`count` = images des 2 dernières secondes).
@@ -335,8 +359,16 @@ fn pick_game(
 ) -> Option<u32> {
     let name = |p: u32| table.get(&p).map_or(String::new(), |e| e.1.to_ascii_lowercase());
     let desktop = |p: u32| p == 0 || belongs(p, me, table) || NOT_GAMES.contains(&name(p).as_str());
-    // 0. Un jeu installé (Steam, Epic, Xbox…) qui affiche : c'est lui, au premier plan ou non.
-    let known = |p: &u32| !desktop(*p) && is_installed_game(&name(*p));
+    // 0. L'appli plein écran au premier plan qui affiche ses images : c'est le jeu, avant toute liste. Avant, un
+    //    « jeu installé » passait devant : le client Riot ouvert en fond (quelques images par seconde) était
+    //    suivi à la place de GTA San Andreas, installé hors des dossiers de lanceurs connus.
+    if fullscreen && !desktop(fg) {
+        if let Some((&p, _)) = count.iter().filter(|(p, n)| **n >= 2 && belongs(**p, fg, table) && !desktop(**p)).max_by_key(|(_, n)| **n) {
+            return Some(p);
+        }
+    }
+    // 1. Un jeu installé (Steam, Epic, Xbox…) qui affiche : c'est lui, au premier plan ou non.
+    let known = |p: &u32| !desktop(*p) && (is_installed_game(&name(*p)) || uses_game_engine(*p));
     if prev != 0 && known(&prev) && count.get(&prev).is_some_and(|n| *n >= 2) {
         return Some(prev);
     }
@@ -363,7 +395,56 @@ fn pick_game(
 static GAME_EXES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
 
 fn is_installed_game(exe: &str) -> bool {
-    GAME_EXES.get().is_some_and(|s| s.contains(exe))
+    GAME_EXES.get().is_some_and(|s| s.contains(exe)) || learned(|s| s.contains(exe))
+}
+
+/// Jeux retenus (exe en minuscules) : vus en plein écran au premier plan, ou chargeant un moteur de jeu.
+/// Gardés dans jeux.txt : reconnus ensuite au premier plan ou non, fenêtrés ou installés hors des dossiers
+/// connus (GTA San Andreas DE, jeux sans lanceur).
+static LEARNED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+
+fn learned<R>(f: impl FnOnce(&mut std::collections::HashSet<String>) -> R) -> R {
+    let mut g = LEARNED.lock().unwrap();
+    let s = g.get_or_insert_with(|| {
+        let t = std::fs::read_to_string(crate::config::dir().join("jeux.txt")).unwrap_or_default();
+        t.lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect()
+    });
+    f(s)
+}
+
+/// Retient un jeu (nom de l'exe). Écrit jeux.txt seulement quand il est nouveau.
+pub fn learn_game(exe: &str) {
+    let exe = exe.to_ascii_lowercase();
+    if exe.is_empty() || NOT_GAMES.contains(&exe.as_str()) {
+        return;
+    }
+    let list = learned(|s| {
+        s.insert(exe.clone()).then(|| {
+            let mut v: Vec<&String> = s.iter().collect();
+            v.sort();
+            v.into_iter().map(|e| format!("{e}\n")).collect::<String>()
+        })
+    });
+    if let Some(list) = list {
+        let _ = std::fs::write(crate::config::dir().join("jeux.txt"), list);
+        crate::log(&format!("FPS : jeu retenu : {exe}"));
+    }
+}
+
+/// Processus qui ont chargé une DLL de moteur ou de plateforme de jeu (vu par l'ETW, rien d'ouvert dans le jeu).
+static ENGINE: Mutex<Option<std::collections::HashSet<u32>>> = Mutex::new(None);
+
+fn uses_game_engine(pid: u32) -> bool {
+    ENGINE.lock().unwrap().as_ref().is_some_and(|s| s.contains(&pid))
+}
+
+/// Nom de DLL (texte de `dll_text`) propre aux jeux : Unity, Unreal, Steam, Epic, GOG, Ubisoft, Bink, FMOD, PhysX.
+fn game_dll(s: &str) -> bool {
+    const MARKS: [&str; 12] = [
+        "unityplayer.dll", "gameassembly.dll", "\\binaries\\win64\\", "steam_api", "eossdk-win", "galaxy64.dll", "uplay_r", "upc_r2_loader",
+        "bink2w64.dll", "fmodstudio", "physx3", "physx_64",
+    ];
+    MARKS.iter().any(|m| s.contains(m))
 }
 
 /// Dossiers de jeux des lanceurs sur chaque disque, plus les bibliothèques Steam déclarées.
@@ -721,7 +802,14 @@ fn pm_text() -> FpsText {
         let table = PM_TABLE.lock().unwrap();
         let empty = std::collections::HashMap::new();
         let table = table.as_ref().unwrap_or(&empty);
-        let g = pick_game(&count, table, TARGET.load(Ordering::Relaxed), crate::capture::fullscreen_foreground(), std::process::id(), prev);
+        let (fg, fullscreen) = (TARGET.load(Ordering::Relaxed), crate::capture::fullscreen_foreground());
+        let g = pick_game(&count, table, fg, fullscreen, std::process::id(), prev);
+        // Jeu vu en plein écran au premier plan, ou qui charge un moteur de jeu : retenu pour la suite.
+        if let Some(p) = g.filter(|&p| (fullscreen && belongs(p, fg, table)) || uses_game_engine(p)) {
+            if let Some(e) = table.get(&p) {
+                learn_game(&e.1);
+            }
+        }
         if g != Some(prev) {
             match g {
                 Some(p) => {
@@ -926,7 +1014,7 @@ fn refresh(cpu: &mut Cpu, nv: &Option<Nvml>, th: &Option<Thermal>, gc: &Option<c
                 "low1" => ("1% LOW".into(), f.low.clone()),
                 // Temps moyen d'une image (1000 / FPS) : plus il est bas et régulier, plus le jeu est fluide.
                 "frametime" => ("MS/IMG".into(), f.ft.clone()),
-                "cpu" => ("CPU".into(), format!("{c:.0} %")),
+                "cpu" => ("CPU".into(), c.map_or("—".into(), |c| format!("{c:.0} %"))),
                 "cpu_temp" => ("CPU °C".into(), th.as_ref().and_then(Thermal::celsius).map_or("n/d".into(), |t| format!("{t:.0}"))),
                 "ram" => ("RAM".into(), format!("{}/{} Go", go(total - free), go(total))),
                 _ => return vec![],
@@ -1188,7 +1276,7 @@ unsafe fn window_thread() {
         OV.store(h, Ordering::Relaxed);
         PostMessageW(h, WM_APP, 0, 0); // apply() a pu passer avant la création de la fenêtre
         let load = || {
-            let mut c = Cpu { last: (0, 0) };
+            let mut c = Cpu::new();
             c.sample();
             (c, Nvml::load(), Thermal::open(), crate::gpus::Counters::open())
         };
@@ -1216,6 +1304,8 @@ unsafe fn window_thread() {
                 WM_APP => {
                     KillTimer(h, 1);
                     ShowWindow(h, SW_HIDE);
+                    // Courbes vidées : au retour, elles ne relient pas les anciennes mesures aux nouvelles.
+                    HIST.lock().unwrap().clear();
                 }
                 WM_TIMER => tick(&mut probes),
                 m if m == WM_APP + 1 => {
@@ -1250,9 +1340,13 @@ fn dlss_tag(pid: u32) -> &'static str {
     }
 }
 
-/// Nom de DLL (UTF-16 dans les données de l'événement) : niveau DLSS qu'elle indique.
-fn dlss_level(data: &[u8]) -> u8 {
-    let s: String = char::decode_utf16(data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))).map(|c| c.unwrap_or(' ').to_ascii_lowercase()).collect();
+/// Données d'un événement lues comme texte UTF-16, en minuscules (nom de la DLL chargée).
+fn dll_text(data: &[u8]) -> String {
+    char::decode_utf16(data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))).map(|c| c.unwrap_or(' ').to_ascii_lowercase()).collect()
+}
+
+/// Nom de DLL (texte de `dll_text`) : niveau DLSS qu'elle indique.
+fn dlss_level(s: &str) -> u8 {
     if s.contains("nvngx_dlssg") || s.contains("sl.dlss_g") {
         2
     } else if s.contains("nvngx_dlss.dll") || s.contains("sl.dlss.dll") {
@@ -1269,11 +1363,16 @@ unsafe extern "system" fn on_event(r: *mut windows_sys::Win32::System::Diagnosti
             let (p, n) = unsafe { ((*r).UserData as *const u8, (*r).UserDataLength as usize) };
             // Les données sont alignées sur 2 octets ou non : on essaie les deux décalages.
             let data = if p.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(p, n) } };
-            let lvl = dlss_level(data).max(dlss_level(data.get(1..).unwrap_or(&[])));
+            // Décodé une fois par décalage (avant : quatre fois, deux par fonction).
+            let texts = [dll_text(data), dll_text(data.get(1..).unwrap_or(&[]))];
+            let lvl = texts.iter().map(|t| dlss_level(t)).max().unwrap_or(0);
             if lvl > 0 {
                 let mut m = DLSS.lock().unwrap();
                 let e = m.get_or_insert_with(Default::default).entry(h.ProcessId).or_default();
                 *e = (*e).max(lvl);
+            }
+            if texts.iter().any(|t| game_dll(t)) {
+                ENGINE.lock().unwrap().get_or_insert_with(Default::default).insert(h.ProcessId);
             }
         }
         return;
@@ -1506,6 +1605,29 @@ mod presentmon_csv {
     }
 
     #[test]
+    fn game_dlls_are_recognised() {
+        let w = |s: &str| super::dll_text(&s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>());
+        assert!(super::game_dll(&w(r"D:\Jeux\Hollow\UnityPlayer.dll")));
+        assert!(super::game_dll(&w(r"D:\GTA SA\Gameface\Binaries\Win64\bink2w64.dll")));
+        assert!(!super::game_dll(&w(r"C:\Windows\System32\d3d11.dll")));
+    }
+
+    #[test]
+    fn fullscreen_game_beats_installed_game_in_background() {
+        // GTA San Andreas (80) en plein écran, installé hors des dossiers connus ; un « jeu installé » (70)
+        // affiche quelques images en fond et était déjà suivi : le compteur doit passer sur GTA.
+        let _ = super::GAME_EXES.set(["othergame.exe".to_string()].into_iter().collect());
+        let t: std::collections::HashMap<u32, (u32, String)> =
+            [(70, (1, "OtherGame.exe")), (80, (1, "SanAndreas.exe")), (81, (1, "Riot Client.exe"))].into_iter().map(|(p, (pp, n))| (p, (pp, n.to_string()))).collect();
+        let c = |v: &[(u32, usize)]| v.iter().copied().collect::<std::collections::HashMap<u32, usize>>();
+        assert_eq!(super::pick_game(&c(&[(80, 110), (70, 20)]), &t, 80, true, 10, 70), Some(80));
+        // Le client Riot n'est jamais « le jeu », même seul à afficher.
+        assert_eq!(super::pick_game(&c(&[(81, 200)]), &t, 81, true, 10, 0), None);
+        // GTA quitte le premier plan (bureau) : il reste suivi tant qu'il affiche.
+        assert_eq!(super::pick_game(&c(&[(80, 110)]), &t, 0, false, 10, 80), Some(80));
+    }
+
+    #[test]
     fn child_gpu_process_counts_for_the_window_owner() {
         // clipper (10) -> msedgewebview2 (20) -> processus GPU (30) ; jeu sans rapport (40).
         let t: std::collections::HashMap<u32, (u32, String)> =
@@ -1535,13 +1657,23 @@ mod presentmon_csv {
 #[cfg(test)]
 mod live {
     #[test]
+    fn cpu_percent_is_bounded() {
+        assert_eq!(super::cpu_percent(0, 0), None);
+        assert_eq!(super::cpu_percent(75, 100), Some(25.0));
+        assert_eq!(super::cpu_percent(150, 100), Some(0.0)); // inactivité > total (arrondi des compteurs)
+        let mut c = super::Cpu::new();
+        assert_eq!(c.sample(), None); // premier relevé : pas encore d'intervalle
+        assert_eq!(c.sample(), None); // relevé trop rapproché : valeur précédente
+    }
+
+    #[test]
     #[ignore = "lit le GPU"]
     fn stats_without_window() {
         let mut cfg = crate::config::Config::default();
         cfg.overlay_items = ["cpu", "gpu", "gpu_temp", "vram", "ram", "cpu_temp"].map(String::from).to_vec();
         cfg.overlay_gpus = super::gpu_names(); // toutes les cartes
         super::apply(&cfg, false);
-        let (mut cpu, nv, th, gc) = (super::Cpu { last: (0, 0) }, super::Nvml::load(), super::Thermal::open(), crate::gpus::Counters::open());
+        let (mut cpu, nv, th, gc) = (super::Cpu::new(), super::Nvml::load(), super::Thermal::open(), crate::gpus::Counters::open());
         cpu.sample();
         std::thread::sleep(std::time::Duration::from_millis(500));
         super::refresh(&mut cpu, &nv, &th, &gc);

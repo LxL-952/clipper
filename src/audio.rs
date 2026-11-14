@@ -99,7 +99,9 @@ fn capture(src: Arc<Source>, dir: Direction, id: Option<String>, stop: Arc<Atomi
                 q.drain(..over);
                 drop(q);
                 if n > 0 {
-                    src.peak.store(peak.to_bits(), Ordering::Relaxed);
+                    // Pic le plus fort depuis la dernière lecture de l'onglet (avant : seul le dernier bloc de ~10 ms
+                    // comptait, les niveaux paraissaient trop bas). Flottants positifs : leurs bits se comparent comme eux.
+                    src.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
                 }
             }
             Ok(())

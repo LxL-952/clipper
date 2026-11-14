@@ -9,6 +9,7 @@ pub struct TrayMenu {
     pub clip: IconMenuItem,
     pub rec: IconMenuItem,
     pub ram: IconMenuItem,
+    pub update: IconMenuItem,
     pub clipping: IconMenuItem,
     pub quit: IconMenuItem,
     rec_key: String,
@@ -47,7 +48,7 @@ fn seg(x: f32, y: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
     dist(x, y, ax + t * dx, ay + t * dy)
 }
 
-fn icons() -> [Option<Icon>; 6] {
+fn icons() -> [Option<Icon>; 7] {
     [
         // Ouvrir : fenêtre (cadre + barre de titre)
         glyph(GREY, |x, y| {
@@ -85,6 +86,10 @@ fn icons() -> [Option<Icon>; 6] {
             let pins = (2.0..14.0).contains(&x) && (11.5..13.5).contains(&y) && (x.floor() as i32) % 2 == 0;
             (body && !chips) || pins
         }),
+        // Mise à jour : flèche vers le bas posée sur un trait
+        glyph(ORANGE, |x, y| {
+            seg(x, y, (8.0, 2.5), (8.0, 10.0)) < 1.1 || seg(x, y, (4.5, 7.0), (8.0, 10.5)) < 1.1 || seg(x, y, (11.5, 7.0), (8.0, 10.5)) < 1.1 || seg(x, y, (3.0, 13.5), (13.0, 13.5)) < 1.1
+        }),
         // Quitter : croix
         glyph(GREY, |x, y| seg(x, y, (4.0, 4.0), (12.0, 12.0)) < 1.2 || seg(x, y, (12.0, 4.0), (4.0, 12.0)) < 1.2),
     ]
@@ -97,7 +102,7 @@ fn key_label(k: &str) -> String {
 
 impl TrayMenu {
     pub fn new(clip_key: &str, rec_key: &str) -> Self {
-        let [i_open, i_temp, i_clip, i_rec, i_ram, i_quit] = icons();
+        let [i_open, i_temp, i_clip, i_rec, i_ram, i_upd, i_quit] = icons();
         let rec_key = key_label(rec_key);
         let m = Self {
             menu: Menu::new(),
@@ -109,12 +114,13 @@ impl TrayMenu {
             clip: IconMenuItem::new(format!("Enregistrer un clip\t{}", key_label(clip_key)), true, i_clip, None),
             rec: IconMenuItem::new(format!("Démarrer le REC\t{rec_key}"), true, i_rec, None),
             ram: IconMenuItem::new("Nettoyer la RAM", true, i_ram, None),
+            update: IconMenuItem::new("Rechercher une mise à jour", true, i_upd, None),
             clipping: IconMenuItem::new("Désactiver le clipping", true, None, None),
             quit: IconMenuItem::new("Quitter Clipper", true, i_quit, None),
             rec_key,
         };
         let sep = || PredefinedMenuItem::separator();
-        let _ = m.menu.append_items(&[&m.open, &m.temps, &sep(), &m.clip, &m.rec, &m.clipping, &m.ram, &sep(), &m.quit]);
+        let _ = m.menu.append_items(&[&m.open, &m.temps, &sep(), &m.clip, &m.rec, &m.clipping, &m.ram, &m.update, &sep(), &m.quit]);
         m
     }
 

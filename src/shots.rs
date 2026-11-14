@@ -75,9 +75,13 @@ fn every_tab() {
     f.tab = Tab::Advanced;
     shot(&mut f, "advanced", 900, if open { 1500 } else { 900 }, 1.0, &none);
     // Largeur minimale de la fenêtre, 125 % : sept onglets, rien ne se chevauche.
-    f.update = Some("1.2.0".into());
     shot(&mut f, "advanced-min", 1050, 650, 1.25, &none);
-    f.update = None;
+    // Nouvelle version : page imposée, à la taille minimale et en grand, puis avec un échec réseau.
+    f.update = Some("1.3.0".into());
+    shot(&mut f, "update-min", 1050, 650, 1.25, &none);
+    f.upd_err = Some("Download failed. Check your connection and try again.".into());
+    shot(&mut f, "update-err", 1280, 800, 1.0, &none);
+    (f.update, f.upd_err) = (None, None);
     f.tab = Tab::Audio;
     f.levels = (0.55, 0.3);
     shot(&mut f, "audio", 900, if open { 1100 } else { 620 }, 1.0, &none);

@@ -237,6 +237,69 @@ impl Front {
         }
     }
 
+    /// Confirmation de suppression d'une vidéo (`n` = 1) ou de plusieurs. Renvoie le y sous le cadre.
+    fn del_confirm(&mut self, ui: &mut Ui, x: f32, y: f32, w: f32, n: usize) -> f32 {
+        let perm = self.cfg.delete_permanent;
+        let (qt, ht, bt) = match (perm, n > 1) {
+            (true, false) => ("Supprimer définitivement cette vidéo ?".to_string(), "Elle ne passera pas par la Corbeille : impossible de la récupérer.", "Supprimer"),
+            (true, true) => (format!("Supprimer définitivement ces {n} vidéos ?"), "Elles ne passeront pas par la Corbeille : impossible de les récupérer.", "Supprimer"),
+            (false, false) => ("Mettre cette vidéo à la corbeille ?".to_string(), "Vous pourrez la récupérer depuis la corbeille de Windows.", "Mettre à la corbeille"),
+            (false, true) => (format!("Mettre ces {n} vidéos à la corbeille ?"), "Vous pourrez les récupérer depuis la corbeille de Windows.", "Mettre à la corbeille"),
+        };
+        let hsp = md(ht, F::s(12.0, 400), pal::TEXT3, 500, pal::TEXT2);
+        let hh = ui.c.para(0.0, 0.0, w - 24.0, 17.4, &hsp, false);
+        let q = r(x, y, w, 12.0 + 19.0 + hh + 10.0 + 18.0 + 12.0 + 32.0 + 12.0);
+        self.inline_box(ui, q);
+        ui.c.text(q.x + 12.0, q.y + 12.0, 19.0, &qt, F::s(13.0, 600), pal::TEXT);
+        ui.c.para(q.x + 12.0, q.y + 31.0, w - 24.0, 17.4, &hsp, true);
+        let cy = q.y + 41.0 + hh;
+        if ui.check(id("delAsk"), q.x + 12.0, cy + 2.0, 14.0, self.del_ask, false) {
+            self.del_ask = !self.del_ask;
+        }
+        ui.c.text(q.x + 34.0, cy, 18.0, "Ne plus me demander", F::s(12.5, 400), pal::TEXT2);
+        let by = cy + 30.0;
+        let b1 = Ui::btn_w(bt, true, Btn::D);
+        // Entrée confirme : supprimer une série au clavier (Suppr puis Entrée).
+        if ui.btn(id("delYes"), r(q.x + 12.0, by, b1, 32.0), bt, Some("trash"), Btn::D) || (ui.s.focus == 0 && ui.i.key("Enter")) {
+            if self.del_ask {
+                self.set("delete_confirm", json!(false));
+            }
+            self.do_delete();
+        }
+        if ui.btn(id("delNo"), r(q.x + 20.0 + b1, by, Ui::btn_w("Annuler", false, Btn::G), 32.0), "Annuler", None, Btn::G) || ui.i.key("Escape") {
+            self.del_box = false;
+        }
+        q.bottom()
+    }
+
+    /// Colonne de gauche quand plusieurs vidéos sont cochées : nombre, taille, suppression groupée.
+    fn multi_panel(&mut self, ui: &mut Ui, x: f32, mut y: f32, w: f32) -> f32 {
+        let (n, total) = {
+            let l = self.vids.as_deref().unwrap_or(&[]);
+            let s = l.iter().filter(|v| self.v_multi.contains(&v.path));
+            (s.clone().count(), s.map(|v| v.bytes).sum::<u64>())
+        };
+        let pl = if n > 1 { "s" } else { "" };
+        ui.c.text(x, y, 19.5, &format!("{n} vidéo{pl} sélectionnée{pl}"), F::s(15.0, 600).ls(-0.01), pal::TEXT);
+        y += 19.5 + 6.0;
+        ui.c.text(x, y, 17.4, &bytes(total), F::m(12.0, 400), pal::TEXT2);
+        y += 17.4 + 12.0;
+        if self.del_box {
+            y = self.del_confirm(ui, x, y, w, n) + 12.0;
+        } else {
+            let b1 = Ui::btn_w("Supprimer", true, Btn::D);
+            if ui.btn(id("mDel"), r(x, y, b1, 32.0), "Supprimer", Some("trash"), Btn::D) {
+                self.ask_delete();
+            }
+            let b2 = Ui::btn_w("Désélectionner", false, Btn::G);
+            if ui.btn(id("mNone"), r(x + b1 + 8.0, y, b2, 32.0), "Désélectionner", None, Btn::G) {
+                self.v_multi.clear();
+            }
+            y += 32.0 + 14.0;
+        }
+        y + ui.hint(x, y, w, "**Ctrl+clic** ajoute ou retire une vidéo, **Maj+clic** prend toute une série, **Ctrl+A** les prend toutes. **Suppr** supprime, **Échap** annule.")
+    }
+
     pub fn tab_videos(&mut self, ui: &mut Ui, body: R) {
         // ---------- colonne de gauche : lecteur et actions ----------
         ui.c.rect(r(body.x, body.y, 330.0, body.h), pal::PANEL);
@@ -248,7 +311,9 @@ impl Front {
         let pq = r(x, y, w, (w * 9.0 / 16.0).round());
         self.player_view(ui, pq, 6.0);
         y = pq.bottom() + 14.0;
-        if let Some((name, rec, secs, size, date, video, path)) = self.cur().map(|v| (v.name.clone(), v.rec, v.secs, v.bytes, v.date, v.video, v.path.clone())) {
+        if !self.v_multi.is_empty() {
+            y = self.multi_panel(ui, x, y, w);
+        } else if let Some((name, rec, secs, size, date, video, path)) = self.cur().map(|v| (v.name.clone(), v.rec, v.secs, v.bytes, v.date, v.video, v.path.clone())) {
             let sp = vec![crate::gfx::Span { t: name.clone(), f: F::s(15.0, 600).ls(-0.01), c: pal::TEXT }];
             y += ui.c.para(x, y, w, 19.5, &sp, true) + 10.0;
             let mut mx = x + self.badge(ui, x, y, rec) + 12.0;
@@ -276,6 +341,10 @@ impl Front {
                 let no = ui.btn(id("renNo"), r(q.x + 20.0 + b1, q.y + 82.0, Ui::btn_w("Annuler", false, Btn::G), 32.0), "Annuler", None, Btn::G) || ui.i.key("Escape");
                 if ok && !text.trim().is_empty() {
                     self.send(json!({"cmd": "video_action", "action": "rename", "path": path, "name": text.trim()}));
+                    // Le clip renommé reste choisi quand la liste revient (même nettoyage du nom que main.rs).
+                    let clean: String = text.trim().chars().filter(|c| !r#"\/:*?"<>|"#.contains(*c)).collect();
+                    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.v_pending = Some(path.with_file_name(format!("{}.{ext}", clean.trim_end_matches(&format!(".{ext}")))));
                     ui.s.focus = 0;
                 } else if no {
                     ui.s.focus = 0;
@@ -284,35 +353,7 @@ impl Front {
                 }
                 y = q.bottom();
             } else if self.del_box {
-                let perm = self.cfg.delete_permanent;
-                let (qt, ht, bt) = if perm {
-                    ("Supprimer définitivement cette vidéo ?", "Elle ne passera pas par la Corbeille : impossible de la récupérer.", "Supprimer")
-                } else {
-                    ("Mettre cette vidéo à la corbeille ?", "Vous pourrez la récupérer depuis la corbeille de Windows.", "Mettre à la corbeille")
-                };
-                let hsp = md(ht, F::s(12.0, 400), pal::TEXT3, 500, pal::TEXT2);
-                let hh = ui.c.para(0.0, 0.0, w - 24.0, 17.4, &hsp, false);
-                let q = r(x, y, w, 12.0 + 19.0 + hh + 10.0 + 18.0 + 12.0 + 32.0 + 12.0);
-                self.inline_box(ui, q);
-                ui.c.text(q.x + 12.0, q.y + 12.0, 19.0, qt, F::s(13.0, 600), pal::TEXT);
-                ui.c.para(q.x + 12.0, q.y + 31.0, w - 24.0, 17.4, &hsp, true);
-                let cy = q.y + 41.0 + hh;
-                if ui.check(id("delAsk"), q.x + 12.0, cy + 2.0, 14.0, self.del_ask, false) {
-                    self.del_ask = !self.del_ask;
-                }
-                ui.c.text(q.x + 34.0, cy, 18.0, "Ne plus me demander", F::s(12.5, 400), pal::TEXT2);
-                let by = cy + 30.0;
-                let b1 = Ui::btn_w(bt, true, Btn::D);
-                if ui.btn(id("delYes"), r(q.x + 12.0, by, b1, 32.0), bt, Some("trash"), Btn::D) {
-                    if self.del_ask {
-                        self.set("delete_confirm", json!(false));
-                    }
-                    self.do_delete();
-                }
-                if ui.btn(id("delNo"), r(q.x + 20.0 + b1, by, Ui::btn_w("Annuler", false, Btn::G), 32.0), "Annuler", None, Btn::G) {
-                    self.del_box = false;
-                }
-                y = q.bottom();
+                y = self.del_confirm(ui, x, y, w, 1);
             } else {
                 let mut bx = x;
                 let mut by = y;
@@ -327,7 +368,8 @@ impl Front {
                 let q1 = place(&mut bx, &mut by, Ui::btn_w("Renommer", true, Btn::N));
                 if ui.btn(id("vRen"), q1, "Renommer", Some("pen"), Btn::N) {
                     self.ren = Some(name.rsplit_once('.').map_or(name.clone(), |(a, _)| a.to_string()));
-                    ui.s.focus = id("renIn");
+                    // Nom déjà sélectionné, comme dans l'Explorateur : taper le remplace.
+                    (ui.s.focus, ui.s.sel_all) = (id("renIn"), id("renIn"));
                 }
                 let q2 = place(&mut bx, &mut by, Ui::btn_w("Ouvrir le dossier", true, Btn::N));
                 if ui.btn(id("vOpen"), q2, "Ouvrir le dossier", Some("folder"), Btn::N) {
@@ -347,12 +389,29 @@ impl Front {
         let count = match &self.vids {
             None => "Chargement…".to_string(),
             Some(l) if l.is_empty() => "Vidéos".to_string(),
+            Some(l) if !self.v_multi.is_empty() => format!("{} sur {} sélectionnée{}", self.v_multi.len(), l.len(), if self.v_multi.len() > 1 { "s" } else { "" }),
             Some(l) => format!("{} vidéo{} · {}", l.len(), if l.len() > 1 { "s" } else { "" }, bytes(l.iter().map(|v| v.bytes).sum())),
         };
         ui.sc(list.x + 22.0, list.y + 14.0, 32.0, &count, pal::TEXT3, 500);
         let bw = Ui::btn_w("Actualiser", true, Btn::G);
         if ui.btn(id("vRefresh"), r(list.right() - 22.0 - bw, list.y + 14.0, bw, 32.0), "Actualiser", Some("refresh"), Btn::G) {
             self.send(json!({"cmd": "videos"}));
+        }
+        // Sélection : tout cocher en un clic (ou Ctrl+A), tout décocher quand tout est coché.
+        let all_n = self.vids.as_ref().map_or(0, |l| l.len());
+        if all_n > 0 {
+            let all = self.v_multi.len() == all_n;
+            let t = if all { "Tout désélectionner" } else { "Tout sélectionner" };
+            let sw = Ui::btn_w(t, true, Btn::G);
+            let pressed = ui.btn(id("vAll"), r(list.right() - 22.0 - bw - 8.0 - sw, list.y + 14.0, sw, 32.0), t, Some("check"), Btn::G);
+            let keyed = ui.s.focus == 0 && self.ren.is_none() && ui.i.ctrl && ui.i.key("KeyA");
+            if pressed || keyed {
+                self.v_multi = if all && pressed { Default::default() } else { self.vids.as_ref().unwrap().iter().map(|v| v.path.clone()).collect() };
+            }
+            // Suppr : la sélection, sinon la vidéo affichée (avec la confirmation habituelle).
+            if ui.s.focus == 0 && self.ren.is_none() && !self.del_box && ui.i.key("Delete") && (!self.v_multi.is_empty() || self.v_sel.is_some()) {
+                self.ask_delete();
+            }
         }
         ui.c.rect(r(list.x, list.y + 58.0, list.w, 1.0), pal::LINE);
         let view = r(list.x, list.y + 59.0, list.w, list.h - 59.0);
@@ -382,16 +441,17 @@ impl Front {
         let ch = th + 6.0 + 18.0 + 6.0 + 17.0;
         let n = self.vids.as_ref().map_or(0, |l| l.len());
         let vis = ui.c.clip_rect();
-        let (mut pick, mut ctx) = (None, None);
+        let (mut pick, mut ctx, mut tick) = (None, None, None);
         for i in 0..n {
             let q = r(gx + (cw + 14.0) * (i % cols) as f32, view.y + 16.0 + (ch + 14.0) * (i / cols) as f32, cw, ch);
             if q.bottom() < vis.y || q.y > vis.bottom() {
                 continue; // hors de la vue : ni dessin ni miniature décodée
             }
-            let (stem, name, rec, secs, date, size, sel) = {
+            let (stem, name, rec, secs, date, size, sel, ticked) = {
                 let v = &self.vids.as_ref().unwrap()[i];
-                (v.stem.clone(), v.name.clone(), v.rec, v.secs, v.date, v.bytes, self.v_sel.as_ref() == Some(&v.path))
+                (v.stem.clone(), v.name.clone(), v.rec, v.secs, v.date, v.bytes, self.v_sel.as_ref() == Some(&v.path), self.v_multi.contains(&v.path))
             };
+            let sel = sel && self.v_multi.is_empty() || ticked;
             let t = r(q.x, q.y, cw, th);
             let hot = ui.hot(q);
             ui.c.rrect(t, 5.0, hex(0x0c1210));
@@ -419,7 +479,18 @@ impl Front {
             ui.c.text(t.right() - 1.0 - dw, t.bottom() - 26.0, 20.0, &d, F::m(11.0, 400), pal::TEXT);
             ui.c.text_cut(q.x, t.bottom() + 6.0, 18.0, cw, &name, F::s(12.5, 500), pal::TEXT);
             ui.c.text_cut(q.x, t.bottom() + 30.0, 17.0, cw, &format!("{} · {}", when(date), bytes(size)), F::m(11.5, 400), pal::TEXT3);
-            if ui.click(idn("vc", i), q) {
+            // Case à cocher en haut à droite : au survol, ou toujours dès qu'une vidéo est cochée.
+            let boxed = hot || !self.v_multi.is_empty();
+            let cb = r(t.right() - 6.0 - 18.0, t.y + 6.0, 18.0, 18.0);
+            if boxed {
+                ui.c.rrect(cb.inset(-3.0), 4.0, hex(0x080a08).a(0.7));
+            }
+            // Souris sur la case : la carte ne réagit pas. Avant, la carte (appelée après) reprenait l'appui :
+            // cliquer la case ouvrait la vidéo au lieu de la cocher.
+            let on_box = boxed && ui.hot(cb.inset(-3.0));
+            if boxed && ui.check(idn("vck", i), cb.x, cb.y, cb.w, ticked, false) {
+                tick = Some(i);
+            } else if !on_box && ui.click(idn("vc", i), q) {
                 pick = Some(i);
             }
             if hot && ui.i.rpressed {
@@ -428,10 +499,33 @@ impl Front {
         }
         let rows = n.div_ceil(cols) as f32;
         ui.scroll_end(id("vgrid"), view, 16.0 + rows * (ch + 14.0) + 10.0, clip);
-        if let Some(i) = pick {
-            let p = self.vids.as_ref().unwrap()[i].path.clone();
-            if self.v_sel.as_ref() != Some(&p) {
-                self.pick(Some(p));
+        // Ctrl+clic ou case : coche ou décoche. Maj+clic : toute la série depuis la vidéo affichée (comme l'Explorateur).
+        let ctrl_pick = pick.filter(|_| ui.i.click_ctrl);
+        let shift_pick = pick.filter(|_| ui.i.click_shift && !ui.i.click_ctrl);
+        // Chemins copiés seulement lors d'un clic (avant : toute la liste, à chaque image dessinée).
+        let paths: Vec<std::path::PathBuf> = if pick.is_some() || tick.is_some() { self.vids.as_ref().map_or(vec![], |l| l.iter().map(|v| v.path.clone()).collect()) } else { vec![] };
+        if let Some(i) = tick.or(ctrl_pick) {
+            // Première coche au Ctrl+clic : la vidéo affichée est prise aussi.
+            if self.v_multi.is_empty() && tick.is_none() {
+                self.v_multi.extend(self.v_sel.clone());
+            }
+            if !self.v_multi.remove(&paths[i]) {
+                self.v_multi.insert(paths[i].clone());
+            }
+            self.v_anchor = Some(paths[i].clone());
+            self.del_box = false;
+        } else if let Some(i) = shift_pick {
+            // Série depuis le dernier clip cliqué (avant : toujours depuis la vidéo affichée, même après des coches).
+            let anchor = self.v_anchor.as_ref().or(self.v_sel.as_ref());
+            let from = anchor.and_then(|s| paths.iter().position(|p| p == s)).unwrap_or(i);
+            self.v_multi = paths[from.min(i)..=from.max(i)].iter().cloned().collect();
+            self.del_box = false;
+        } else if let Some(i) = pick {
+            // Clic simple : la sélection multiple s'efface, la vidéo s'ouvre dans le lecteur.
+            self.v_multi.clear();
+            self.v_anchor = Some(paths[i].clone());
+            if self.v_sel.as_ref() != Some(&paths[i]) {
+                self.pick(Some(paths[i].clone()));
             }
         }
         if let Some(i) = ctx {
@@ -659,7 +753,8 @@ impl Front {
         let view = r(body.x + 330.0, body.y, body.w - 330.0, body.h);
         let clip = ui.scroll_begin(id("set-tools"), view);
         let (x, w) = (view.x + 22.0, view.w - 44.0 - 10.0);
-        let (open, mut cy) = self.grp(ui, "tools:clean", "Fichiers temporaires et caches", x, view.y + 4.0, w);
+        // Seule section de la colonne : toujours ouverte, sans flèche de repli.
+        let (open, mut cy) = self.grp_fixed(ui, "Fichiers temporaires et caches", x, view.y + 4.0);
         if open {
             if self.tools.items.is_none() {
                 cy += ui.hint(x, cy, w, "L'analyse mesure chaque catégorie sans rien supprimer. Vous choisissez ensuite quoi effacer. Les fichiers en cours d'utilisation sont ignorés.") + 10.0;
@@ -694,7 +789,11 @@ impl Front {
                     } else if size > 0 && !ob.has(ui.mouse()) && ui.click(idn("clRow", i), row) {
                         self.tools.items.as_mut().unwrap()[i].on = !on;
                     }
-                    ui.check(idn("clChk", i), x, cy + 20.0, 16.0, on, size == 0);
+                    // La case, appelée après la ligne, prend l'appui : son clic compte aussi (avant, ignoré : cliquer
+                    // pile sur la case ne cochait rien).
+                    if ui.check(idn("clChk", i), x, cy + 20.0, 16.0, on, size == 0) {
+                        self.tools.items.as_mut().unwrap()[i].on = !on;
+                    }
                     let nx = x + 28.0 + ui.c.text(x + 28.0, cy + 10.0, 19.0, &name, F::s(13.0, 500), pal::TEXT);
                     if admin {
                         let f = F::s(10.0, 600).ls(0.08);
