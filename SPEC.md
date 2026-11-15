@@ -12,7 +12,7 @@ Priorité n°1 : quasi invisible en jeu. Qualité de capture maximale à coût m
 | Module | Rôle | Dépend de |
 |---|---|---|
 | `core` | Processus Rust : tray, hotkeys (`RegisterHotKey`), config JSON, priorité basse, boucle d'événements | — |
-| `capture` | Détection encodeurs, pilotage ffmpeg (ddagrab → encodeur matériel → segments `.ts` de 2 s), rotation du buffer | core |
+| `capture` | Détection encodeurs, pilotage ffmpeg (WGC `gfxcapture`, repli `ddagrab` → encodeur matériel → segments `.ts` de 2 s), rotation du buffer | core |
 | `audio` | WASAPI loopback (jeu) + entrée (micro), gain, mute, niveau, envoi PCM à ffmpeg par named pipe | core |
 | `clip-rec` | Clip (`-c copy` des N derniers segments → `.mp4`), REC (conserve les segments puis assemble) | capture, audio |
 | `ui` | WebView (wry) créée à la demande : barre Alt+Z + fenêtre réglages, détruite à la fermeture | core, clip-rec |
@@ -59,6 +59,7 @@ Ordre : core → capture → clip-rec → audio → ui → drivers → mesures.
     - Les résolutions proposées dépendent de l'écran choisi.
     - Si l'écran est sur l'AMD, on encode en AMF si NVENC refuse les images de l'autre GPU (mesuré, pas supposé).
 17. **Reprise auto de la capture** : ddagrab s'arrête avec `AcquireNextFrame failed: 887a0026` (`DXGI_ERROR_ACCESS_LOST`) dès que le jeu change de mode d'affichage, ou qu'un écran UAC/verrouillage apparaît (constaté en test). Rust relance ffmpeg en moins de 500 ms. Les segments déjà écrits restent dans le buffer.
+    - **Depuis la 1.3.1 (WGC)** : WGC ne s'arrête pas sur un changement de mode, il se fige. Rust relance dès 1 s sans image juste après un passage en plein écran (3 s sinon), et dès qu'il voit la résolution de l'écran changer. WGC n'envoie une image que si l'écran est redessiné : un point invisible d'un pixel (`keepalive.rs`, opacité 1/255 ↔ 2/255) garde le débit sur un écran immobile, caché pendant un jeu plein écran.
 
 18. **Option « Puce d'encodage » (PC portables hybrides)** : Automatique / Carte graphique (NVIDIA) / Puce graphique intégrée (AMD 780M, Intel).
     - But : laisser la carte graphique tranquille pour le jeu, et faire encoder le buffer en arrière-plan par la puce intégrée.
@@ -98,7 +99,7 @@ Principe : Clipper ne touche jamais au processus du jeu. Il utilise seulement de
 
 | Fonction | Méthode | Contact avec le jeu |
 |---|---|---|
-| Capture vidéo | Desktop Duplication (`ddagrab`), comme OBS « capture d'écran » | Aucun (lit l'écran composé par Windows) |
+| Capture vidéo | Windows Graphics Capture (`gfxcapture`, sans cadre jaune) ; repli Desktop Duplication (`ddagrab`) si FFmpeg < 8 | Aucun (lit l'écran composé par Windows) |
 | Audio | WASAPI loopback (sortie du périphérique) | Aucun |
 | Raccourcis | `RegisterHotKey` | Aucun (pas de hook clavier `SetWindowsHookEx`) |
 | Barre Alt+Z | Fenêtre séparée au premier plan | Aucun (rien dessiné dans le jeu) |

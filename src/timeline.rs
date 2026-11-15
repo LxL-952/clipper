@@ -1,6 +1,6 @@
-//! Horloge du buffer : quel segment couvre quel moment, sur une seule horloge monotone (celle de
-//! `Instant`, QueryPerformanceCounter sous Windows), jamais l'heure de Windows ni la date des fichiers
-//! (elles sautent avec la synchro d'heure, le changement d'heure, un réglage manuel).
+//! Horloge du buffer : quel segment couvre quel moment, sur une seule horloge monotone (GetTickCount64,
+//! qui compte aussi la veille du PC), jamais l'heure de Windows ni la date des fichiers (elles sautent avec
+//! la synchro d'heure, le changement d'heure, un réglage manuel).
 //!
 //! Le superviseur de capture (capture.rs) y note chaque lancement de ffmpeg (« capture »), chaque segment
 //! vu sur le disque et chaque arrêt. Un clip = les segments qui couvrent [appui − durée, appui], pris tels
@@ -8,10 +8,14 @@
 //!
 //! Logique pure (le temps est passé en secondes) : testée avec une horloge simulée.
 
-/// Secondes écoulées sur l'horloge monotone depuis le premier appel.
+/// Secondes écoulées sur l'horloge monotone depuis le premier appel. GetTickCount64 compte le temps passé
+/// en veille ; `Instant` (QueryPerformanceCounter) peut ne pas le compter, selon la documentation de Rust :
+/// au réveil, des segments d'avant la veille auraient semblé récents. Précision ~16 ms, assez pour des relevés
+/// toutes les 250 ms.
 pub fn now() -> f64 {
-    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    static EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let t = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() };
+    t.saturating_sub(*EPOCH.get_or_init(|| t)) as f64 / 1000.0
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +66,7 @@ impl Timeline {
     }
 
     /// Numéros des segments présents sur le disque à `now` : les nouveaux sont datés et rattachés à la
-    /// capture en cours, ceux qui ont disparu (nettoyage) sont oubliés.
+    /// capture en cours (dans l'ordre des numéros), ceux qui ont disparu (nettoyage) sont oubliés.
     pub fn observe(&mut self, now: f64, on_disk: &[u64]) {
         // Recherche dichotomique : pendant un long REC, des milliers de segments restent sur le disque et
         // `contains` coûtait n² comparaisons quatre fois par seconde.
@@ -71,7 +75,7 @@ impl Timeline {
         self.segs.retain(|s| disk.binary_search(&s.n).is_ok());
         let Some(run) = self.runs.last().filter(|r| r.end.is_none()).map(|r| r.id) else { return };
         let newest = self.segs.last().map(|s| s.n);
-        for &n in on_disk {
+        for &n in &disk {
             if newest.is_none_or(|m| n > m) {
                 self.segs.push(Seg { n, run, start: now });
             }

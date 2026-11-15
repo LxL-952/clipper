@@ -2,7 +2,7 @@
 
 Application Windows légère : clips de jeu instantanés (type Instant Replay), REC, statistiques à l'écran, mise à jour des pilotes NVIDIA et nettoyage du PC. Interface native en Rust, sans WebView.
 
-- **Clipper** : buffer circulaire de 1 à 10 min (ddagrab + encodeur matériel NVENC / AMF ou x264), clip en 2 s environ sans réencodage, REC, barre Alt+Z avec derniers clips et lecteur, overlay de statistiques.
+- **Clipper** : buffer circulaire de 1 à 10 min (Windows Graphics Capture, sans cadre jaune, repli Desktop Duplication ; encodeur matériel NVENC / AMF ou x264), clip en 2 s environ sans réencodage, REC, barre Alt+Z avec derniers clips et lecteur, overlay de statistiques.
 - **Overlay** : FPS (frame gen DLSS / FSR compris, « DLSS » / « DLSS FG » indiqués), 1 % low, temps par image, CPU, GPU, températures, VRAM, RAM ; une ou plusieurs cartes graphiques au choix ; jeux reconnus automatiquement (Steam, Epic, Xbox, Riot, Ubisoft, EA, GOG).
 - **Audio** : son du jeu et micro, mélangés ou sur des pistes séparées, volumes, boost et réduction de bruit du micro, vu-mètres.
 - **Vidéos** : galerie avec miniatures et lecteur intégré, renommer, supprimer.
@@ -11,7 +11,7 @@ Application Windows légère : clips de jeu instantanés (type Instant Replay), 
 - **Mises à jour** intégrées : installateur de la dernière release GitHub, empreinte SHA-256 vérifiée.
 
 ## Anti-cheat
-Aucune injection, aucun hook, aucune lecture de la mémoire d'un jeu, aucun processus de jeu ouvert. Capture par Desktop Duplication, audio par WASAPI, raccourcis par `RegisterHotKey`, FPS et DLSS par les événements ETW publics (comme PresentMon). Détails : [SPEC.md](SPEC.md).
+Aucune injection, aucun hook, aucune lecture de la mémoire d'un jeu, aucun processus de jeu ouvert. Capture par Windows Graphics Capture (repli Desktop Duplication), audio par WASAPI, raccourcis par `RegisterHotKey`, FPS et DLSS par les événements ETW publics (comme PresentMon). Détails : [SPEC.md](SPEC.md).
 
 ## Installer
 Télécharger `Clipper-Setup-<version>.exe` dans les [releases](https://github.com/LxL-952/clipper/releases) (assistant : contrat de licence, dossier, démarrage avec Windows, FFmpeg via winget ; PresentMon d'Intel inclus pour les FPS). Installation pour l'utilisateur seul, sans droits administrateur.

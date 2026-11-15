@@ -12,6 +12,7 @@ mod front_b;
 mod front_c;
 mod gfx;
 mod gpus;
+mod keepalive;
 mod overlay;
 mod player;
 mod preview;
