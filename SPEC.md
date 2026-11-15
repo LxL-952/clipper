@@ -135,6 +135,11 @@ D:\clipper
   src/main.rs       boucle tao, tray, hotkeys, dispatch
   src/config.rs     config.json (%APPDATA%\Clipper)
   src/capture.rs    encodeurs, args ffmpeg, buffer, clip, REC
+  src/watchdog.rs   décisions du superviseur (blocage, plein écran, veille, garde-fou NVENC), testées
+  src/clipplan.rs   règles d'assemblage d'un clip (coupe au début, durée attendue, entrée ffmpeg), testées
+  src/foreground.rs jeu plein écran au premier plan, bureau sécurisé
+  src/timeline.rs   horloge du buffer (segments datés, captures)
+  src/keepalive.rs  point invisible qui garde WGC vivant sur un écran immobile
   src/audio.rs      WASAPI + named pipes
   src/drivers.rs    NVIDIA
   src/ui.rs         fenêtres wry à la demande
@@ -170,4 +175,4 @@ Minimal (ponytail) : pas d'abstraction sans deuxième usage, pas de crate pour 1
 
 ## Décisions
 - Format de sortie : réglage utilisateur commun Clip + REC (hypothèse 11).
-- Hypothèse 3 (2e ffmpeg pendant le REC seulement si réglages différents) : retenue par défaut.
+- Hypothèse 3 (2e ffmpeg pendant le REC seulement si réglages différents) : abandonnée. Une seule qualité pour le Clip et le REC ; le REC garde les segments du buffer, sans 2e capture.

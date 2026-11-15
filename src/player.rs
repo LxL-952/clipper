@@ -25,7 +25,8 @@ const NORMAL_PRIORITY: u32 = 0x0000_0020;
 const PLAY_FPS: f64 = 60.0;
 /// Fondu de la miniature vers la 1re vraie image d'un clip (la miniature est prise à 1 s, en 320 px :
 /// sans fondu, l'image « sautait » à l'arrivée de la vidéo).
-const FADE: Duration = Duration::from_millis(160);
+/// 160 ms avant : avec ~75 ms de décodage, le clic sur un clip semblait mettre 0,3 s à répondre.
+const FADE: Duration = Duration::from_millis(70);
 
 /// Décodeur de la lecture : 0 pas encore choisi, 1 cuda (carte NVIDIA), 2 d3d11va.
 static DECODER: AtomicU8 = AtomicU8::new(0);
@@ -146,6 +147,11 @@ impl Player {
     pub fn close(&mut self) {
         self.reset();
         self.file = None;
+        // Fichier libéré avant de rendre la main : la fenêtre peut supprimer ou renommer le clip juste après
+        // (Windows refuse tant qu'un ffmpeg le tient ouvert). Seule attente du lecteur dans le fil de la fenêtre.
+        for mut k in std::mem::take(&mut *DYING.lock().unwrap()) {
+            let _ = k.wait();
+        }
     }
 
     fn reset(&mut self) {
@@ -299,16 +305,12 @@ impl Player {
 
     fn kill(&mut self) {
         self.run.fetch_add(1, Ordering::Relaxed);
-        for mut k in self.kids.drain(..) {
-            let _ = k.kill();
-            let _ = k.wait();
-        }
+        reap(self.kids.drain(..).collect());
     }
 
     fn kill_still(&mut self) {
-        if let Some((mut k, _, _)) = self.still.take() {
-            let _ = k.kill();
-            let _ = k.wait();
+        if let Some((k, _, _)) = self.still.take() {
+            reap(vec![k]);
         }
     }
 
@@ -495,6 +497,22 @@ impl Drop for Player {
 /// Envoie le son décodé (f32, 48 kHz, stéréo) à la sortie par défaut de Windows, au rythme de la carte son.
 /// Le tampon est rempli d'avance, mais la lecture ne démarre qu'avec la première image (`t0`) : sans ça, le
 /// son partait avant l'image (démarrage du décodage vidéo, saut jusqu'au point visé).
+/// Arrête des ffmpeg du lecteur. L'arrêt est demandé tout de suite ; la fin (40 à 70 ms pour un décodage cuda)
+/// n'est attendue que par `close`. Avant, chaque saut figeait la fenêtre ~70 ms et chaque pause ~45 ms.
+/// Leurs images déjà en route sont ignorées : `run` et `epoch` ont changé.
+fn reap(mut kids: Vec<Child>) {
+    if kids.is_empty() {
+        return;
+    }
+    kids.iter_mut().for_each(|k| drop(k.kill()));
+    let mut d = DYING.lock().unwrap();
+    d.retain_mut(|k| !matches!(k.try_wait(), Ok(Some(_))));
+    d.extend(kids);
+}
+
+/// ffmpeg arrêtés pas encore sortis : attendus par `close` (fichier à libérer), sinon relevés au prochain arrêt.
+static DYING: Mutex<Vec<Child>> = Mutex::new(Vec::new());
+
 fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32, t0: &Mutex<Option<Instant>>) -> Result<(), Box<dyn std::error::Error>> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
     let _ = wasapi::initialize_mta();

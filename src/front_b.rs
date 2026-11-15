@@ -1,4 +1,5 @@
 //! Onglets « Vidéos », « Pilotes » et « Outils », et l'habillage du lecteur (commandes par-dessus l'image).
+use crate::cmd::{Cmd, VideoAct};
 use crate::front::{Front, Tab, bytes, dur, led_col, thousands, when};
 use crate::gfx::{F, R, hex, md, pal, r, scene, text_w};
 use crate::widgets::{Btn, Note, Seg, Ui, id, idn, so};
@@ -321,7 +322,7 @@ impl Front {
             mx += ui.c.text(mx, y, 17.4, &bytes(size), F::m(12.0, 400), pal::TEXT2) + 12.0;
             ui.c.text(mx, y, 17.4, &when(date), F::s(12.0, 400), pal::TEXT2);
             y += 17.4 + 10.0;
-            let open_folder = |me: &mut Front| me.send(json!({"cmd": "video_action", "action": "open_folder", "path": path}));
+            let open_folder = |me: &mut Front| me.send(Cmd::Video(VideoAct::OpenFolder, path.clone()));
             if !video {
                 let bw = Ui::btn_w("Ouvrir le dossier", true, Btn::N);
                 let (nh, (ax, ay)) = ui.note(x, y, w, Note::Err, "warn", "**Lecture impossible ici.** Ce fichier ne contient aucune image (clip AV1 enregistré avant la version 1.3.0, irrécupérable). Vous pouvez le supprimer.", 39.0);
@@ -340,7 +341,7 @@ impl Front {
                 let ok = ui.btn(id("renOk"), r(q.x + 12.0, q.y + 82.0, b1, 32.0), "Renommer", None, Btn::P) || enter;
                 let no = ui.btn(id("renNo"), r(q.x + 20.0 + b1, q.y + 82.0, Ui::btn_w("Annuler", false, Btn::G), 32.0), "Annuler", None, Btn::G) || ui.i.key("Escape");
                 if ok && !text.trim().is_empty() {
-                    self.send(json!({"cmd": "video_action", "action": "rename", "path": path, "name": text.trim()}));
+                    self.send(Cmd::Video(VideoAct::Rename(text.trim().to_string()), path.clone()));
                     // Le clip renommé reste choisi quand la liste revient (même nettoyage du nom que main.rs).
                     let clean: String = text.trim().chars().filter(|c| !r#"\/:*?"<>|"#.contains(*c)).collect();
                     let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
@@ -395,7 +396,7 @@ impl Front {
         ui.sc(list.x + 22.0, list.y + 14.0, 32.0, &count, pal::TEXT3, 500);
         let bw = Ui::btn_w("Actualiser", true, Btn::G);
         if ui.btn(id("vRefresh"), r(list.right() - 22.0 - bw, list.y + 14.0, bw, 32.0), "Actualiser", Some("refresh"), Btn::G) {
-            self.send(json!({"cmd": "videos"}));
+            self.send(Cmd::Videos);
         }
         // Sélection : tout cocher en un clic (ou Ctrl+A), tout décocher quand tout est coché.
         let all_n = self.vids.as_ref().map_or(0, |l| l.len());
@@ -429,7 +430,7 @@ impl Front {
             ey += ui.c.para(ex, ey, (view.w - 64.0).min(376.0), 18.9, &sp, true) + 10.0;
             if ui.btn(id("vEmpty"), r(ex, ey, Ui::btn_w("Voir le dossier des clips", true, Btn::N), 32.0), "Voir le dossier des clips", Some("folder"), Btn::N) {
                 let p = self.cfg.out_dir.clone();
-                self.send(json!({"cmd": "video_action", "action": "open_folder", "path": p}));
+                self.send(Cmd::Video(VideoAct::OpenFolder, p.clone()));
             }
             return;
         }
@@ -691,7 +692,7 @@ impl Front {
                     self.drv.confirm = false;
                     self.drv.phase = "download".into();
                     (self.drv.done, self.drv.total) = (0, 0);
-                    self.send(json!({"cmd": "driver_install"}));
+                    self.send(Cmd::DriverInstall);
                 }
                 if ui.btn(id("dlNo"), r(ix + 20.0 + b1, cy, Ui::btn_w("Annuler", false, Btn::G), 32.0), "Annuler", None, Btn::G) {
                     self.drv.confirm = false;
@@ -739,7 +740,7 @@ impl Front {
         let bw = Ui::btn_w("Nettoyer la RAM", false, Btn::P);
         if ui.btn(id("ramBtn"), r(x, y, bw, 32.0), "Nettoyer la RAM", None, Btn::P.off(self.tools.ram_wait)) {
             self.tools.ram_wait = true;
-            self.send(json!({"cmd": "ram_clean"}));
+            self.send(Cmd::RamClean);
         }
         if self.tools.ram_wait {
             ui.spin(x + bw + 15.0, y + 16.0);
@@ -761,7 +762,7 @@ impl Front {
                 let bw = Ui::btn_w("Analyser", false, Btn::P);
                 if ui.btn(id("clScan"), r(x, cy, bw, 32.0), "Analyser", None, Btn::P.off(self.tools.scanning)) {
                     self.tools.scanning = true;
-                    self.send(json!({"cmd": "clean_scan"}));
+                    self.send(Cmd::CleanScan);
                 }
                 if self.tools.scanning {
                     ui.spin(x + bw + 15.0, cy + 16.0);
@@ -812,7 +813,7 @@ impl Front {
                     ui.c.rect(r(x, cy - 1.0, w, 1.0), pal::LINE);
                 }
                 if let Some(cid) = open_id {
-                    self.send(json!({"cmd": "clean_open", "id": cid}));
+                    self.send(Cmd::CleanOpen(cid.to_string()));
                 }
                 let items = self.tools.items.as_ref().unwrap();
                 let total: u64 = items.iter().filter(|i| i.on).map(|i| i.bytes).sum();
@@ -830,7 +831,7 @@ impl Front {
                 if ui.btn(id("clRescan"), r(x + w - b2 - 8.0 - b1, cy, b1, 32.0), "Réanalyser", Some("refresh"), Btn::G.off(self.tools.scanning)) {
                     self.tools.scanning = true;
                     self.tools.done = None;
-                    self.send(json!({"cmd": "clean_scan"}));
+                    self.send(Cmd::CleanScan);
                 }
                 cy += 32.0;
                 if self.tools.confirm {
@@ -847,7 +848,7 @@ impl Front {
                     if ui.btn(id("clYes"), r(q.x + 12.0, by, b1, 32.0), "Supprimer", Some("trash"), Btn::D) {
                         self.tools.confirm = false;
                         self.tools.running = true;
-                        self.send(json!({"cmd": "clean_run", "ids": ids}));
+                        self.send(Cmd::CleanRun(ids));
                     }
                     if ui.btn(id("clNo"), r(q.x + 20.0 + b1, by, Ui::btn_w("Annuler", false, Btn::G), 32.0), "Annuler", None, Btn::G) {
                         self.tools.confirm = false;

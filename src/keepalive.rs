@@ -14,16 +14,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Qui a besoin du point : le buffer, la 2e capture d'un REC aux réglages différents (qui peut tourner
-/// buffer en pause), ou l'essai de WGC au lancement (3 images à obtenir, même sur un écran immobile).
-/// Écran capturé (HMONITOR) de chacun ; aucun : point retiré.
+/// Qui a besoin du point : le buffer, ou l'essai de WGC au lancement (3 images à obtenir, même sur un écran
+/// immobile). Écran capturé (HMONITOR) de chacun ; aucun : point retiré.
 #[derive(Clone, Copy)]
 pub enum Owner {
     Buffer = 0,
-    Rec = 1,
-    Probe = 2,
+    Probe = 1,
 }
-static TARGET: Mutex<[Option<usize>; 3]> = Mutex::new([None; 3]);
+static TARGET: Mutex<[Option<usize>; 2]> = Mutex::new([None; 2]);
 static STARTED: AtomicBool = AtomicBool::new(false);
 /// Plus aucune image depuis 2 s (chargement figé d'un jeu plein écran) : point montré même par-dessus le jeu.
 static FORCE: AtomicBool = AtomicBool::new(false);
@@ -77,7 +75,7 @@ unsafe fn run() {
             // Jeu plein écran au premier plan : relu 4 fois par seconde (lecture de la taille d'une fenêtre). Après
             // un Alt+Tab vers un bureau immobile, le point revient vite : pas de relance de la capture pour rien.
             if checked.elapsed() >= Duration::from_millis(250) {
-                game = crate::capture::fullscreen_foreground();
+                game = crate::foreground::fullscreen_foreground();
                 checked = Instant::now();
             }
             let want = TARGET.lock().unwrap().iter().find_map(|m| *m).filter(|_| !game || FORCE.load(Ordering::Relaxed));

@@ -1,6 +1,6 @@
-//! Rendus hors écran de l'interface (tests) : chaque onglet est dessiné dans un fichier, sans fenêtre,
-//! avec les mêmes données d'exemple que le mode démo de l'ancienne page — pour comparer les deux à l'œil.
-//! `cargo test shots -- --ignored` ; images dans le dossier donné par CLIPPER_SHOTS.
+//! Rendus hors Ã©cran de l'interface (tests) : chaque onglet est dessinÃ© dans un fichier, sans fenÃªtre,
+//! avec les mÃªmes donnÃ©es d'exemple que le mode dÃ©mo de l'ancienne page â€” pour comparer les deux Ã  l'Å“il.
+//! `cargo test shots -- --ignored` ; images dans le dossier donnÃ© par CLIPPER_SHOTS.
 use crate::front::{Front, Tab};
 use crate::gfx::Canvas;
 use crate::widgets::{Input, Ui, UiState};
@@ -9,17 +9,17 @@ use std::sync::Arc;
 
 fn demo() -> Value {
     json!({"page": "index", "tab": null,
-        "config": {"buffer_secs": 180, "clip": {"height": 1080, "fps": 60}, "rec": {"height": 1080, "fps": 60}, "encoder": "h264_nvenc", "quality": 1.0,
+        "config": {"buffer_secs": 180, "clip": {"height": 1080, "fps": 60}, "encoder": "h264_nvenc", "quality": 1.0,
             "container": "mp4", "audio_tracks": ["game", "mic"], "out_device": null, "mic_device": "{0.0.1.00000000}.{b2c1}", "game_volume": 1.0,
             "mic_volume": 0.8, "mic_muted": false, "key_clip": "Alt+KeyX", "key_rec": "Alt+KeyR", "key_bar": "Alt+KeyZ",
-            "out_dir": "C:\\Users\\Kurero\\Videos\\Clipper", "ffmpeg": "ffmpeg", "driver_branch": "game_ready", "encode_chip": "auto", "monitor": 0,
-            "stretch": "off", "desktop_capture": true, "buffer_dir": "C:\\Users\\Kurero\\AppData\\Local\\Temp\\Clipper\\buf", "overlay_mode": "hotkey",
+            "out_dir": "C:\\Users\\Joueur\\Videos\\Clipper", "ffmpeg": "ffmpeg", "driver_branch": "game_ready", "encode_chip": "auto", "monitor": 0,
+            "stretch": "off", "desktop_capture": true, "buffer_dir": "C:\\Users\\Joueur\\AppData\\Local\\Temp\\Clipper\\buf", "overlay_mode": "hotkey",
             "key_overlay": "Alt+KeyF", "overlay_items": ["fps", "frametime", "cpu", "gpu"], "intro": false},
         "encoders": ["h264_nvenc", "hevc_nvenc", "av1_nvenc", "h264_amf", "hevc_amf", "libx264"], "native": [1920, 1200], "ffmpeg_ok": true,
         "gpus": [{"id": "nvidia", "name": "NVIDIA GeForce RTX 4060 Laptop GPU"}, {"id": "amd", "name": "AMD Radeon(TM) 780M"}],
-        "monitors": [{"idx": 0, "w": 1920, "h": 1200, "name": "Écran 1 (interne)"}, {"idx": 1, "w": 1920, "h": 1080, "name": "Écran 2"}],
+        "monitors": [{"idx": 0, "w": 1920, "h": 1200, "name": "Ã‰cran 1 (interne)"}, {"idx": 1, "w": 1920, "h": 1080, "name": "Ã‰cran 2"}],
         "outputs": [{"id": "a1", "name": "Haut-parleurs (Realtek(R) Audio)"}, {"id": "a2", "name": "Casque (HyperX Cloud III S)"}],
-        "inputs": [{"id": "{0.0.1.00000000}.{b2c1}", "name": "Micro (HyperX Cloud III S)"}, {"id": "b2", "name": "Réseau de micros (Realtek(R) Audio)"}],
+        "inputs": [{"id": "{0.0.1.00000000}.{b2c1}", "name": "Micro (HyperX Cloud III S)"}, {"id": "b2", "name": "RÃ©seau de micros (Realtek(R) Audio)"}],
         "hotkeys": {"clip": "Alt+X", "rec": "Ctrl+Alt+R", "bar": "Alt+Maj+Z", "overlay": "Alt+F"}, "hotkey_conflicts": ["Alt+R", "Alt+Z"],
         "recording": false, "rec_secs": 0, "gpu": {"name": "NVIDIA GeForce RTX 4060 Laptop GPU", "driver": "621.01"},
         "elevated": false, "gpu_scale": true, "cpu_temp": true, "autostart": false})
@@ -47,11 +47,11 @@ fn shot(f: &mut Front, name: &str, w: u32, h: u32, scale: f32, input: &Input) {
         .status()
         .is_ok_and(|s| s.success());
     let _ = std::fs::remove_file(raw);
-    assert!(ok, "image {name} non écrite");
+    assert!(ok, "image {name} non Ã©crite");
 }
 
 #[test]
-#[ignore = "écrit des images dans CLIPPER_SHOTS"]
+#[ignore = "Ã©crit des images dans CLIPPER_SHOTS"]
 fn every_tab() {
     let mut f = Front::new(&demo(), Arc::new(|| {}));
     f.free.insert(f.cfg.out_dir.clone(), 212 * 1_073_741_824);
@@ -74,9 +74,9 @@ fn every_tab() {
     shot(&mut f, "stats-125", 1125, 775, 1.25, &none);
     f.tab = Tab::Advanced;
     shot(&mut f, "advanced", 900, if open { 1500 } else { 900 }, 1.0, &none);
-    // Largeur minimale de la fenêtre, 125 % : sept onglets, rien ne se chevauche.
+    // Largeur minimale de la fenÃªtre, 125 % : sept onglets, rien ne se chevauche.
     shot(&mut f, "advanced-min", 1050, 650, 1.25, &none);
-    // Nouvelle version : page imposée, à la taille minimale et en grand, puis avec un échec réseau.
+    // Nouvelle version : page imposÃ©e, Ã  la taille minimale et en grand, puis avec un Ã©chec rÃ©seau.
     f.update = Some("1.3.0".into());
     shot(&mut f, "update-min", 1050, 650, 1.25, &none);
     f.upd_err = Some("Download failed. Check your connection and try again.".into());
@@ -87,7 +87,7 @@ fn every_tab() {
     shot(&mut f, "audio", 900, if open { 1100 } else { 620 }, 1.0, &none);
     f.tab = Tab::Videos;
     let items: Vec<Value> = (0..7)
-        .map(|i| json!({"path": format!("C:\\Users\\Kurero\\Videos\\Clipper\\Clip 2026-11-0{} 21-14-03.mp4", i + 1), "name": format!("Clip 2026-11-0{} 21-14-03.mp4", i + 1),
+        .map(|i| json!({"path": format!("C:\\Users\\Joueur\\Videos\\Clipper\\Clip 2026-11-0{} 21-14-03.mp4", i + 1), "name": format!("Clip 2026-11-0{} 21-14-03.mp4", i + 1),
             "kind": if i == 2 { "REC" } else { "Clip" }, "bytes": 152_000_000u64 * (i + 1), "secs": 61.0 * (i as f64 + 1.0), "date": 1_794_000_000u64 + i * 86_400, "video": false, "audio": 1}))
         .collect();
     f.on(&json!({"type": "videos", "items": items}));
@@ -98,18 +98,18 @@ fn every_tab() {
     f.tab = Tab::Tools;
     f.on(&json!({"type": "clean", "items": [
         {"id": "temp", "name": "Fichiers temporaires", "bytes": 1_840_000_000u64, "files": 4213, "admin": false, "default": true, "warn": ""},
-        {"id": "wu", "name": "Cache de Windows Update", "bytes": 3_200_000_000u64, "files": 812, "admin": true, "default": false, "warn": "Windows retéléchargera les mises à jour en attente."}]}));
+        {"id": "wu", "name": "Cache de Windows Update", "bytes": 3_200_000_000u64, "files": 812, "admin": true, "default": false, "warn": "Windows retÃ©lÃ©chargera les mises Ã  jour en attente."}]}));
     f.on(&json!({"type": "ram", "free_before": 4_100_000_000u64, "free_after": 9_600_000_000u64, "total": 16_000_000_000u64}));
-    f.on(&json!({"type": "toast", "kind": "clip", "text": "Clip enregistré · 3 min 00 s", "path": "C:\\Users\\Kurero\\Videos\\Clipper\\Clip.mp4"}));
+    f.on(&json!({"type": "toast", "kind": "clip", "text": "Clip enregistrÃ© Â· 3 min 00 s", "path": "C:\\Users\\Joueur\\Videos\\Clipper\\Clip.mp4"}));
     shot(&mut f, "tools", 900, 620, 1.0, &none);
-    // Mise à l'échelle 150 % : mêmes proportions, texte net.
+    // Mise Ã  l'Ã©chelle 150 % : mÃªmes proportions, texte net.
     f.tab = Tab::Clip;
     f.toasts.clear();
     shot(&mut f, "clip-150", 1350, 930, 1.5, &none);
 }
 
 #[test]
-#[ignore = "écrit des images dans CLIPPER_SHOTS"]
+#[ignore = "Ã©crit des images dans CLIPPER_SHOTS"]
 fn bar() {
     let Ok(dir) = std::env::var("CLIPPER_SHOTS") else { return };
     let cfg: crate::config::Config = serde_json::from_value(demo()["config"].clone()).unwrap();
@@ -118,8 +118,8 @@ fn bar() {
     b.on(&json!({"type": "recent", "items": [
         {"path": "C:\\a\\Clip 1.mp4", "name": "Clip 2026-11-07 21-14-03.mp4", "secs": 180.0, "video": true, "audio": 1},
         {"path": "C:\\a\\Clip 2.mp4", "name": "Clip 2026-11-06 20-02-41.mp4", "secs": 61.0, "video": true, "audio": 1}]}));
-    b.on(&json!({"type": "toast", "kind": "clip", "text": "Clip enregistré · 3 min 00 s", "path": "C:\\a\\Clip 1.mp4"}));
-    std::thread::sleep(std::time::Duration::from_millis(400)); // animation d'entrée terminée
+    b.on(&json!({"type": "toast", "kind": "clip", "text": "Clip enregistrÃ© Â· 3 min 00 s", "path": "C:\\a\\Clip 1.mp4"}));
+    std::thread::sleep(std::time::Duration::from_millis(400)); // animation d'entrÃ©e terminÃ©e
     let (w, h) = (1040u32, 420u32);
     let mut c = Canvas::new(w, h, 1.0);
     let mut st = UiState::default();
@@ -142,7 +142,7 @@ fn bar() {
     assert!(ok);
 }
 
-/// Le lecteur reçoit-il les images au rythme du clip ? Lit 4 s d'un vrai fichier (CLIPPER_CLIP) et compte.
+/// Le lecteur reÃ§oit-il les images au rythme du clip ? Lit 4 s d'un vrai fichier (CLIPPER_CLIP) et compte.
 #[test]
 #[ignore = "lit un vrai clip avec ffmpeg"]
 fn player_rate() {
@@ -153,7 +153,7 @@ fn player_rate() {
     p.set_size(594.0, 334.0);
     p.open(std::path::Path::new(&clip), 60.0, 1);
     std::thread::sleep(std::time::Duration::from_millis(1500));
-    println!("image fixe reçue : {}", p.has_frame());
+    println!("image fixe reÃ§ue : {}", p.has_frame());
     n.store(0, std::sync::atomic::Ordering::Relaxed);
     p.toggle();
     let mut last = 0;
@@ -166,9 +166,9 @@ fn player_rate() {
     p.close();
 }
 
-/// Délais du lecteur sur un vrai clip (CLIPPER_CLIP) : clic sur un clip -> 1re image, lecture -> mouvement,
-/// saut pendant la lecture, saut à l'arrêt, glissement sur la barre (images vues pendant le geste).
-/// `tick` est appelé toutes les 2 ms, comme le ferait l'interface.
+/// DÃ©lais du lecteur sur un vrai clip (CLIPPER_CLIP) : clic sur un clip -> 1re image, lecture -> mouvement,
+/// saut pendant la lecture, saut Ã  l'arrÃªt, glissement sur la barre (images vues pendant le geste).
+/// `tick` est appelÃ© toutes les 2 ms, comme le ferait l'interface.
 #[test]
 #[ignore = "lit un vrai clip avec ffmpeg"]
 fn player_latency() {
@@ -178,7 +178,8 @@ fn player_latency() {
     let n = Arc::new(AtomicU32::new(0));
     let n2 = n.clone();
     let mut p = crate::player::Player::new("ffmpeg", Arc::new(move || { n2.fetch_add(1, Relaxed); }));
-    p.set_size(384.0, 216.0);
+    let (w, h) = std::env::var("CLIPPER_SIZE").ok().and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap()))).unwrap_or((384.0, 216.0));
+    p.set_size(w, h);
     let wait = |p: &mut crate::player::Player, ok: &dyn Fn(&crate::player::Player, u32) -> bool| -> u128 {
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(5) {
@@ -207,7 +208,7 @@ fn player_latency() {
         let n2 = n.load(Relaxed);
         p.seek(30.0);
         let seek_paused = wait(&mut p, &|_, c| c > n2);
-        // Glissement de 5 s à 35 s en 1 s (une position toutes les 16 ms), puis lâcher en lecture.
+        // Glissement de 5 s Ã  35 s en 1 s (une position toutes les 16 ms), puis lÃ¢cher en lecture.
         p.toggle();
         std::thread::sleep(Duration::from_millis(400));
         let n3 = n.load(Relaxed);
@@ -223,12 +224,12 @@ fn player_latency() {
         p.scrub_end();
         let end = p.pos();
         let release = wait(&mut p, &|p, _| p.pos() > end + 0.001);
-        println!("tour {round} : 1re image {first} ms, lecture {play} ms, saut en lecture : image {seek_img} ms puis mouvement {seek_play} ms, saut à l'arrêt {seek_paused} ms, glissement : {seen} images sur {i} positions, reprise au lâcher {release} ms");
+        println!("tour {round} : 1re image {first} ms, lecture {play} ms, saut en lecture : image {seek_img} ms puis mouvement {seek_play} ms, saut Ã  l'arrÃªt {seek_paused} ms, glissement : {seen} images sur {i} positions, reprise au lÃ¢cher {release} ms");
         p.close();
     }
 }
 
-/// cuda refusé (carte NVIDIA absente ou pilote trop ancien) : la lecture repart seule en d3d11va.
+/// cuda refusÃ© (carte NVIDIA absente ou pilote trop ancien) : la lecture repart seule en d3d11va.
 #[test]
 #[ignore = "lit un vrai clip avec ffmpeg"]
 fn player_fallback() {
@@ -244,13 +245,13 @@ fn player_fallback() {
         p.tick();
         std::thread::sleep(Duration::from_millis(2));
     }
-    println!("décodeur {} (2 = d3d11va), mouvement après {} ms", crate::player::decoder(), t.elapsed().as_millis());
+    println!("dÃ©codeur {} (2 = d3d11va), mouvement aprÃ¨s {} ms", crate::player::decoder(), t.elapsed().as_millis());
     assert_eq!(crate::player::decoder(), 2);
     assert!(p.pos() > 0.0);
 }
 
-/// Lecture de 5 s au rythme réel (taille CLIPPER_SIZE, ex. 384x216) : le processeur des ffmpeg est relevé
-/// à côté (scratchpad/cpu.ps1).
+/// Lecture de 5 s au rythme rÃ©el (taille CLIPPER_SIZE, ex. 384x216) : le processeur des ffmpeg est relevÃ©
+/// Ã  cÃ´tÃ© (scratchpad/cpu.ps1).
 #[test]
 #[ignore = "lit un vrai clip avec ffmpeg"]
 fn player_cpu() {
@@ -268,6 +269,88 @@ fn player_cpu() {
         std::thread::sleep(Duration::from_millis(16));
     }
     println!("position {:.2} s", p.pos());
-    std::thread::sleep(Duration::from_millis(300)); // relevé final avant l'arrêt
+    std::thread::sleep(Duration::from_millis(300)); // relevÃ© final avant l'arrÃªt
     p.close();
+}
+
+/// Temps passÃ© dans le fil de la fenÃªtre par chaque geste du lecteur (CLIPPER_CLIP) : ouvrir, lire, sauter,
+/// mettre en pause. Tout ce qui dÃ©passe quelques ms se voit comme une saccade de l'interface.
+#[test]
+#[ignore = "lit un vrai clip avec ffmpeg"]
+fn player_ui_block() {
+    use std::time::{Duration, Instant};
+    let Ok(clip) = std::env::var("CLIPPER_CLIP") else { return };
+    let mut p = crate::player::Player::new("ffmpeg", Arc::new(|| {}));
+    p.set_size(1152.0, 648.0);
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+    for round in 0..3 {
+        let t = Instant::now();
+        p.open(std::path::Path::new(&clip), 48.0, 3);
+        let open = ms(t);
+        std::thread::sleep(Duration::from_millis(300));
+        let t = Instant::now();
+        p.toggle();
+        p.tick();
+        let play = ms(t);
+        std::thread::sleep(Duration::from_millis(600));
+        let t = Instant::now();
+        p.seek(20.0);
+        p.tick();
+        let seek = ms(t);
+        std::thread::sleep(Duration::from_millis(200));
+        let t = Instant::now();
+        p.tick();
+        let respawn = ms(t);
+        std::thread::sleep(Duration::from_millis(600));
+        let t = Instant::now();
+        p.pause();
+        let pause = ms(t);
+        let t = Instant::now();
+        p.close();
+        let close = ms(t);
+        println!("tour {round} : ouvrir {open:.1} ms, lire {play:.1} ms, sauter {seek:.1} ms, relance {respawn:.1} ms, pause {pause:.1} ms, fermer {close:.1} ms");
+    }
+}
+
+/// Commandes typÃ©es (cmd.rs) envoyÃ©es par la fenÃªtre, sans fenÃªtre ni ffmpeg : onglet VidÃ©os, rÃ©glages.
+#[test]
+fn front_sends_typed_commands() {
+    use crate::cmd::Cmd;
+    let mut f = Front::new(&demo(), Arc::new(|| {}));
+    f.out.clear();
+    f.select_tab(Tab::Videos);
+    assert_eq!(f.out, vec![Cmd::Videos]);
+    f.out.clear();
+    f.set("clip.fps", json!(30));
+    f.flush();
+    let mut want = serde_json::Map::new();
+    want.insert("clip.fps".into(), json!(30));
+    assert_eq!(f.out, vec![Cmd::SetMany(want)]);
+}
+
+/// Supprimer ou renommer un clip juste aprÃ¨s avoir fermÃ© le lecteur (CLIPPER_CLIP copiÃ© Ã  part) : ffmpeg,
+/// arrÃªtÃ© sans attendre sa fin, ne doit plus tenir le fichier.
+#[test]
+#[ignore = "lit un vrai clip avec ffmpeg"]
+fn player_close_releases_file() {
+    use std::time::Duration;
+    let Ok(clip) = std::env::var("CLIPPER_CLIP") else { return };
+    let dir = std::env::temp_dir().join("clipper-close-test");
+    let _ = std::fs::create_dir_all(&dir);
+    for (round, rename) in [(0, false), (1, true), (2, false)] {
+        let f = dir.join(format!("c{round}.mp4"));
+        std::fs::copy(&clip, &f).unwrap();
+        let mut p = crate::player::Player::new("ffmpeg", Arc::new(|| {}));
+        p.set_size(1152.0, 648.0);
+        p.open(&f, 48.0, 3);
+        std::thread::sleep(Duration::from_millis(300));
+        p.toggle();
+        p.tick();
+        std::thread::sleep(Duration::from_millis(500));
+        p.close();
+        let r = if rename { std::fs::rename(&f, dir.join(format!("r{round}.mp4"))) } else { std::fs::remove_file(&f) };
+        println!("tour {round} : {} juste aprÃ¨s close : {r:?}", if rename { "renommer" } else { "supprimer" });
+        assert!(r.is_ok());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

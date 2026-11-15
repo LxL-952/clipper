@@ -180,7 +180,7 @@ pub fn start_temp_cache() {
     let h = std::thread::spawn(|| loop {
         let never = TEMPS.lock().unwrap().1.is_none() && TEMPS.lock().unwrap().0.is_none();
         let recent = HOVER.lock().unwrap().is_some_and(|t| t.elapsed().as_secs() < 30);
-        if never || (recent && !crate::capture::fullscreen_foreground()) {
+        if never || (recent && !crate::foreground::fullscreen_foreground()) {
             let (gpu, cpu) = crate::overlay::temps();
             let mut t = TEMPS.lock().unwrap();
             t.0 = gpu.or(t.0);

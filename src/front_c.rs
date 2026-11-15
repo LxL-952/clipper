@@ -1,8 +1,10 @@
 //! Onglets « Statistiques » (overlay en jeu) et « Avancé » (démarrage, administrateur, puce d'encodage,
 //! mode étiré, limites connues), et la carte « Clipping / Capture du bureau » de l'onglet Clipper.
 //! Mêmes réglages et mêmes textes qu'avant, regroupés : rien des statistiques ne reste dans les autres onglets.
+use crate::cmd::Cmd;
 use crate::front::Front;
-use crate::front_a::{ITEMS, ov_sample, vendor};
+use crate::capture::encoder_vendor as vendor;
+use crate::front_a::{ITEMS, ov_sample};
 use crate::gfx::{F, R, hex, pal, r, scene, text_w};
 use crate::widgets::{Btn, Note, Ui, id, idn, para_h};
 use serde_json::json;
@@ -329,7 +331,7 @@ impl Front {
         if hit {
             self.autostart = !self.autostart;
             let v = self.autostart;
-            self.send(json!({"cmd": "autostart", "value": v}));
+            self.send(Cmd::Autostart(v));
         }
         y = self.sw_sep(ui.c, x, y + hh, w);
         let tray = self.cfg.minimize_to_tray;
@@ -351,13 +353,13 @@ impl Front {
         let (hit, hh) = self.sw_row(ui, id("adminSw"), x, y, w, "Démarrer en administrateur", hint, on, self.admin_busy);
         if hit {
             self.admin_busy = true;
-            self.send(json!({"cmd": "admin_mode", "value": !on}));
+            self.send(Cmd::AdminMode(!on));
         }
         y += hh;
         if on && !self.elevated {
             y += 10.0;
             if ui.btn(id("adminRel"), r(x, y, Ui::btn_w("Relancer en administrateur", true, Btn::N), 32.0), "Relancer en administrateur", Some("refresh"), Btn::N) {
-                self.send(json!({"cmd": "relaunch_admin"}));
+                self.send(Cmd::RelaunchAdmin);
             }
             y += 32.0;
         }

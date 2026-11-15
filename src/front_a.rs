@@ -1,16 +1,13 @@
 //! Onglets « Clipper » et « Audio » de la fenêtre principale. Textes, dimensions et calculs repris de
 //! l'ancienne page (mêmes formules de débit et de taille de fichier).
+use crate::cmd::Cmd;
 use crate::front::{Front, HK, bytes, fr, pretty, thousands};
-use crate::gfx::{Col, F, R, hex, pal, r, scene, text_w};
+use crate::gfx::{F, R, pal, r, scene, text_w};
 use crate::widgets::{Btn, Note, Seg, SegOpt, Slide, Ui, id, idn, so, son};
 use serde_json::json;
 
 const CLASSES: [u32; 4] = [720, 1080, 1440, 2160];
 const RES_LABELS: [&str; 4] = ["720p", "1080p", "1440p", "2160p"];
-
-fn class_w(c: u32) -> u32 {
-    (c as f32 * 16.0 / 9.0).round() as u32
-}
 
 pub fn enc_label(e: &str) -> String {
     match e {
@@ -27,18 +24,6 @@ pub fn enc_label(e: &str) -> String {
         x => x,
     }
     .to_string()
-}
-
-pub fn vendor(e: &str) -> Option<&'static str> {
-    if e.ends_with("_nvenc") {
-        Some("nvidia")
-    } else if e.ends_with("_amf") {
-        Some("amd")
-    } else if e.ends_with("_qsv") {
-        Some("intel")
-    } else {
-        None
-    }
 }
 
 pub const ITEMS: [(&str, &str); 9] =
@@ -60,15 +45,19 @@ pub fn ov_sample(k: &str) -> Option<(&'static str, &'static str, bool)> {
 }
 
 impl Front {
+    // Tailles et débits : les fonctions de la capture elle-même. Avant, une copie à part (largeur 16:9 de la
+    // classe) divergeait sur un écran ultralarge : 3440×1440 en 1440p annoncé 2560×1072 et 28 Mb/s, enregistré
+    // 3440×1440 à 45 Mb/s ; 2560×1080 proposait 1440p, que la capture n'enregistre pas.
     fn avail(&self, c: u32) -> bool {
-        class_w(c) <= self.native.0 + 1
+        crate::capture::output_size(c, self.native).is_some()
     }
     fn native_class(&self) -> u32 {
-        CLASSES.into_iter().filter(|c| self.avail(*c)).last().unwrap_or(720)
+        let native = |c: &u32| crate::capture::output_size(*c, self.native) == Some(self.native);
+        CLASSES.into_iter().filter(native).last().or_else(|| CLASSES.into_iter().filter(|c| self.avail(*c)).last()).unwrap_or(720)
     }
     fn out_dims(&self, c: u32) -> (u32, u32) {
-        let w = class_w(c).min(self.native.0);
-        (w, (w as f32 * self.native.1 as f32 / self.native.0 as f32 / 2.0).round() as u32 * 2)
+        // Taille codée du fichier (celle que montre ffprobe), avant l'étirement éventuel à l'affichage.
+        crate::capture::output_size(c, self.native).unwrap_or(self.native)
     }
     /// Débit plafond en Mb/s : le calcul de la capture elle-même (hauteur réellement enregistrée, profil,
     /// curseur Qualité). Avant, une copie à part (20 Mb/s en 1080p au lieu de 28, profil ignoré) : la barre,
@@ -80,23 +69,14 @@ impl Front {
     }
     /// NVENC / x264 en qualité constante : le débit est un plafond, la dépense réelle tourne autour de 40 %.
     pub fn typical(&self) -> f32 {
-        if self.cfg.encoder.ends_with("_nvenc") || self.cfg.encoder == "libx264" { 0.4 } else { 1.0 }
+        if crate::capture::constant_quality(&self.cfg.encoder) { 0.4 } else { 1.0 }
     }
     pub fn chip_eff(&self) -> Option<String> {
-        let has = |x: &str| self.gpus.iter().any(|g| g.0 == x);
-        let c = self.cfg.encode_chip.as_str();
-        if has(c) {
-            return Some(c.into());
-        }
-        if c == "igpu" {
-            if let Some(i) = ["amd", "intel"].into_iter().find(|x| has(x)) {
-                return Some(i.into());
-            }
-        }
-        if has("nvidia") { Some("nvidia".into()) } else { self.gpus.first().map(|g| g.0.clone()) }
+        let gpus: Vec<crate::capture::Gpu> = self.gpus.iter().map(|(id, name)| crate::capture::Gpu { id: id.clone(), name: name.clone() }).collect();
+        crate::capture::effective_chip(&self.cfg, &gpus)
     }
     pub fn enc_ok(&self, e: &str) -> bool {
-        match (vendor(e), self.chip_eff()) {
+        match (crate::capture::encoder_vendor(e), self.chip_eff()) {
             (Some(v), Some(c)) => v == c,
             _ => true,
         }
@@ -265,7 +245,7 @@ impl Front {
             let (nh, (ax, ay)) = ui.note(x, y + 14.0, w, Note::Err, "warn", "**FFmpeg est introuvable.** Clipper s'en sert pour lister les encodeurs et les écrans, et pour enregistrer : sans lui, ces listes restent vides et aucun clip n'est possible.", 39.0);
             if ui.btn(id("ffInst"), r(ax, ay + 7.0, bw, 32.0), "Installer FFmpeg", Some("dl"), Btn::P.off(self.ff_installing)) {
                 self.ff_installing = true;
-                self.send(json!({"cmd": "install_ffmpeg"}));
+                self.send(Cmd::InstallFfmpeg);
             }
             if self.ff_installing {
                 ui.c.text(ax + bw + 8.0, ay + 7.0, 32.0, "Installation par winget… la fenêtre se rouvrira toute seule.", F::s(12.0, 400), pal::TEXT3);
@@ -324,11 +304,13 @@ impl Front {
                 format!("Toutes les résolutions tiennent dans votre écran (`{nw}×{nh_}`). {nc}p = taille native, sans copie GPU.")
             } else {
                 format!(
-                    "{} {} votre écran actuel (`{nw}×{nh_}`) : {} à la taille de l'écran, sans agrandir, et {} dès que l'écran le permet. {nc}p = `{ow}×{oh}` natif, sans copie GPU.",
+                    "{} {} votre écran actuel (`{nw}×{nh_}`) : {} à la taille de l'écran, sans agrandir ni copie GPU, et {} dès que l'écran le permet.{}",
                     above.join(" et "),
                     if above.len() > 1 { "dépassent" } else { "dépasse" },
                     if above.len() > 1 { "choisis, ils enregistrent" } else { "choisi, il enregistre" },
-                    if above.len() > 1 { "reviennent" } else { "revient" }
+                    if above.len() > 1 { "reviennent" } else { "revient" },
+                    // Écran de hauteur non standard (1280×960) : aucune classe n'y est native.
+                    if crate::capture::output_size(nc, self.native) == Some(self.native) { format!(" {nc}p = `{ow}×{oh}` natif, sans copie GPU.") } else { String::new() }
                 )
             };
             cy += ui.note(x, cy, w, Note::Info, "info", &nat, 0.0).0;
@@ -440,7 +422,7 @@ impl Front {
                     None => ui.c.text(lx, fy, 17.4, "…", F::s(12.0, 400), pal::TEXT3),
                 };
                 if ui.btn(idn("pick", i), r(x + w - bw, cy + (rh - 32.0) / 2.0, bw, 32.0), "Changer…", None, Btn::N) {
-                    self.send(json!({"cmd": "pick_folder", "key": key}));
+                    self.send(Cmd::PickFolder(key.to_string()));
                 }
                 cy += rh;
                 if i == 0 {
@@ -547,19 +529,37 @@ impl Front {
     /// Vu-mètre segmenté (.vu) : vert, jaune au-delà de 66 %, rouge au-delà de 86 %.
     /// `level` : pic linéaire (0-1), affiché en décibels de -40 à 0 dB, comme Discord ou OBS. Avant : échelle
     /// linéaire, une voix normale (pic ~0,1 soit -20 dB) n'allumait que 10 % de la barre.
+    /// Vumètre façon console de mixage : barre fine et continue, montée instantanée et retombée douce
+    /// (~24 dB/s), repère du dernier pic tenu 0,8 s. Avant : des pavés de 6 px qui sautaient à chaque relevé
+    /// (66 ms) et un vert/jaune/rouge à pleine intensité, trop chargés pour un simple niveau.
     fn vu(&mut self, ui: &mut Ui, wid: u64, q: R, level: f32) {
-        let v = ui.anim(wid, vu_db(level), 0.08);
-        let mut sx = 0.0;
-        while sx < q.w {
-            let sw = (q.w - sx).min(6.0);
-            let p = sx / q.w;
-            let col: Col = if p < 0.66 { pal::OK } else if p < 0.86 { pal::WARN } else { pal::REC };
-            let lit = ((v * q.w - sx) / sw).clamp(0.0, 1.0);
-            ui.c.rect(r(q.x + sx, q.y, sw, q.h), hex(0x262e24));
-            if lit > 0.0 {
-                ui.c.rect(r(q.x + sx, q.y, sw * lit, q.h), col);
-            }
-            sx += 8.0;
+        let now = ui.now;
+        let target = vu_db(level);
+        let st = self.vu.entry(wid).or_insert((0.0, 0.0, now, now));
+        let dt = now.duration_since(st.3).as_secs_f32().min(0.1);
+        st.3 = now;
+        st.0 = if target >= st.0 { target } else { (st.0 - dt * 0.6).max(target) };
+        if st.0 >= st.1 {
+            (st.1, st.2) = (st.0, now);
+        } else if now.duration_since(st.2) > std::time::Duration::from_millis(800) {
+            st.1 = (st.1 - dt * 0.5).max(st.0);
+        }
+        let (v, pk) = (st.0, st.1);
+        if v > 0.0 || pk > 0.0 {
+            ui.s.animating = true;
+        }
+        let q = r(q.x, (q.cy() - 3.0).round(), q.w, 6.0);
+        ui.c.rrect(q, 3.0, pal::WELL);
+        ui.c.outline(q, 3.0, 1.0, pal::LINE);
+        let stops = [(0.0, pal::OK.a(0.75)), (0.72, pal::OK), (0.88, pal::WARN), (1.0, pal::REC)];
+        if v > 0.005 {
+            let old = ui.c.set_clip(Some(ui.c.clip_rect().inter(&r(q.x, q.y, q.w * v, q.h))));
+            ui.c.grad(q, 3.0, false, &stops);
+            ui.c.restore_clip(old);
+        }
+        if pk > 0.02 {
+            let col = if pk < 0.72 { pal::OK } else if pk < 0.88 { pal::WARN } else { pal::REC };
+            ui.c.rect(r(q.x + (q.w * pk - 2.0).max(0.0), q.y, 2.0, q.h), col);
         }
     }
 

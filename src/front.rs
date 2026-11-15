@@ -1,6 +1,7 @@
 //! Fenêtre principale, dessinée nativement (plus de page web). L'état ci-dessous remplace les variables de
 //! l'ancienne page ; les échanges avec le reste de Clipper gardent le même format : commandes JSON vers
 //! `App::ipc` (file `out`) et messages JSON reçus par `on` (les anciens `window.__on`).
+use crate::cmd::{Cmd, VideoAct};
 use crate::config::Config;
 use crate::gfx::{Canvas, Col, F, R, hex, md, pal, r, text_w};
 use crate::player::Player;
@@ -102,7 +103,7 @@ use crate::config::LIVE;
 pub struct Front {
     pub cfg: Config,
     pub tab: Tab,
-    pub out: Vec<Value>,
+    pub out: Vec<Cmd>,
     // données fixes de l'ouverture
     pub encoders: Vec<String>,
     pub native: (u32, u32),
@@ -181,6 +182,8 @@ pub struct Front {
     pub tools: Tools,
     // audio
     pub levels: (f32, f32),
+    /// Vumètres : niveau affiché, pic tenu, instant du pic, dernier dessin (front_a.rs, `vu`).
+    pub vu: std::collections::HashMap<u64, (f32, f32, Instant, Instant)>,
     levels_at: Instant,
     // calques
     pub toasts: Vec<Toast>,
@@ -364,6 +367,7 @@ impl Front {
             drv: Drv::default(),
             tools: Tools::default(),
             levels: (0.0, 0.0),
+            vu: Default::default(),
             levels_at: now,
             toasts: vec![],
             intro: cfg.intro.then_some(now),
@@ -379,8 +383,8 @@ impl Front {
         }
     }
 
-    pub fn send(&mut self, v: Value) {
-        self.out.push(v);
+    pub fn send(&mut self, c: Cmd) {
+        self.out.push(c);
     }
 
     /// Change un réglage : affiché tout de suite, envoyé tout de suite s'il ne relance pas la capture,
@@ -395,8 +399,7 @@ impl Front {
             }
         }
         *slot = value.clone();
-        if let Ok(mut c) = serde_json::from_value::<Config>(v) {
-            c.rec = c.clip;
+        if let Ok(c) = serde_json::from_value::<Config>(v) {
             self.cfg = c;
         }
         self.cfg_json = None;
@@ -415,8 +418,8 @@ impl Front {
             return;
         }
         let restart = self.pending.keys().any(|k| !LIVE.contains(&k.split('.').next().unwrap_or("")));
-        let values = Value::Object(std::mem::take(&mut self.pending));
-        self.send(json!({"cmd": "set_many", "values": values}));
+        let values = std::mem::take(&mut self.pending);
+        self.send(Cmd::SetMany(values));
         self.save_msg = restart.then(|| ("Réglages enregistrés".into(), "Capture relancée.".into(), Some(Instant::now() + Duration::from_millis(1800))));
     }
 
@@ -426,7 +429,7 @@ impl Front {
         }
         self.tab = t;
         match t {
-            Tab::Videos => self.send(json!({"cmd": "videos"})),
+            Tab::Videos => self.send(Cmd::Videos),
             Tab::Drivers if !self.drv.asked => self.check_driver(),
             _ => {}
         }
@@ -435,7 +438,7 @@ impl Front {
     pub fn check_driver(&mut self) {
         self.drv = Drv { asked: true, ..Default::default() };
         let b = self.cfg.driver_branch.clone();
-        self.send(json!({"cmd": "driver_check", "branch": b}));
+        self.send(Cmd::DriverCheck(b));
     }
 
     pub fn toast(&mut self, kind: &str, text: &str, path: Option<PathBuf>) {
@@ -492,7 +495,7 @@ impl Front {
                 self.cfg_json = None;
                 for p in [self.cfg.out_dir.clone(), self.cfg.buffer_dir.clone()] {
                     if !self.free.contains_key(&p) {
-                        self.send(json!({"cmd": "disk_free", "path": p}));
+                        self.send(Cmd::DiskFree(p));
                     }
                 }
             }
@@ -522,7 +525,7 @@ impl Front {
                 let kind = s("kind");
                 self.toast(&kind, &s("text"), m["path"].as_str().map(PathBuf::from));
                 if self.tab == Tab::Videos && kind != "error" {
-                    self.send(json!({"cmd": "videos"}));
+                    self.send(Cmd::Videos);
                 }
             }
             "folder" => {
@@ -610,7 +613,7 @@ impl Front {
                     (d.phase, d.done, d.total) = (ph, m["done"].as_u64().unwrap_or(0), m["total"].as_u64().unwrap_or(0));
                     if d.phase == "done" {
                         let b = self.cfg.driver_branch.clone();
-                        self.send(json!({"cmd": "driver_check", "branch": b})); // version installée relue
+                        self.send(Cmd::DriverCheck(b)); // version installée relue
                     }
                 }
             }
@@ -642,7 +645,7 @@ impl Front {
                     bytes(m["freed_bytes"].as_u64().unwrap_or(0)),
                     if sk > 0 { format!("{} fichiers en cours d'utilisation ont été ignorés.", thousands(sk)) } else { String::new() }
                 ));
-                self.send(json!({"cmd": "clean_scan"}));
+                self.send(Cmd::CleanScan);
             }
             "ram" => {
                 self.tools.ram_wait = false;
@@ -714,7 +717,7 @@ impl Front {
             ui.s.animating = true;
             if k >= 1.0 {
                 self.closing = None;
-                self.send(json!({"cmd": "close"}));
+                self.send(Cmd::Close { refocus: true });
             }
         }
         ui.end();
@@ -741,7 +744,7 @@ impl Front {
             // Niveaux en direct : demandés 15 fois par seconde, seulement quand l'onglet est affiché.
             if now.duration_since(self.levels_at) >= Duration::from_millis(66) {
                 self.levels_at = now;
-                self.send(json!({"cmd": "levels"}));
+                self.send(Cmd::Levels);
             }
             self.wake_in(Duration::from_millis(66));
         }
@@ -822,13 +825,13 @@ impl Front {
 
     pub fn set_fullscreen(&mut self, on: bool) {
         self.fullscreen = on;
-        self.send(json!({"cmd": "fullscreen", "on": on}));
+        self.send(Cmd::Fullscreen(on));
     }
 
     /// Agrandit la fenêtre, ou la remet à sa taille et sa place d'avant (gardées par Windows).
     pub fn toggle_max(&mut self) {
         self.maximized = !self.maximized; // icône à jour tout de suite, confirmée au dessin suivant
-        self.send(json!({"cmd": "maximize", "on": self.maximized}));
+        self.send(Cmd::Maximize(self.maximized));
     }
 
     /// Info-bulle sous un bouton survolé plus de 0,5 s (un seul calque, rien tant que la souris bouge ailleurs).
@@ -925,7 +928,7 @@ impl Front {
         rx -= 4.0 + 36.0;
         let q = r(rx, 9.0, 36.0, 32.0);
         if ui.wbtn(id("wMin"), q, "min", false) {
-            self.send(json!({"cmd": "minimize"}));
+            self.send(Cmd::Minimize);
         }
         self.tooltip(ui, id("wMin"), q, "Réduire");
         if self.recording {
@@ -945,7 +948,7 @@ impl Front {
             if ui.i.dbl {
                 self.toggle_max();
             } else {
-                self.send(json!({"cmd": "drag"}));
+                self.send(Cmd::Drag);
             }
         }
     }
@@ -993,11 +996,11 @@ impl Front {
             if close {
                 self.admin_note_closed = true;
             } else if go && on {
-                self.send(json!({"cmd": "relaunch_admin"}));
+                self.send(Cmd::RelaunchAdmin);
             } else if go {
                 // Une seule autorisation Windows, puis relance en administrateur (voir « Avancé »).
                 self.admin_busy = true;
-                self.send(json!({"cmd": "admin_mode", "value": true}));
+                self.send(Cmd::AdminMode(true));
             }
         }
         // bandeau des réglages
@@ -1116,7 +1119,8 @@ impl Front {
                 self.ctx = None;
                 ui.s.block = None;
                 match act {
-                    "open" | "open_folder" => self.send(json!({"cmd": "video_action", "action": act, "path": path})),
+                    "open" => self.send(Cmd::Video(VideoAct::Open, path)),
+                    "open_folder" => self.send(Cmd::Video(VideoAct::OpenFolder, path)),
                     "play" => {
                         self.pick(Some(path));
                         self.player.toggle();
@@ -1153,10 +1157,10 @@ impl Front {
                 self.player.close();
             }
             let paths = std::mem::take(&mut self.v_multi);
-            self.send(json!({"cmd": "delete_videos", "paths": paths}));
+            self.send(Cmd::DeleteVideos(paths.into_iter().collect()));
         } else if let Some(p) = self.v_sel.clone() {
             self.player.close();
-            self.send(json!({"cmd": "video_action", "action": "delete", "path": p}));
+            self.send(Cmd::Video(VideoAct::Delete, p));
         }
         self.del_box = false;
     }
@@ -1191,7 +1195,7 @@ impl Front {
         if ui.btn(id("upd-go"), b, &label, (!busy).then_some("dl"), Btn::P.off(busy)) {
             self.upd_err = None;
             self.upd_text = Some(if self.upd_ready { "Installing…" } else { "Downloading…" }.into());
-            self.send(json!({"cmd": "update_install"}));
+            self.send(Cmd::UpdateInstall);
         }
         match &self.upd_err {
             Some(e) => centered(ui, q.y + 226.0, 18.0, e, F::s(12.0, 400), hex(0xffb4a8)),
@@ -1200,7 +1204,7 @@ impl Front {
         centered(ui, q.y + 262.0, 18.0, "Thanks for clipping with us", F::s(12.0, 500), pal::SIGNAL.a(0.85));
         // Glisser la fenêtre : appui hors de l'encadré.
         if ui.i.pressed && ui.s.active == 0 && !q.has(ui.i.mouse) && self.intro.is_none() {
-            self.send(json!({"cmd": "drag"}));
+            self.send(Cmd::Drag);
         }
     }
 

@@ -3,9 +3,12 @@
 mod audio;
 mod barui;
 mod capture;
+mod cmd;
+mod clipplan;
 mod config;
 mod drivers;
 mod elevate;
+mod foreground;
 mod front;
 mod front_a;
 mod front_b;
@@ -24,8 +27,10 @@ mod tools;
 mod tray;
 mod update;
 mod ui;
+mod watchdog;
 mod widgets;
 
+use crate::cmd::{Cmd, VideoAct};
 use config::Config;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde_json::{Value, json};
@@ -43,10 +48,12 @@ pub enum UserEvent {
     TrayClick,
     /// Souris sur l'icône : températures du menu rafraîchies.
     TrayHover,
-    Ipc(ui::Kind, String),
+    /// Commande de la fenêtre, de la barre, de l'icône ou d'un fil de fond (cmd.rs).
+    Cmd(ui::Kind, Cmd),
     /// Message à envoyer à toutes les fenêtres ouvertes (`window.__on`).
     Push(Value),
-    /// Fin d'un clip / REC lancé dans un fil (toast + son) : fichier et durée réelle, sondée dans ce fil.
+    /// Fin d'un clip / REC lancé dans un fil (toast + son) : fichier et durée de ses images (lue dans les segments,
+    /// contrôlée ensuite par `verify`).
     Saved(Result<(PathBuf, f64), String>, &'static str),
     /// Une fenêtre doit être redessinée (image du lecteur arrivée, fin de lecture).
     Redraw(ui::Kind),
@@ -112,7 +119,7 @@ fn eco(on: bool) {
 fn look_for_update(p: &EventLoopProxy<UserEvent>) -> Result<bool, String> {
     let Some(r) = update::check()? else { return Ok(false) };
     *update::FOUND.lock().unwrap() = Some(r.clone());
-    let _ = p.send_event(UserEvent::Ipc(ui::Kind::Main, json!({"cmd": "update_found", "version": r.version}).to_string()));
+    let _ = p.send_event(UserEvent::Cmd(ui::Kind::Main, Cmd::UpdateFound(r.version.clone())));
     match update::download(&r) {
         Ok(path) => {
             *update::READY.lock().unwrap() = Some(path);
@@ -263,7 +270,7 @@ fn game_folder(cfg: &Config, focused: isize) -> String {
         return "Bureau".into();
     }
     // Jeu plein écran au premier plan : retenu, l'overlay le reconnaîtra ensuite même en fond.
-    if h as isize == focused && capture::fullscreen_foreground() {
+    if h as isize == focused && crate::foreground::fullscreen_foreground() {
         overlay::learn_game(&exe);
     }
     let mut buf = [0u16; 128];
@@ -619,7 +626,7 @@ impl App {
         win.present();
         self.wake[i] = if animating || acted || !cmds.is_empty() { Some(now + std::time::Duration::from_millis(15)) } else { next.map(|d| now + d) };
         for c in cmds {
-            self.ipc(kind, &c.to_string(), target);
+            self.ipc(kind, c, target);
         }
     }
 
@@ -660,7 +667,7 @@ impl App {
         let (p, g) = (self.proxy.clone(), self.bar_gen);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = p.send_event(UserEvent::Ipc(ui::Kind::Bar, json!({"cmd": "bar_hidden", "gen": g}).to_string()));
+            let _ = p.send_event(UserEvent::Cmd(ui::Kind::Bar, Cmd::BarHidden(g)));
         });
         let h = std::mem::take(&mut self.bar_prev) as windows_sys::Win32::Foundation::HWND;
         if refocus && !h.is_null() && unsafe { IsWindow(h) } != 0 {
@@ -698,7 +705,7 @@ impl App {
         }
         let (c, b, p) = (self.cfg_for_game(), self.buffer.clone(), self.proxy.clone());
         std::thread::spawn(move || {
-            let r = capture::save_clip(&c, &b.dir).map(|p| { let s = capture::probe(&c, &p).secs; (p, s) });
+            let r = capture::save_clip(&c, &b.dir);
             let _ = p.send_event(UserEvent::Saved(r, "clip"));
         });
     }
@@ -709,12 +716,7 @@ impl App {
             return self.push(&json!({"type": "toast", "kind": "error", "text": "Clipping désactivé : activez-le pour enregistrer."}));
         }
         if self.recording.take().is_none() {
-            if let Err(e) = capture::rec_start(&self.cfg, &self.buffer) {
-                sound(&self.cfg, sounds::Sound::Error);
-                log(&e);
-                self.push(&json!({"type": "toast", "kind": "error", "text": e}));
-                return;
-            }
+            capture::rec_start(&self.buffer);
             self.recording = Some(Instant::now());
             // Dossier du jeu au début du REC (à l'arrêt, le jeu peut être fermé ou la barre ouverte).
             self.rec_dir = self.cfg_for_game().out_dir;
@@ -729,8 +731,7 @@ impl App {
             }
             let (c, b, p) = (c, self.buffer.clone(), self.proxy.clone());
             std::thread::spawn(move || {
-                // Durée sondée ici (ffprobe) : avant, dans le fil de l'interface, fenêtre et barre se figeaient.
-                let r = capture::rec_stop(&c, &b).map(|p| { let s = capture::probe(&c, &p).secs; (p, s) });
+                let r = capture::rec_stop(&c, &b);
                 let _ = p.send_event(UserEvent::Saved(r, "rec"));
             });
         }
@@ -746,34 +747,29 @@ impl App {
         });
     }
 
-    fn ipc(&mut self, kind: ui::Kind, body: &str, target: &EventLoopWindowTarget<UserEvent>) {
-        let Ok(m) = serde_json::from_str::<Value>(body) else { return };
-        let s = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        match m["cmd"].as_str().unwrap_or("") {
-            "set" => self.set(&s("key"), m["value"].clone()),
-            "set_many" => {
-                let items: Vec<(String, Value)> = m["values"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect();
+    fn ipc(&mut self, kind: ui::Kind, cmd: Cmd, target: &EventLoopWindowTarget<UserEvent>) {
+        match cmd {
+            Cmd::SetMany(values) => {
+                let items: Vec<(String, Value)> = values.into_iter().collect();
                 self.set_many(&items);
             }
             // Vidéo en grand écran : la fenêtre suit (sinon la vidéo ne remplit que la fenêtre).
-            "fullscreen" => {
+            Cmd::Fullscreen(on) => {
                 if let Some(w) = &self.main {
-                    let on = m["on"].as_bool().unwrap_or(false);
                     w.window.set_fullscreen(on.then_some(tao::window::Fullscreen::Borderless(None)));
                 }
             }
             // Bouton carré, F11, double-clic sur la barre de titre. Ni recréation de la fenêtre ni animation :
             // Windows la redimensionne, l'interface est redessinée une fois à la nouvelle taille.
-            "maximize" => {
+            Cmd::Maximize(on) => {
                 if let Some(w) = &self.main {
-                    w.window.set_maximized(m["on"].as_bool().unwrap_or(!w.window.is_maximized()));
+                    w.window.set_maximized(on);
                     w.window.request_redraw();
                 }
             }
-            "overlay_toggle" => self.toggle_overlay(),
+            Cmd::OverlayToggle => self.toggle_overlay(),
             // Outils > « Ouvrir » : les dossiers d'une catégorie de nettoyage dans l'Explorateur (lecture seule).
-            "clean_open" => {
-                let id = s("id");
+            Cmd::CleanOpen(id) => {
                 if id == "recycle" {
                     return explorer("shell:RecycleBinFolder");
                 }
@@ -785,8 +781,8 @@ impl App {
             // Ctrl+R / F5 dans la fenêtre : rouverte avec les réglages actuels (sinon la page rechargée
             // reprend ceux de l'ouverture, ex. l'intro désactivée revenait).
             // Fin de l'animation de sortie : la fenêtre est cachée (sauf si la barre a été rouverte entre-temps).
-            "bar_hidden" => {
-                if !self.bar_open && m["gen"].as_u64() == Some(self.bar_gen) {
+            Cmd::BarHidden(g) => {
+                if !self.bar_open && g == self.bar_gen {
                     if let Some(w) = &mut self.bar {
                         ui::conceal_bar(&w.window);
                         w.release(); // tampon rendu : la barre cachée ne garde presque rien en mémoire
@@ -796,17 +792,17 @@ impl App {
                 }
             }
             // Galerie de la barre : les derniers clips.
-            "recent" => {
+            Cmd::Recent => {
                 let c = self.cfg.clone();
                 self.bg(move |p| list_videos(&c, p, Some(4)));
             }
-            "update_found" => {
-                self.update = m["version"].as_str().map(String::from);
+            Cmd::UpdateFound(version) => {
+                self.update = Some(version);
                 self.push(&json!({"type": "update", "version": self.update}));
             }
             // Bouton « Installer » du bandeau : téléchargement vérifié puis installateur silencieux,
             // qui ferme Clipper et le relance à jour.
-            "update_install" => self.bg(|p| {
+            Cmd::UpdateInstall => self.bg(|p| {
                 // La release reste en attente : un échec (réseau) n'empêche pas de réessayer. Installateur déjà
                 // téléchargé d'avance : utilisé tel quel (download le revérifie sur le disque sinon).
                 let ready = update::READY.lock().unwrap().clone().filter(|f| f.exists());
@@ -828,17 +824,17 @@ impl App {
                 }
             }),
             // Bouton « Installer FFmpeg » : winget dans une fenêtre visible, puis Clipper se met à jour seul.
-            "install_ffmpeg" => {
+            Cmd::InstallFfmpeg => {
                 let p = self.proxy.clone();
                 std::thread::spawn(move || {
                     let ok = std::process::Command::new("winget")
                         .args(["install", "-e", "--id", "Gyan.FFmpeg", "--scope", "user", "--accept-package-agreements", "--accept-source-agreements"])
                         .status()
                         .is_ok_and(|s| s.success());
-                    let _ = p.send_event(UserEvent::Ipc(ui::Kind::Main, json!({"cmd": "ffmpeg_installed", "ok": ok}).to_string()));
+                    let _ = p.send_event(UserEvent::Cmd(ui::Kind::Main, Cmd::FfmpegInstalled(ok)));
                 });
             }
-            "ffmpeg_installed" => {
+            Cmd::FfmpegInstalled(_) => {
                 (self.ffmpeg_ok, self.encoders, self.monitors) = capture::startup_probes(&self.cfg, true);
                 if self.ffmpeg_ok {
                     self.cfg.encoder = capture::resolve_encoder(&self.cfg, &self.encoders, &self.gpus);
@@ -854,19 +850,19 @@ impl App {
                     self.open(ui::Kind::Main, target, None);
                 }
             }
-            "clip" => self.clip(),
-            "rec" => self.toggle_rec(),
-            "open_settings" => {
+            Cmd::Clip => self.clip(),
+            Cmd::Rec => self.toggle_rec(),
+            Cmd::OpenSettings(tab) => {
                 self.hide_bar(false);
-                self.open(ui::Kind::Main, target, m.get("tab").and_then(Value::as_str));
+                self.open(ui::Kind::Main, target, tab.as_deref());
             }
-            "close" => match kind {
+            Cmd::Close { refocus } => match kind {
                 // La page a déjà joué son fondu : fenêtre cachée d'abord, puis détruite (pas d'écran blanc).
                 ui::Kind::Main => self.close_main(),
                 // Échap ou clic dans le vide autour de la barre.
-                ui::Kind::Bar => self.hide_bar(m["refocus"].as_bool().unwrap_or(true)),
+                ui::Kind::Bar => self.hide_bar(refocus),
             },
-            "minimize" => {
+            Cmd::Minimize => {
                 // Option « Réduire dans la zone de notification » : la fenêtre disparaît (mémoire de l'interface
                 // libérée) et Clipper reste près de l'horloge ; sinon réduction classique dans la barre des tâches.
                 if self.cfg.minimize_to_tray {
@@ -875,13 +871,12 @@ impl App {
                     w.window.set_minimized(true);
                 }
             }
-            "drag" => {
+            Cmd::Drag => {
                 if let Some(w) = &self.main {
                     let _ = w.window.drag_window();
                 }
             }
-            "pick_folder" => {
-                let key = s("key");
+            Cmd::PickFolder(key) => {
                 let cur = if key == "buffer_dir" { &self.cfg.buffer_dir } else { &self.cfg.out_dir };
                 if let Some(dir) = rfd::FileDialog::new().set_directory(cur).pick_folder() {
                     let dir = if key == "buffer_dir" { dir.join("Clipper-buffer") } else { dir };
@@ -889,32 +884,27 @@ impl App {
                     self.push(&json!({"type": "folder", "key": key, "path": dir, "free_bytes": disk_free(&dir)}));
                 }
             }
-            "disk_free" => {
-                let p = PathBuf::from(s("path"));
+            Cmd::DiskFree(p) => {
                 self.push(&json!({"type": "disk", "path": p, "free_bytes": disk_free(&p)}));
             }
-            "videos" => {
+            Cmd::Videos => {
                 let c = self.cfg.clone();
                 self.bg(move |p| list_videos(&c, p, None));
             }
-            "video_action" => self.video_action(&s("action"), Path::new(&s("path")), &s("name")),
-            "delete_videos" => {
-                let paths: Vec<PathBuf> = m.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(PathBuf::from).collect()).unwrap_or_default();
-                self.delete_videos(paths);
-            }
-            "levels" => {
+            Cmd::Video(act, path) => self.video_action(act, &path),
+            Cmd::DeleteVideos(paths) => self.delete_videos(paths),
+            Cmd::Levels => {
                 let peak = |src: &audio::Source| f32::from_bits(src.peak.swap(0, std::sync::atomic::Ordering::Relaxed));
                 let (g, mi) = self.audio.as_ref().map_or((0.0, 0.0), |a| (peak(&a.game), peak(&a.mic)));
                 self.push(&json!({"type": "levels", "game": g, "mic": mi}));
             }
-            "driver_check" => {
-                let studio = s("branch") == "studio";
+            Cmd::DriverCheck(branch) => {
+                let studio = branch == "studio";
                 self.set("driver_branch", json!(if studio { "studio" } else { "game_ready" }));
                 // Carte et version installée relues à chaque vérification, hors du fil de l'interface : après une
                 // mise à jour du pilote (par Clipper ou non), l'onglet montre la nouvelle version. Détection
                 // ratée au lancement (pilote en cours d'installation) : rattrapée ici.
                 let known = self.gpu.as_ref().map(|g| (g.name.clone(), g.driver.clone()));
-                let branch = s("branch");
                 self.bg(move |p| {
                     let Some((name, inst)) = drivers::installed().map(|g| (g.name, g.driver)).or(known) else {
                         return json!({"type": "driver", "status": "nogpu"});
@@ -930,7 +920,7 @@ impl App {
                     }
                 });
             }
-            "driver_install" => {
+            Cmd::DriverInstall => {
                 let Some(url) = self.driver_url.clone() else { return };
                 let before = self.gpu.as_ref().map(|g| g.driver.clone()).unwrap_or_default();
                 self.bg(move |p| {
@@ -971,7 +961,7 @@ impl App {
                     }
                 });
             }
-            "clean_scan" => {
+            Cmd::CleanScan => {
                 let keep = vec![self.cfg.buffer_dir.clone()];
                 self.bg(move |_| {
                     let items: Vec<Value> = tools::CATEGORIES
@@ -984,8 +974,7 @@ impl App {
                     json!({"type": "clean", "items": items})
                 });
             }
-            "clean_run" => {
-                let ids: Vec<String> = m["ids"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
+            Cmd::CleanRun(ids) => {
                 let keep = vec![self.cfg.buffer_dir.clone()];
                 self.bg(move |_| {
                     let known = |id: &str| tools::CATEGORIES.iter().find(|c| c.id == id);
@@ -1007,30 +996,27 @@ impl App {
                     json!({"type": "clean_done", "freed_bytes": freed, "skipped": skipped})
                 });
             }
-            "admin_mode" => {
-                let on = m["value"].as_bool().unwrap_or(false);
+            Cmd::AdminMode(on) => {
                 self.bg(move |_| {
                     let ok = tools::run_elevated(&format!("--admin-task {}", if on { "on" } else { "off" })).is_ok_and(|c| c == 0);
                     json!({"type": "admin", "ok": ok, "on": on})
                 });
             }
-            "autostart" => {
-                let on = m["value"].as_bool().unwrap_or(false);
+            Cmd::Autostart(on) => {
                 if !elevate::set_autostart(on) {
                     self.push(&json!({"type": "toast", "kind": "error", "text": "Impossible de modifier le démarrage avec Windows."}));
                 }
                 self.push(&json!({"type": "autostart", "on": elevate::autostart()}));
             }
-            "relaunch_admin" => self.relaunch(),
-            "ram_clean" => self.bg(|_| {
+            Cmd::RelaunchAdmin => self.relaunch(),
+            Cmd::RamClean => self.bg(|_| {
                 let (before, total) = tools::ram();
-                let game = capture::fullscreen_foreground();
+                let game = crate::foreground::fullscreen_foreground();
                 let ok = tools::run_elevated(if game { "--clean-ram --standby-only" } else { "--clean-ram" }).is_ok();
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 let (after, _) = tools::ram();
                 json!({"type": "ram", "free_before": before, "free_after": if ok { after } else { before }, "total": total, "ok": ok})
             }),
-            other => log(&format!("commande UI inconnue : {other}")),
         }
     }
 
@@ -1060,8 +1046,7 @@ impl App {
             *slot = value.clone();
             restart |= !live.contains(&key.split('.').next().unwrap_or(""));
         }
-        let Ok(mut new) = serde_json::from_value::<Config>(v) else { return log("valeurs refusées") };
-        new.rec = new.clip; // une seule qualité : le REC réutilise toujours le buffer
+        let Ok(new) = serde_json::from_value::<Config>(v) else { return log("valeurs refusées") };
         let keys_changed = (&new.key_clip, &new.key_rec, &new.key_bar, &new.key_overlay, &new.key_clipping) != (&self.cfg.key_clip, &self.cfg.key_rec, &self.cfg.key_bar, &self.cfg.key_overlay, &self.cfg.key_clipping);
         self.cfg = new;
         if keys_changed {
@@ -1151,9 +1136,9 @@ impl App {
         });
     }
 
-    fn video_action(&mut self, action: &str, path: &Path, name: &str) {
+    fn video_action(&mut self, action: VideoAct, path: &Path) {
         // Dossier vide de l'onglet Vidéos : ouvre le dossier de « Emplacements ».
-        if action == "open_folder" && path == self.cfg.out_dir.as_path() {
+        if action == VideoAct::OpenFolder && path == self.cfg.out_dir.as_path() {
             let _ = std::fs::create_dir_all(path);
             return explorer(&format!("\"{}\"", path.display()));
         }
@@ -1162,10 +1147,10 @@ impl App {
             return log("action vidéo refusée hors du dossier de sortie");
         }
         match action {
-            "open_folder" => return explorer(&format!("/select,\"{}\"", path.display())),
+            VideoAct::OpenFolder => return explorer(&format!("/select,\"{}\"", path.display())),
             // Lecteur par défaut de Windows.
-            "open" => return explorer(&format!("\"{}\"", path.display())),
-            "delete" => {
+            VideoAct::Open => return explorer(&format!("\"{}\"", path.display())),
+            VideoAct::Delete => {
                 // Réglage « Supprimer définitivement » : le fichier est effacé, sans passer par la Corbeille.
                 let (thumb, strip) = (capture::thumb_path(path), capture::strip_path(path));
                 let gone = if self.cfg.delete_permanent { std::fs::remove_file(path).is_ok() } else { to_recycle_bin(path) };
@@ -1174,7 +1159,7 @@ impl App {
                     let _ = std::fs::remove_file(strip);
                 }
             }
-            "rename" => {
+            VideoAct::Rename(name) => {
                 let clean: String = name.trim().chars().filter(|c| !r#"\/:*?"<>|"#.contains(*c)).collect();
                 if clean.is_empty() {
                     return;
@@ -1186,7 +1171,6 @@ impl App {
                     let _ = std::fs::rename(path, &to);
                 }
             }
-            _ => {}
         }
         let c = self.cfg.clone();
         self.bg(move |p| list_videos(&c, p, None));
@@ -1239,7 +1223,8 @@ fn main() {
     let gpus = capture::gpus();
     cfg.encoder = capture::resolve_encoder(&cfg, &encoders, &gpus);
     let native = capture::native_of(&monitors, cfg.monitor).unwrap_or((1920, 1080));
-    log(&format!("encodeurs {encoders:?}, choisi {}, écran {native:?}", cfg.encoder));
+    let chips: Vec<&str> = gpus.iter().map(|g| g.name.as_str()).collect();
+    log(&format!("encodeurs {encoders:?}, choisi {} (puce {}), écran {native:?}, cartes {chips:?}", cfg.encoder, capture::effective_chip(&cfg, &gpus).unwrap_or_default()));
     // Lancé avec Windows (icône seule, PC démarré depuis moins de 3 min) : la capture et la recherche des jeux
     // attendent 20 s, pour ne pas ralentir l'ouverture de la session. Clipper n'est encore utile à personne.
     let boot = tray_start && unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() } < 180_000;
@@ -1263,6 +1248,8 @@ fn main() {
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = proxy.send_event(UserEvent::Menu(e.id));
     }));
+    let proxy = event_loop.create_proxy();
+    let _ = capture::ON_THUMB.set(Box::new(move || drop(proxy.send_event(UserEvent::Push(json!({"type": "thumbs_ready"}))))));
     let proxy = event_loop.create_proxy();
     std::thread::spawn(move || loop {
         unsafe { WaitForSingleObject(ev as _, INFINITE) };
@@ -1421,7 +1408,7 @@ fn main() {
                     app.toggle_clipping();
                 }
             }
-            Event::UserEvent(UserEvent::Ipc(kind, body)) => app.ipc(kind, &body, target),
+            Event::UserEvent(UserEvent::Cmd(kind, c)) => app.ipc(kind, c, target),
             Event::UserEvent(UserEvent::Push(v)) => {
                 if v["type"] == "driver_url" {
                     app.driver_url = v["url"].as_str().map(String::from);
@@ -1450,7 +1437,7 @@ fn main() {
                 log(&format!("{kind} : {r:?}"));
                 let msg = match &r {
                     Ok((p, secs)) => {
-                        // Durée réelle du fichier (pas celle du réglage) : un clip trop court se voit tout de suite.
+                        // Durée des images emportées (pas celle du réglage) : un clip trop court se voit tout de suite.
                         let secs = secs.round() as u64;
                         let len = if secs >= 60 { format!("{} min {:02} s", secs / 60, secs % 60) } else { format!("{secs} s") };
                         log(&format!("{kind} : {len}"));
@@ -1533,7 +1520,7 @@ fn main() {
                     });
                 } else if m == *tm.ram.id() {
                     // Même chemin que le bouton de l'onglet Outils (autorisation administrateur demandée).
-                    let _ = app.proxy.send_event(UserEvent::Ipc(ui::Kind::Main, r#"{"cmd":"ram_clean"}"#.into()));
+                    let _ = app.proxy.send_event(UserEvent::Cmd(ui::Kind::Main, Cmd::RamClean));
                 }
             }
             Event::UserEvent(UserEvent::Quit) => {

@@ -116,9 +116,8 @@ fn capture(src: Arc<Source>, dir: Direction, id: Option<String>, stop: Arc<Atomi
 pub struct Audio {
     pub game: Arc<Source>,
     pub mic: Arc<Source>,
-    /// Pipes par instance ffmpeg : slot 0 = buffer, slot 1 = REC aux réglages différents.
-    /// Chaque slot reçoit un pipe par piste activée : (piste, pipe).
-    slots: Arc<Mutex<[Vec<(Track, File)>; 2]>>,
+    /// Pipes du ffmpeg de la capture : un par piste activée, (piste, pipe).
+    pipes: Arc<Mutex<Vec<(Track, File)>>>,
     stop: Arc<AtomicBool>,
     /// Volume du PC, gain du micro (volume x boost, 0 = coupé) et boost, en bits f32 : changés en direct par
     /// `levels` (avant : chaque changement relançait ffmpeg, ~1 s de trou dans le buffer).
@@ -127,7 +126,7 @@ pub struct Audio {
 
 impl Audio {
     pub fn start(cfg: &Config) -> Arc<Self> {
-        let a = Arc::new(Self { game: Arc::default(), mic: Arc::default(), slots: Arc::default(), stop: Arc::default(), gains: Default::default() });
+        let a = Arc::new(Self { game: Arc::default(), mic: Arc::default(), pipes: Arc::default(), stop: Arc::default(), gains: Default::default() });
         a.levels(cfg);
         capture(a.game.clone(), Direction::Render, cfg.out_device.clone(), a.stop.clone());
         capture(a.mic.clone(), Direction::Capture, cfg.mic_device.clone(), a.stop.clone());
@@ -196,46 +195,40 @@ impl Audio {
                 m.iter_mut().for_each(|s| *s = soft_limit(*s));
             }
             let bytes = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
-            let mut slots = self.slots.lock().unwrap();
-            if slots.iter().all(Vec::is_empty) {
+            let mut pipes = self.pipes.lock().unwrap();
+            if pipes.is_empty() {
                 continue;
             }
             let mix = bytes(&g.iter().zip(&m).map(|(a, b)| (a + b).clamp(-1.0, 1.0)).collect::<Vec<_>>());
             let (gb, mb) = (bytes(&g), bytes(&m));
-            for pipes in slots.iter_mut() {
-                let ok = pipes.iter_mut().all(|(t, f)| {
-                    f.write_all(match t {
-                        Track::Mix => &mix,
-                        Track::Game => &gb,
-                        Track::Mic => &mb,
-                    })
-                    .is_ok()
-                });
-                if !ok {
-                    pipes.clear(); // ffmpeg arrêté : on attend les pipes de la prochaine instance
-                }
+            let ok = pipes.iter_mut().all(|(t, f)| {
+                f.write_all(match t {
+                    Track::Mix => &mix,
+                    Track::Game => &gb,
+                    Track::Mic => &mb,
+                })
+                .is_ok()
+            });
+            if !ok {
+                pipes.clear(); // ffmpeg arrêté : on attend les pipes de la prochaine instance
             }
         }
     }
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        *self.slots.lock().unwrap() = Default::default();
+        self.pipes.lock().unwrap().clear();
     }
 
-    pub fn close_slot(&self, slot: usize) {
-        self.slots.lock().unwrap()[slot].clear();
-    }
-
-    /// Crée les pipes d'une nouvelle instance ffmpeg dans `slot`. Renvoie les chemins à passer en `-i`.
-    pub fn open_pipes(self: &Arc<Self>, slot: usize, tracks: &[Track], tag: u64) -> Vec<String> {
+    /// Crée les pipes d'une nouvelle instance ffmpeg. Renvoie les chemins à passer en `-i`.
+    pub fn open_pipes(self: &Arc<Self>, tracks: &[Track], tag: u64) -> Vec<String> {
         let count = tracks.len();
         // Numéro unique au processus : après une relance de capture, l'ancien pipe peut encore exister
         // (fil bloqué dans ConnectNamedPipe) et un nom réutilisé faisait échouer CreateNamedPipeW (buffer sans son).
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        self.slots.lock().unwrap()[slot].clear();
-        let names: Vec<String> = (0..count).map(|i| format!(r"\\.\pipe\clipper-{}-{slot}-{tag}-{seq}-{i}", std::process::id())).collect();
+        self.pipes.lock().unwrap().clear();
+        let names: Vec<String> = (0..count).map(|i| format!(r"\\.\pipe\clipper-{}-{tag}-{seq}-{i}", std::process::id())).collect();
         let mut files = vec![];
         for n in &names {
             match create_pipe(n) {
@@ -250,7 +243,7 @@ impl Audio {
             for (_, f) in &files {
                 unsafe { windows_sys::Win32::System::Pipes::ConnectNamedPipe(f.as_raw_handle() as _, std::ptr::null_mut()) };
             }
-            a.slots.lock().unwrap()[slot] = files;
+            *a.pipes.lock().unwrap() = files;
         });
         names
     }

@@ -22,8 +22,8 @@ pub struct Quality {
 #[serde(default)]
 pub struct Config {
     pub buffer_secs: u32,
+    /// Qualité du buffer, donc des Clips et des REC (le REC garde les segments du buffer).
     pub clip: Quality,
-    pub rec: Quality,
     pub encoder: String,
     /// Multiplicateur de débit, 0.5 à 1.5.
     pub quality: f32,
@@ -103,7 +103,6 @@ impl Default for Config {
         Self {
             buffer_secs: 180,
             clip: Quality { height: 1080, fps: 60 },
-            rec: Quality { height: 1080, fps: 60 },
             encoder: "h264_nvenc".into(),
             quality: 1.0,
             profile: "perf".into(),
@@ -191,7 +190,6 @@ impl Config {
                 _ => vec!["mix".into()],
             };
         }
-        c.rec = c.clip; // une seule qualité pour le Clip et le REC
         c
     }
 

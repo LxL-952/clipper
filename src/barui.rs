@@ -1,5 +1,6 @@
 //! Barre Alt+Z, dessinée nativement dans une fenêtre à transparence par pixel : la barre, une notification,
 //! les derniers clips et un lecteur sur place. Mêmes commandes et mêmes messages que l'ancienne page.
+use crate::cmd::{Cmd, VideoAct};
 use crate::config::Config;
 use crate::front::{dur, pretty};
 use crate::gfx::{Col, F, R, hex, pal, r, text_w};
@@ -26,7 +27,7 @@ pub struct BarUi {
     pub overlay_on: bool,
     pub recording: bool,
     pub rec_t0: Instant,
-    pub out: Vec<Value>,
+    pub out: Vec<Cmd>,
     pub shown: bool,
     /// Début de l'animation d'entrée, ou de sortie.
     anim_in: Instant,
@@ -88,8 +89,8 @@ impl BarUi {
         }
     }
 
-    fn send(&mut self, v: Value) {
-        self.out.push(v);
+    fn send(&mut self, c: Cmd) {
+        self.out.push(c);
     }
 
     fn set(&mut self, key: &str, value: Value) {
@@ -113,8 +114,8 @@ impl BarUi {
     fn flush(&mut self) {
         self.flush_at = None;
         if !self.pend.is_empty() {
-            let values = Value::Object(std::mem::take(&mut self.pend));
-            self.send(json!({"cmd": "set_many", "values": values}));
+            let values = std::mem::take(&mut self.pend);
+            self.send(Cmd::SetMany(values));
         }
     }
 
@@ -152,7 +153,7 @@ impl BarUi {
                 self.rec_t0 = Instant::now() - Duration::from_secs(m["rec_secs"].as_u64().unwrap_or(0));
                 (self.shown, self.anim_in, self.anim_out, self.busy, self.toast) = (true, Instant::now(), None, false, None);
                 self.pend.clear();
-                self.send(json!({"cmd": "recent"}));
+                self.send(Cmd::Recent);
             }
             // Fermeture : animation de sortie, lecture arrêtée.
             "hide" => {
@@ -202,7 +203,7 @@ impl BarUi {
                     let path = m["path"].as_str().map(PathBuf::from);
                     self.toast = Some((m["text"].as_str().unwrap_or("").into(), m["kind"] == "error", path.clone(), Instant::now()));
                     if path.is_some() {
-                        self.send(json!({"cmd": "recent"}));
+                        self.send(Cmd::Recent);
                     }
                 }
             }
@@ -309,13 +310,13 @@ impl BarUi {
         let (hit, bw_) = self.bbtn(ui, id("b-clip"), x, y, Some("b-clip"), "Clip", &items[0].1, clip_st);
         if hit && !self.busy {
             self.busy = true;
-            self.send(json!({"cmd": "clip"}));
+            self.send(Cmd::Clip);
         }
         x += bw_ + 2.0;
         let rec_st = (if self.recording { pal::REC } else { pal::TEXT }, pal::TEXT3, None, 104.0);
         let (hit, bw_) = self.bbtn(ui, id("b-rec"), x, y, None, &rec_label, &items[1].1, rec_st);
         if hit {
-            self.send(json!({"cmd": "rec"}));
+            self.send(Cmd::Rec);
         }
         x += bw_;
         sep(ui, &mut x);
@@ -353,13 +354,13 @@ impl BarUi {
         let st = (if self.overlay_on { pal::OK } else { pal::TEXT }, pal::TEXT3, None, 0.0);
         let (hit, bw_) = self.bbtn(ui, id("b-stats"), x, y, Some("b-stats"), &items[6].0, &items[6].1, st);
         if hit {
-            self.send(json!({"cmd": "overlay_toggle"}));
+            self.send(Cmd::OverlayToggle);
         }
         x += bw_;
         sep(ui, &mut x);
         let (hit, _) = self.bbtn(ui, id("b-set"), x, y, Some("b-set"), "Réglages", "Échap ferme", plain);
         if hit {
-            self.send(json!({"cmd": "open_settings"}));
+            self.send(Cmd::OpenSettings(None));
         }
 
         // ---------- sous la barre ----------
@@ -481,7 +482,7 @@ impl BarUi {
                 self.close_player();
             }
             if ui.btn(id("pl-open"), r(q.right() - 16.0 - b2 - b1, q.y + 8.0, b1, 32.0), "Ouvrir dans Clipper", None, Btn::N) {
-                self.send(json!({"cmd": "open_settings", "tab": "videos"}));
+                self.send(Cmd::OpenSettings(Some("videos".into())));
             }
             let scr = r(q.x + (pw - sw) / 2.0, q.y + 48.0, sw, sh);
             ui.c.rrect(scr, 6.0, pal::BLACK);
@@ -602,9 +603,9 @@ impl BarUi {
         }
         if let Some(path) = delete {
             self.close_player(); // fichier libéré par ffmpeg avant la suppression
-            self.send(json!({"cmd": "video_action", "action": "delete", "path": path, "name": ""}));
+            self.send(Cmd::Video(VideoAct::Delete, path.clone()));
             self.clips.retain(|c| c.path != path);
-            self.send(json!({"cmd": "recent"}));
+            self.send(Cmd::Recent);
         }
         ui.c.oy = 0.0;
 
@@ -614,7 +615,7 @@ impl BarUi {
                 "Escape" if self.cur.is_some() => self.close_player(),
                 "Escape" => {
                     self.flush();
-                    self.send(json!({"cmd": "close", "refocus": true}));
+                    self.send(Cmd::Close { refocus: true });
                 }
                 "Space" | "KeyK" if self.cur.is_some() => self.player.toggle(),
                 "ArrowLeft" if self.cur.is_some() => {

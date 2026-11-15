@@ -802,7 +802,7 @@ fn pm_text() -> FpsText {
         let table = PM_TABLE.lock().unwrap();
         let empty = std::collections::HashMap::new();
         let table = table.as_ref().unwrap_or(&empty);
-        let (fg, fullscreen) = (TARGET.load(Ordering::Relaxed), crate::capture::fullscreen_foreground());
+        let (fg, fullscreen) = (TARGET.load(Ordering::Relaxed), crate::foreground::fullscreen_foreground());
         let g = pick_game(&count, table, fg, fullscreen, std::process::id(), prev);
         // Jeu vu en plein écran au premier plan, ou qui charge un moteur de jeu : retenu pour la suite.
         if let Some(p) = g.filter(|&p| (fullscreen && belongs(p, fg, table)) || uses_game_engine(p)) {
@@ -886,7 +886,7 @@ fn pm_text() -> FpsText {
 fn pm_diag(count: &std::collections::HashMap<u32, usize>) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     let fg = TARGET.load(Ordering::Relaxed);
-    if fg == 0 || !crate::capture::fullscreen_foreground() {
+    if fg == 0 || !crate::foreground::fullscreen_foreground() {
         return;
     }
     let mut last = LAST.lock().unwrap();
@@ -995,7 +995,7 @@ fn refresh(cpu: &mut Cpu, nv: &Option<Nvml>, th: &Option<Thermal>, gc: &Option<c
     // de 0 à 144 sans rien dire. Chiffres d'images seulement pour une appli plein écran (un jeu).
     // Avec PresentMon, le jeu est détecté parmi tous les processus (voir pick_game), fenêtré ou non.
     // Sans lui (ETW DXGI) : seulement l'appli plein écran au premier plan.
-    let f = if PM_ON.load(Ordering::Relaxed) || PM_STARTING.load(Ordering::Relaxed) || crate::capture::fullscreen_foreground() { fps_text() } else { FpsText::same("—", "—") };
+    let f = if PM_ON.load(Ordering::Relaxed) || PM_STARTING.load(Ordering::Relaxed) || crate::foreground::fullscreen_foreground() { fps_text() } else { FpsText::same("—", "—") };
     let rows = items
         .iter()
         .flat_map(|k| {
@@ -1210,7 +1210,7 @@ fn place(h: HWND, rows: usize, look: &Look) {
         } else if let Some(r) = game_monitor(game) {
             *screen = Some(r);
             *SEEN.lock().unwrap() = Some((game, std::time::Instant::now()));
-        } else if crate::capture::fullscreen_foreground() || screen.is_none() {
+        } else if crate::foreground::fullscreen_foreground() || screen.is_none() {
             let mut mi: MONITORINFO = std::mem::zeroed();
             mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
             GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &mut mi);
