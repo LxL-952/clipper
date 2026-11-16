@@ -900,7 +900,6 @@ impl Buffer {
             // bilan toutes les 10 min : relances de ffmpeg, secondes sans image (point de maintien forcé).
             let mut last_src = String::new();
             let (mut nudged, mut bilan, mut spawns_at_bilan) = (0u32, std::time::Instant::now(), 1u64); // 1er lancement : pas une relance
-            let mut away = 0u32;
             // ffmpeg mort juste après son lancement (disque plein, écran indisponible…) : attente croissante
             // avant la relance (2, 4, 8, 16, 30 s). Avant : relancé toutes les 1,3 s sans fin, une ligne de
             // journal à chaque fois.
@@ -982,17 +981,8 @@ impl Buffer {
                         continue;
                     }
                 }
-                let mut tick = 0u32;
-                // Garde-fou : secondes d'encodeur saturé (> 90 %) et de calme (< 50 %) d'affilée.
-                let (mut hot, mut calm) = (0u32, 0u32);
-                // Chien de garde : ffmpeg vivant mais plus rien d'écrit (capture figée) -> relancé. Suivi sur le
-                // numéro ET la taille du dernier segment (écrit image par image, flush_packets=1). À 2 s, le point
-                // de maintien WGC se montre (écran immobile) ; toujours rien à 3 s : session figée (vu au lancement de
-                // CS2, quand il passe en plein écran), relance. Avant : sur le numéro seul, 13 s de trou avant la relance.
-                let (mut last_seg, mut still) = (None::<(u64, u64)>, 0u32);
-                // Jeu qui vient d'entrer en plein écran ou d'en sortir (Alt+Tab) : la session WGC peut s'y figer.
-                // Secondes depuis la dernière bascule (u32::MAX : aucune).
-                let (mut full, mut since_flip) = (crate::foreground::fullscreen_foreground(), u32::MAX);
+                // Décisions de chaque seconde : watchdog::Watch (seuils et compteurs, testés). Ici : relevés et actions.
+                let mut w = crate::watchdog::Watch::new(crate::foreground::fullscreen_foreground(), fails);
                 // Longueur du journal de ffmpeg déjà lue (voir `video_lost`).
                 let mut log_len = 0u64;
                 // Dernier relevé sur l'horloge du buffer : un pas de 250 ms qui dure plus de 5 s = sortie de veille.
@@ -1039,69 +1029,63 @@ impl Buffer {
                         stop_child(&c);
                         break;
                     }
-                    tick += 1;
-                    if tick == 10 {
-                        fails = 0; // a tourné normalement
-                    }
+                    // Relevé de la seconde. Charge de l'encodeur (une lecture NVML) et taille de l'écran (une lecture
+                    // Windows) : une seconde sur deux chacune.
+                    let (read_load, read_screen) = w.reads();
+                    let segs = segments(&d);
+                    let o = crate::watchdog::Obs {
+                        alive: c.lock().unwrap().as_mut().is_some_and(|ch| matches!(ch.try_wait(), Ok(None))),
+                        newest: segs.last().map(|p| (seg_number(p), std::fs::metadata(p).map_or(0, |m| m.len()))),
+                        fullscreen: crate::foreground::fullscreen_foreground(),
+                        encoder: if read_load { crate::overlay::encoder_load() } else { None },
+                        light: LIGHT.load(Ordering::Relaxed),
+                        rec: r.lock().unwrap().is_some(),
+                        screen_changed: read_screen && screen_size(&cfg).is_some_and(|sz| sz != native),
+                        desktop_capture: cfg.desktop_capture,
+                        age: spawned_at.elapsed().as_secs_f64(),
+                    };
+                    let step = w.step(&o);
                     // Notre propre ffmpeg (jamais un autre processus) : rend la RAM froide du pilote.
                     // Mesuré : 100 Mo -> ~14 Mo de RAM physique, sans perte d'images.
-                    if tick == 5 || tick % 60 == 0 {
+                    if step.trim {
                         if let Some(ch) = c.lock().unwrap().as_ref() {
                             trim(ch);
                         }
                     }
-                    // Garde-fou, toutes les 2 s (une lecture NVML) : NVENC saturé 10 s -> mode allégé ; calme
-                    // 2 min en mode allégé -> retour au profil choisi. Chaque bascule relance ffmpeg (~1 s de trou).
-                    if tick % 2 == 0 {
-                        if let Some(u) = crate::overlay::encoder_load() {
-                            let light = LIGHT.load(Ordering::Relaxed);
-                            let flip;
-                            (hot, calm, flip) = crate::watchdog::encoder_guard(u, hot, calm, light);
-                            if flip && r.lock().unwrap().is_none() {
-                                LIGHT.store(!light, Ordering::Relaxed);
-                                crate::log(&format!("capture : encodeur à {u} %, mode {}", if light { "normal rétabli" } else { "allégé (préréglage p1, débit -30 %)" }));
-                                stop_child(&c);
-                                break;
-                            }
-                        }
-                    }
-                    // Résolution de l'écran changée (jeu en plein écran exclusif, résolution étirée) : WGC continue
-                    // en remettant l'image à l'ancienne taille, sans s'arrêter (Desktop Duplication, lui, s'arrêtait).
-                    // Relancé pour enregistrer à la nouvelle taille. Une lecture Windows toutes les 2 s.
-                    if tick % 2 == 1 && screen_size(&cfg).is_some_and(|sz| sz != native) {
-                        stop_child(&c);
-                        break;
-                    }
-                    let alive = c.lock().unwrap().as_mut().is_some_and(|ch| matches!(ch.try_wait(), Ok(None)));
-                    let segs = segments(&d);
-                    let newest = segs.last().map(|p| (seg_number(p), std::fs::metadata(p).map_or(0, |m| m.len())));
-                    still = if newest == last_seg { still + 1 } else { 0 };
-                    last_seg = newest;
                     // WGC sans image depuis 2 s : point de maintien montré, même par-dessus un jeu plein écran.
-                    crate::keepalive::force(crate::watchdog::nudge(still));
-                    nudged += u32::from(crate::watchdog::nudge(still));
+                    crate::keepalive::force(step.nudge);
+                    nudged += u32::from(step.nudge);
                     if bilan.elapsed() >= Duration::from_secs(600) {
                         crate::log(&format!("capture : bilan 10 min : {} relance(s) de ffmpeg, {nudged} s sans image, mode {}", spawns - spawns_at_bilan, if LIGHT.load(Ordering::Relaxed) { "allégé" } else { "normal" }));
                         (nudged, bilan, spawns_at_bilan) = (0, std::time::Instant::now(), spawns);
                     }
-                    let now_full = crate::foreground::fullscreen_foreground();
-                    since_flip = if now_full != full { 0 } else { since_flip.saturating_add(1) };
-                    full = now_full;
-                    // 1 s sans image juste après une bascule plein écran : session figée, relancée tout de suite.
-                    if crate::watchdog::frozen(still, since_flip, alive) {
-                        crate::log(&format!("buffer : ffmpeg ne produit plus de segments depuis {still} s, relance"));
-                        stop_child(&c);
-                        break;
-                    }
-                    if !alive && !s.load(Ordering::Relaxed) {
-                        if spawned_at.elapsed() < Duration::from_secs(6) {
-                            fails += 1;
+                    use crate::watchdog::End;
+                    match step.end {
+                        // Garde-fou : NVENC saturé 10 s -> mode allégé ; calme 2 min -> profil choisi. Chaque bascule
+                        // relance ffmpeg (~1 s de trou), jamais pendant un REC.
+                        Some(End::Light(to)) => {
+                            LIGHT.store(to, Ordering::Relaxed);
+                            crate::log(&format!("capture : encodeur à {} %, mode {}", o.encoder.unwrap_or(0), if to { "allégé (préréglage p1, débit -30 %)" } else { "normal rétabli" }));
+                            stop_child(&c);
+                            break;
                         }
-                        let err = std::fs::read_to_string(d.join("ffmpeg.log")).unwrap_or_default();
+                        // Résolution de l'écran changée (jeu en plein écran exclusif, résolution étirée) : WGC continue
+                        // en remettant l'image à l'ancienne taille. Relancé pour enregistrer à la nouvelle taille.
+                        Some(End::Screen) => {
+                            stop_child(&c);
+                            break;
+                        }
+                        Some(End::Frozen(still)) => {
+                            crate::log(&format!("buffer : ffmpeg ne produit plus de segments depuis {still} s, relance"));
+                            stop_child(&c);
+                            break;
+                        }
                         // Une ligne aux 1er, 2e, 4e, 8e… échecs d'affilée : le journal ne gonfle plus.
-                        if fails <= 1 || fails.is_power_of_two() {
-                            crate::log(&format!("buffer : ffmpeg s'est arrêté, relance dans {} s ({})", crate::watchdog::backoff(fails).as_secs_f32(), err.lines().last().unwrap_or("aucun message")));
+                        Some(End::Died { log: true }) if !s.load(Ordering::Relaxed) => {
+                            let err = std::fs::read_to_string(d.join("ffmpeg.log")).unwrap_or_default();
+                            crate::log(&format!("buffer : ffmpeg s'est arrêté, relance dans {} s ({})", crate::watchdog::backoff(w.fails).as_secs_f32(), err.lines().last().unwrap_or("aucun message")));
                         }
+                        _ => {}
                     }
                     // Jamais un segment d'un REC en cours ni d'un clip en cours d'assemblage.
                     let floor = r.lock().unwrap().unwrap_or(u64::MAX).min(REGISTRY.lock().unwrap().floor().unwrap_or(u64::MAX));
@@ -1111,18 +1095,17 @@ impl Buffer {
                         }
                     }
                     // Retour au bureau plus de 5 s : on coupe ffmpeg (0 % GPU), les segments déjà écrits restent.
-                    away = if !cfg.desktop_capture && !crate::foreground::fullscreen_foreground() { away + 1 } else { 0 };
-                    if away > 5 {
+                    if step.end == Some(End::Away) {
                         if let Some(mut ch) = c.lock().unwrap().take() {
                             let _ = ch.kill();
                         }
-                        away = 0;
                         break;
                     }
-                    if !alive || s.load(Ordering::Relaxed) {
+                    if !o.alive || s.load(Ordering::Relaxed) {
                         break;
                     }
                 }
+                fails = w.fails;
                 REGISTRY.lock().unwrap().end(crate::timeline::now());
                 crate::keepalive::set(crate::keepalive::Owner::Buffer, None);
                 // Attente par tranches de 300 ms : un arrêt (réglage changé, clipping coupé) reste immédiat.
