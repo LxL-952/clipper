@@ -6,3 +6,7 @@
 *.log
 /installer/out/
 /installer/vendor/
+# Sorties locales des outils (graphe du code, vidéo de lancement) et notes de session
+/brag-output/
+/graphify-out/
+/resume-conversation.md
