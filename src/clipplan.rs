@@ -14,6 +14,17 @@ pub fn trim(media: Option<f64>, target: f64, trimmable: bool) -> f64 {
     }
 }
 
+/// Clip le plus court : deux appuis à moins de 5 s donnent quand même un clip regardable (un peu de reprise).
+pub const MIN_CLIP: f64 = 5.0;
+
+/// Durée d'un clip : la durée du buffer, sans reprendre ce que le clip précédent a déjà emporté. Clip à
+/// 10:00, nouveau clip à 10:15 : 15 s, pas une minute dont 45 s déjà vues. `last` : instant du clip
+/// précédent sur l'horloge du buffer. En MKV (pas de liste d'édition), le début n'est pas coupé : jusqu'à
+/// 2 s de reprise (un segment).
+pub fn window(buffer: f64, last: Option<f64>, now: f64) -> f64 {
+    last.map_or(buffer, |l| (now - l).max(MIN_CLIP)).min(buffer)
+}
+
 /// Durée que le fichier fini doit annoncer (contrôlée par `verify`) : la cible si on a coupé, sinon la
 /// durée exacte des images, à défaut celle mesurée sur l'horloge du buffer.
 pub fn expected(media: Option<f64>, clock_secs: f64, trim: f64, target: f64) -> f64 {
@@ -52,6 +63,15 @@ pub fn input(parts: &[Vec<PathBuf>]) -> Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_clip_does_not_repeat_the_previous_one() {
+        assert_eq!(window(60.0, None, 600.0), 60.0, "premier clip : tout le buffer");
+        assert_eq!(window(60.0, Some(600.0), 615.0), 15.0, "15 s après : les 15 s seulement");
+        assert_eq!(window(60.0, Some(600.0), 700.0), 60.0, "longtemps après : tout le buffer");
+        assert_eq!(window(60.0, Some(600.0), 601.0), MIN_CLIP, "double appui : 5 s");
+        assert_eq!(window(3.0, Some(600.0), 601.0), 3.0, "jamais plus que le buffer");
+    }
 
     #[test]
     fn clip_is_trimmed_to_the_buffer_length() {

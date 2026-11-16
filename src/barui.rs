@@ -131,8 +131,7 @@ impl BarUi {
         }
         self.cur = Some(path.clone());
         if video {
-            self.player.open(&path, secs, audio);
-            self.player.toggle(); // lecture tout de suite
+            self.player.open_playing(&path, secs, audio); // lecture tout de suite
         } else {
             self.player.close();
         }
@@ -208,6 +207,8 @@ impl BarUi {
                 }
             }
             "overlay" => self.overlay_on = m["on"].as_bool().unwrap_or(false),
+            // Miniature faite après l'ouverture de la barre : les clips encore sans image la relisent.
+            "thumbs_ready" => self.thumbs.retain(|_, t| t.is_some()),
             _ => {}
         }
     }
@@ -493,7 +494,9 @@ impl BarUi {
             } else {
                 // En attendant la 1re image : la miniature du clip, agrandie (plus de texte qui clignote), puis
                 // fondu vers la vidéo (la miniature est prise à 1 s : sans fondu, l'image sautait).
-                let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                // Clé de la miniature (date de création du clip). Avant : le nom du fichier, qui ne la trouvait
+                // jamais depuis la 1.3 (« Préparation de la lecture… » à la place de l'image).
+                let stem = self.clips.iter().find(|c| c.path == path).map_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), |c| c.stem.clone());
                 let (tw, th) = ((sh * 16.0 / 9.0 * ui.c.s).round() as u32, (sh * ui.c.s).round() as u32);
                 let x0 = scr.x + (scr.w - sh * 16.0 / 9.0) / 2.0;
                 let fade = self.player.fade();

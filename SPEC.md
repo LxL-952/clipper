@@ -136,7 +136,7 @@ D:\clipper
   src/config.rs     config.json (%APPDATA%\Clipper)
   src/capture.rs    encodeurs, args ffmpeg, buffer, clip, REC
   src/watchdog.rs   décisions du superviseur (blocage, plein écran, veille, garde-fou NVENC), testées
-  src/clipplan.rs   règles d'assemblage d'un clip (coupe au début, durée attendue, entrée ffmpeg), testées
+  src/clipplan.rs   règles d'assemblage d'un clip (durée sans reprise du clip précédent, coupe au début, durée attendue, entrée ffmpeg), testées
   src/foreground.rs jeu plein écran au premier plan, bureau sécurisé
   src/timeline.rs   horloge du buffer (segments datés, captures)
   src/keepalive.rs  point invisible qui garde WGC vivant sur un écran immobile
@@ -162,7 +162,7 @@ Minimal (ponytail) : pas d'abstraction sans deuxième usage, pas de crate pour 1
 
 ## Critères de réussite
 - Repos (buffer actif, barre fermée) : CPU app ≈ 0 %, RAM privée app < 30 Mo, 0 processus `msedgewebview2` lancé par l'app.
-- Clip Alt+X : fichier `.mp4` lisible en < 1 s, durée = buffer ± 2 s.
+- Clip Alt+X : fichier `.mp4` lisible en < 1 s, durée = buffer ± 2 s. Un clip ne reprend pas le précédent : 15 s après un clip, le suivant dure 15 s (5 s au moins ; MKV : jusqu'à 2 s de reprise). Voir `clipplan::window`.
 - REC Alt+R : compteur visible dans la barre, fichier final assemblé sans réencodage.
 - Audio : 0/1/2 pistes conformes au mode, `ffprobe` le confirme.
 - Tableau mesuré CPU / RAM / GPU (enc %) pour 1080p60, 1440p60, 2160p60.

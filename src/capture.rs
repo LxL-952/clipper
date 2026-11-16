@@ -1252,7 +1252,7 @@ fn stamp() -> String {
 }
 
 /// Assemble le fichier ; contrôle, miniature et planche d'aperçus suivent en tâche de fond.
-fn save(cfg: &Config, snap: &Snapshot, kind: &str) -> Result<(PathBuf, f64), String> {
+fn save(cfg: &Config, snap: &Snapshot, kind: &str, target: f64) -> Result<(PathBuf, f64), String> {
     std::fs::create_dir_all(&cfg.out_dir).map_err(|e| format!("Dossier de sortie inaccessible : {e}"))?;
     let mut out = cfg.out_dir.join(format!("{kind} {}.{}", stamp(), cfg.container));
     // Deux enregistrements dans la même seconde : le second ne remplace pas le premier.
@@ -1263,7 +1263,7 @@ fn save(cfg: &Config, snap: &Snapshot, kind: &str) -> Result<(PathBuf, f64), Str
     }
     // Clip : pile la durée du buffer. L'excédent du début est gardé dans le fichier mais marqué « à ne pas
     // montrer » (liste d'édition MP4/MOV) : sans réencodage, durée affichée exacte (voir clipplan.rs).
-    let target = f64::from(cfg.buffer_secs);
+    // `target` : durée du buffer, ou moins si un clip récent a déjà emporté le début (clipplan::window).
     let trim = crate::clipplan::trim(snap.media, target, kind == "Clip" && cfg.container != "mkv");
     concat(cfg, &snap.parts, &out, trim)?;
     let want = crate::clipplan::expected(snap.media, snap.secs, trim, target);
@@ -1273,18 +1273,14 @@ fn save(cfg: &Config, snap: &Snapshot, kind: &str) -> Result<(PathBuf, f64), Str
     std::thread::spawn(move || {
         // Miniature d'abord, annoncée à la fenêtre : le clip apparaît avec son image ~0,2 s après l'appui. Avant,
         // elle attendait la vérification (ffprobe sur tout le fichier) : ~1 s de cadre vide.
-        // Pendant un jeu plein écran : remise à plus tard (décodage = processeur pris au jeu), faite dès le
-        // retour au bureau ; l'onglet Vidéos montre un cadre vide en attendant.
-        let thumbed = !crate::foreground::fullscreen_foreground() && make_thumb(&cfg, &file);
-        if thumbed {
+        // Aussi pendant un jeu plein écran (un seul fil, priorité « inactive », une image) : avant, elle
+        // attendait le retour au bureau et la barre ouverte en jeu montrait des clips sans image.
+        if make_thumb(&cfg, &file) {
             thumbs_ready();
         }
         verify(&cfg, &file, want);
         while crate::foreground::fullscreen_foreground() {
             std::thread::sleep(Duration::from_secs(5));
-        }
-        if !thumbed && make_thumb(&cfg, &file) {
-            thumbs_ready();
         }
         // Planche d'aperçus de la barre de temps.
         make_strip(&cfg, &file);
@@ -1458,7 +1454,7 @@ fn make_thumb_now(cfg: &Config, clip: &Path) -> bool {
     for at in ["1", "0"] {
         let mut t = ffmpeg(cfg);
         t.creation_flags(CREATE_NO_WINDOW | 0x0000_0040);
-        t.args(["-loglevel", "quiet", "-ss", at, "-i"]).arg(clip).args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"]).arg(&out);
+        t.args(["-loglevel", "quiet", "-threads", "1", "-ss", at, "-i"]).arg(clip).args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"]).arg(&out);
         if run_now(t) && out.exists() {
             return true;
         }
@@ -1626,25 +1622,47 @@ pub fn save_clip(cfg: &Config, dir: &Path) -> Result<(PathBuf, f64), String> {
     if seg_ext(&cfg.encoder) == "mkv" {
         wait_segment_close(dir);
     }
-    let snap = take(dir, cfg.clip.fps, |tl, now| tl.pick(now, f64::from(cfg.buffer_secs)));
+    // Début du clip : pas avant la fin du clip précédent (clipplan::window). Marque posée sous le verrou de
+    // l'horloge, à l'instant de l'instantané : deux appuis rapprochés se suivent sans se recouvrir.
+    static LAST_CLIP: Mutex<Option<f64>> = Mutex::new(None);
+    let full = f64::from(cfg.buffer_secs);
+    let (target, mark) = (std::cell::Cell::new(full), std::cell::Cell::new((None, 0.0)));
+    let snap = take(dir, cfg.clip.fps, |tl, now| {
+        let mut last = LAST_CLIP.lock().unwrap();
+        let w = crate::clipplan::window(full, *last, now);
+        target.set(w);
+        mark.set((*last, now));
+        *last = Some(now);
+        tl.pick(now, w)
+    });
+    // Clip raté : la marque revient, ces secondes iront dans le prochain clip.
+    let undo = || {
+        let (prev, mine) = mark.get();
+        let mut last = LAST_CLIP.lock().unwrap();
+        if *last == Some(mine) {
+            *last = prev;
+        }
+    };
     let t_snap = t0.elapsed().as_secs_f32();
     if snap.parts.is_empty() {
+        undo();
         let err = std::fs::read_to_string(dir.join("ffmpeg.log")).unwrap_or_default();
         crate::log(&format!("clip impossible : {} segments dans le dossier, capture en marche = {}, ffmpeg : {}", segments(dir).len(), !is_idle(), err.lines().last().unwrap_or("aucun message")));
         return Err(if is_idle() { "La capture ne tournait pas : rien à enregistrer. Clipper la relance.".into() } else { "Le buffer vient de démarrer : réessayez dans quelques secondes.".into() });
     }
     let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
     let t1 = std::time::Instant::now();
-    let out = save(cfg, &snap, "Clip")?;
+    let out = save(cfg, &snap, "Clip", target.get()).inspect_err(|_| undo())?;
     crate::log(&format!(
-        "clip : instantané {:.0} ms, attente {:.0} ms, assemblage {:.0} ms ({} segments, {} capture(s), {:.0} s, images {:.2} s)",
+        "clip : instantané {:.0} ms, attente {:.0} ms, assemblage {:.0} ms ({} segments, {} capture(s), {:.0} s, images {:.2} s, durée visée {:.1} s)",
         t_snap * 1000.0,
         (t1 - t0).as_secs_f32() * 1000.0 - t_snap * 1000.0,
         t1.elapsed().as_secs_f32() * 1000.0,
         snap.parts.iter().map(Vec::len).sum::<usize>(),
         snap.parts.len(),
         snap.secs,
-        snap.media.unwrap_or(0.0)
+        snap.media.unwrap_or(0.0),
+        target.get()
     ));
     Ok(out)
 }
@@ -1663,7 +1681,7 @@ pub fn rec_stop(cfg: &Config, buf: &Buffer) -> Result<(PathBuf, f64), String> {
         wait_segment_close(&buf.dir);
     }
     let snap = take(&buf.dir, cfg.clip.fps, |tl, now| tl.since(now, from));
-    let r = if snap.parts.is_empty() { Err("Le REC n'a rien enregistré.".to_string()) } else { save(cfg, &snap, "REC") };
+    let r = if snap.parts.is_empty() { Err("Le REC n'a rien enregistré.".to_string()) } else { save(cfg, &snap, "REC", f64::from(cfg.buffer_secs)) };
     *buf.rec_from.lock().unwrap() = None;
     r
 }

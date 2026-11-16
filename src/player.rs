@@ -7,13 +7,13 @@
 //!   la plus rapide à sortir (80 à 130 ms). Une seule à la fois : pendant un glissement, la suivante part
 //!   dès que la précédente est affichée, vers le dernier point demandé (avant, chaque nouvelle position
 //!   tuait la précédente avant qu'elle ait fini : aucune image pendant tout le geste) ;
-//! - lecture : décodage et mise à l'échelle sur la carte NVIDIA (cuda) quand il y en a une, sinon d3d11va.
+//! - lecture : décodage et mise à l'échelle par le processeur (voir `spawn`).
 use crate::gfx::{Canvas, R};
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,26 +28,12 @@ const PLAY_FPS: f64 = 60.0;
 /// 160 ms avant : avec ~75 ms de décodage, le clic sur un clip semblait mettre 0,3 s à répondre.
 const FADE: Duration = Duration::from_millis(70);
 
-/// Décodeur de la lecture : 0 pas encore choisi, 1 cuda (carte NVIDIA), 2 d3d11va.
-static DECODER: AtomicU8 = AtomicU8::new(0);
+/// Options d'ouverture de ffmpeg : analyse minimale du fichier (MP4, MKV, MOV décrivent leurs pistes dans
+/// leur en-tête). Mesuré : 1re image après un saut 384 -> 173 ms, son 556 -> 104 ms.
+const PROBE: [&str; 4] = ["-analyzeduration", "0", "-probesize", "32768"];
+/// Test : son retardé de tant de ms (vérifie le recalage du son sur l'image).
 #[cfg(test)]
-pub static BREAK_CUDA: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-pub fn decoder() -> u8 {
-    DECODER.load(Ordering::Relaxed)
-}
-
-/// Lecture sur la carte NVIDIA : décodage NVDEC et réduction à la taille du lecteur par la carte. Mesuré sur
-/// un clip 1080p60 (5 s) : 0,43 s de processeur au lieu de 1,35 s (petit lecteur), 0,67 s au lieu de 3,57 s
-/// (lecteur de la barre). Avant, d3d11va décodait sur la carte mais la réduction Lanczos se faisait sur le
-/// processeur : autant de calcul qu'un décodage logiciel.
-fn use_cuda() -> bool {
-    if DECODER.load(Ordering::Relaxed) == 0 {
-        let nv = crate::capture::gpus().iter().any(|g| g.id == "nvidia");
-        let _ = DECODER.compare_exchange(0, if nv { 1 } else { 2 }, Ordering::Relaxed, Ordering::Relaxed);
-    }
-    DECODER.load(Ordering::Relaxed) == 1
-}
+pub static AUDIO_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
 struct Frame {
     w: u32,
@@ -87,8 +73,6 @@ pub struct Player {
     /// Arrivée de la première image du clip ouvert (fondu depuis la miniature).
     shown: Arc<Mutex<Option<Instant>>>,
     ended: Arc<AtomicBool>,
-    /// La lecture n'a sorti aucune image : décodeur peut-être refusé par la carte (repli d3d11va).
-    failed: Arc<AtomicBool>,
     kids: Vec<Child>,
     /// Image fixe en cours de décodage (une seule à la fois) et sa fin, signalée par son fil (un drapeau par
     /// image : celui d'une image tuée ne doit pas marquer la suivante comme finie).
@@ -124,7 +108,6 @@ impl Player {
             frame: Arc::new(Mutex::new(None)),
             shown: Arc::new(Mutex::new(None)),
             ended: Arc::new(AtomicBool::new(false)),
-            failed: Arc::new(AtomicBool::new(false)),
             kids: vec![],
             still: None,
             want: None,
@@ -141,6 +124,19 @@ impl Player {
         (self.dur, self.audio_tracks, self.base) = (dur, audio_tracks, 0.0);
         self.want = Some(0.0);
         self.tick(); // image fixe lancée tout de suite, sans attendre le prochain dessin
+    }
+
+    /// Ouvre un clip et le lit tout de suite (barre). Pas d'image fixe : elle décodait en même temps que la
+    /// lecture (deux ffmpeg pour la même première image) ; la miniature est montrée en attendant.
+    pub fn open_playing(&mut self, file: &Path, dur: f64, audio_tracks: usize) {
+        self.reset();
+        self.file = Some(file.to_path_buf());
+        (self.dur, self.audio_tracks, self.base) = (dur, audio_tracks, 0.0);
+        // Lancée au prochain `tick`, après le `set_size` du dessin : à la bonne taille du premier coup (avant,
+        // le 1er clip ouvert partait en 640x360 puis était relancé 120 ms plus tard).
+        (self.playing, self.dirty) = (true, true);
+        self.last_spawn = Instant::now() - Duration::from_secs(1);
+        *self.t0.lock().unwrap() = None;
     }
 
     /// Ferme le clip et libère l'image (onglet quitté, barre fermée, vidéo supprimée).
@@ -187,6 +183,11 @@ impl Player {
             // tombait un peu à côté : l'image sautait en arrière puis revenait).
             self.base = self.pos();
             self.playing = false;
+            // Pause avant la 1re image (clic juste après l'ouverture) : une image fixe, sinon seule la
+            // miniature restait.
+            if self.frame.lock().unwrap().is_none() {
+                self.want = Some(self.base);
+            }
             self.dirty = false;
             self.kill();
             return;
@@ -277,14 +278,6 @@ impl Player {
             self.playing = false;
             self.base = self.dur;
         }
-        if self.failed.swap(false, Ordering::Relaxed) && self.playing {
-            // Aucune image loin de la fin : cuda refusé (pilote, format du clip). Repli sur d3d11va.
-            if DECODER.swap(2, Ordering::Relaxed) == 1 {
-                crate::log("lecteur : décodage cuda refusé, repli sur d3d11va");
-                self.dirty = true;
-                self.last_spawn = Instant::now() - Duration::from_secs(1);
-            }
-        }
         // Image fixe finie (ou bloquée plus de 2 s) : place à la suivante, vers le dernier point demandé.
         if self.still.as_ref().is_some_and(|(_, t, done)| done.load(Ordering::Relaxed) || t.elapsed() > Duration::from_secs(2)) {
             self.kill_still();
@@ -327,7 +320,7 @@ impl Player {
         let mut c = Command::new(&self.ffmpeg);
         // Lanczos : réduction la plus nette (bicubique laissait l'aperçu un peu flou).
         let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd,{}", self.pad());
-        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{t:.3}"), "-i"]).arg(&file);
+        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{t:.3}"), "-i"]).arg(&file);
         c.args(["-map", "0:v:0", "-an", "-sn", "-frames:v", "1", "-vf", &vf, "-f", "rawvideo", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = c.spawn() else { return };
         let done = Arc::new(AtomicBool::new(false));
@@ -369,35 +362,26 @@ impl Player {
         // Pas de -readrate : il réglait aussi le rythme des images décodées avant le point visé (jusqu'à
         // une image clé, 2 s plus tôt), d'où une image très en retard sur le son après un saut. ffmpeg
         // décode au plus vite, le fil de lecture ci-dessous cale chaque image sur l'horloge.
-        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", self.base)]);
-        let cuda = use_cuda();
+        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base)]);
+        // Décodage par le processeur, jamais par la carte. Avec un jeu qui pousse la carte à 100 % (The Last
+        // of Us Part II, RTX 4060 portable), le décodage cuda du lecteur provoquait des erreurs du pilote
+        // NVIDIA (nvlddmkm 153), suivies du plantage du jeu. Aussi plus rapide ici : 1re image 0,17 s contre
+        // ~0,9 s pour cuda et 2,2 s pour d3d11va ; ~150 images/s décodées en 1696x954 (~0,5 cœur en lecture).
         // En lecture, 60 images/s fixes (cadence du fil).
-        let vf = if cuda {
-            c.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
-            #[cfg(test)]
-            if BREAK_CUDA.load(Ordering::Relaxed) {
-                c.args(["-hwaccel_device", "9"]); // carte inexistante : cuda refusé, comme sur un PC sans NVIDIA
-            }
-            format!("fps={PLAY_FPS},scale_cuda={w}:{h}:interp_algo=lanczos:force_original_aspect_ratio=decrease:force_divisible_by=2:format=yuv420p,hwdownload,format=yuv420p,{}", self.pad())
-        } else {
-            // Autres cartes : décodage d3d11va, réduction Lanczos par le processeur.
-            c.args(["-hwaccel", "d3d11va"]);
-            format!("fps={PLAY_FPS},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,{}", self.pad())
-        };
+        let vf = format!("fps={PLAY_FPS},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,{}", self.pad());
         c.arg("-i").arg(&file).args(["-map", "0:v:0", "-an", "-sn"]);
         let step = Duration::from_secs_f64(1.0 / (PLAY_FPS * self.rate.max(0.1) as f64));
         c.args(["-vf", &vf, "-f", "rawvideo", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         if let Ok(mut child) = c.spawn() {
             if let Some(mut out) = child.stdout.take() {
                 let (cur, frame, ended, wake, t0) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.t0.clone());
-                let (shown, failed, epoch) = (self.shown.clone(), self.failed.clone(), self.epoch.load(Ordering::Relaxed));
-                let near_end = self.dur > 0.0 && self.base > self.dur - 0.5;
+                let (shown, epoch) = (self.shown.clone(), self.epoch.load(Ordering::Relaxed));
                 std::thread::spawn(move || {
                     let mut buf = vec![0u8; (w * h * 4) as usize];
-                    let mut i = 0u32;
+                    let (mut i, mut dropped, mut streak) = (0u32, 0u32, 0u32);
                     while out.read_exact(&mut buf).is_ok() {
                         if cur.load(Ordering::Relaxed) != run {
-                            return;
+                            break;
                         }
                         // Image n à t0 + n images : la première fixe t0 (et libère le son).
                         let start = *t0.lock().unwrap().get_or_insert_with(Instant::now);
@@ -405,12 +389,19 @@ impl Player {
                         i += 1;
                         if let Some(wait) = due.checked_duration_since(Instant::now()) {
                             std::thread::sleep(wait);
+                        } else if Instant::now() > due + step && streak < 5 {
+                            // Plus d'une image de retard (processeur pris, jeu en cours) : image sautée pour
+                            // rattraper l'horloge. Avant, l'image prenait du retard sur le son sans le rattraper.
+                            // 5 de suite au plus : un décodage trop lent montre encore une image sur six.
+                            (dropped, streak) = (dropped + 1, streak + 1);
+                            continue;
                         }
+                        streak = 0;
                         let mut f = frame.lock().unwrap();
                         // Vérifié sous le verrou : `reset` change de numéro avant de vider l'image, une image
                         // de l'ancien clip ne peut plus arriver juste après le changement de clip.
                         if cur.load(Ordering::Relaxed) != run {
-                            return;
+                            break;
                         }
                         if f.is_none() {
                             *shown.lock().unwrap() = Some(Instant::now());
@@ -425,12 +416,11 @@ impl Player {
                         drop(f);
                         wake();
                     }
+                    if dropped > 0 {
+                        crate::log(&format!("lecteur : {dropped} image(s) sautée(s) sur {i} pour rester calé sur le son"));
+                    }
                     if cur.load(Ordering::Relaxed) == run {
-                        if i == 0 && !near_end {
-                            failed.store(true, Ordering::Relaxed);
-                        } else {
-                            ended.store(true, Ordering::Relaxed);
-                        }
+                        ended.store(true, Ordering::Relaxed);
                         wake();
                     }
                 });
@@ -450,7 +440,7 @@ impl Player {
             x => format!(",atempo={x}"),
         };
         let mut c = Command::new(&self.ffmpeg);
-        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", self.base), "-i"]).arg(file);
+        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base), "-i"]).arg(file);
         let n = self.audio_tracks;
         let ins: String = (0..n).map(|i| format!("[0:a:{i}]")).collect();
         c.args(["-filter_complex", &format!("{ins}amix=inputs={n}:normalize=0,aresample=48000{tempo}[a]"), "-map", "[a]", "-vn", "-sn"]);
@@ -459,6 +449,8 @@ impl Player {
         if let Some(out) = child.stdout.take() {
             let (cur, gain, t0) = (self.run.clone(), self.gain.clone(), self.t0.clone());
             std::thread::spawn(move || {
+                #[cfg(test)]
+                std::thread::sleep(Duration::from_millis(AUDIO_DELAY_MS.load(Ordering::Relaxed)));
                 let _ = play_pcm(out, &cur, run, &gain, &t0);
             });
         }
@@ -497,7 +489,7 @@ impl Drop for Player {
 /// Envoie le son décodé (f32, 48 kHz, stéréo) à la sortie par défaut de Windows, au rythme de la carte son.
 /// Le tampon est rempli d'avance, mais la lecture ne démarre qu'avec la première image (`t0`) : sans ça, le
 /// son partait avant l'image (démarrage du décodage vidéo, saut jusqu'au point visé).
-/// Arrête des ffmpeg du lecteur. L'arrêt est demandé tout de suite ; la fin (40 à 70 ms pour un décodage cuda)
+/// Arrête des ffmpeg du lecteur. L'arrêt est demandé tout de suite ; la fin
 /// n'est attendue que par `close`. Avant, chaque saut figeait la fenêtre ~70 ms et chaque pause ~45 ms.
 /// Leurs images déjà en route sont ignorées : `run` et `epoch` ont changé.
 fn reap(mut kids: Vec<Child>) {
@@ -523,9 +515,42 @@ fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32, t0:
     client.initialize_client(&fmt, Direction::Render, StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: 1_000_000 }, None)?;
     let render = client.get_audiorenderclient()?;
     let mut buf = vec![0u8; 8 * 4800];
-    let mut started = false;
+    let (mut started, mut written) = (false, false);
     while cur.load(Ordering::Relaxed) == run {
-        if !started && t0.lock().unwrap().is_some() {
+        let first = *t0.lock().unwrap();
+        if let (false, Some(t)) = (started, first) {
+            if !written {
+                // Son prêt après la première image (carte son ou ffmpeg lents à démarrer, souvent après un
+                // saut) : ce qui aurait déjà dû être joué est sauté. Avant, le son restait en retard sur
+                // l'image jusqu'à la fin du clip.
+                // 10 ms lus d'abord : l'attente de ffmpeg compte dans le retard mesuré.
+                const C: usize = 480 * 8;
+                if out.read_exact(&mut buf[..C]).is_err() {
+                    return Ok(());
+                }
+                let late = t.elapsed().as_secs_f64();
+                let mut skip = ((late * 48_000.0) as usize * 8).min(48_000 * 8 * 5);
+                if late > 0.02 {
+                    crate::log(&format!("lecteur : son prêt {:.0} ms après l'image, recalé", late * 1000.0));
+                }
+                let mut off = skip.min(C);
+                skip -= off;
+                while skip > 0 {
+                    let n = skip.min(buf.len());
+                    if out.read_exact(&mut buf[..n]).is_err() {
+                        return Ok(());
+                    }
+                    skip -= n;
+                }
+                if off == C {
+                    if out.read_exact(&mut buf[..C]).is_err() {
+                        return Ok(());
+                    }
+                    off = 0;
+                }
+                apply_gain(&mut buf[off..C], gain);
+                render.write_to_device(&buf[off..C], None)?;
+            }
             client.start_stream()?;
             started = true;
         }
@@ -538,17 +563,23 @@ fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32, t0:
         if out.read_exact(&mut buf[..n]).is_err() {
             break; // fin du clip
         }
-        let g = f32::from_bits(gain.load(Ordering::Relaxed));
-        if (g - 1.0).abs() > 0.001 {
-            for s in buf[..n].chunks_exact_mut(4) {
-                let v = f32::from_le_bytes([s[0], s[1], s[2], s[3]]) * g;
-                s.copy_from_slice(&v.to_le_bytes());
-            }
-        }
+        apply_gain(&mut buf[..n], gain);
         render.write_to_device(&buf[..n], None)?;
+        written = true;
     }
     if started {
         let _ = client.stop_stream();
     }
     Ok(())
+}
+
+/// Volume du lecteur appliqué au son décodé (f32).
+fn apply_gain(buf: &mut [u8], gain: &AtomicU32) {
+    let g = f32::from_bits(gain.load(Ordering::Relaxed));
+    if (g - 1.0).abs() > 0.001 {
+        for s in buf.chunks_exact_mut(4) {
+            let v = f32::from_le_bytes([s[0], s[1], s[2], s[3]]) * g;
+            s.copy_from_slice(&v.to_le_bytes());
+        }
+    }
 }

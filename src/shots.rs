@@ -143,6 +143,31 @@ fn bar() {
 }
 
 /// Le lecteur reÃ§oit-il les images au rythme du clip ? Lit 4 s d'un vrai fichier (CLIPPER_CLIP) et compte.
+/// Son prêt 1,5 s après l'image : il doit être recalé (journal « son prêt … recalé »), pas joué en retard.
+#[test]
+#[ignore = "lit un vrai clip avec ffmpeg"]
+fn player_late_audio() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Ok(clip) = std::env::var("CLIPPER_CLIP") else { return };
+    let log = crate::config::dir().join("log.txt");
+    let before = std::fs::read_to_string(&log).unwrap_or_default().len();
+    crate::player::AUDIO_DELAY_MS.store(1500, Relaxed); // après la 1re image, même avec cuda (~0,9 s)
+    let mut p = crate::player::Player::new("ffmpeg", Arc::new(|| {}));
+    p.set_size(384.0, 216.0);
+    p.open_playing(std::path::Path::new(&clip), 48.0, 3);
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_millis(3000) {
+        p.tick();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    p.close();
+    crate::player::AUDIO_DELAY_MS.store(0, Relaxed);
+    let all = std::fs::read_to_string(&log).unwrap_or_default();
+    let new = &all[before.min(all.len())..];
+    println!("{}", new.lines().filter(|l| l.contains("son prêt")).collect::<Vec<_>>().join("\n"));
+    assert!(new.contains("son prêt"), "son en retard non recalé");
+}
+
 #[test]
 #[ignore = "lit un vrai clip avec ffmpeg"]
 fn player_rate() {
@@ -192,6 +217,11 @@ fn player_latency() {
         9999
     };
     for round in 0..3 {
+        // Clic sur un clip de la barre : lecture directe, sans image fixe.
+        p.open_playing(std::path::Path::new(&clip), 48.0, 3);
+        let direct = wait(&mut p, &|p, _| p.pos() > 0.001);
+        println!("tour {round} : clic dans la barre, mouvement après {direct} ms");
+        p.close();
         p.open(std::path::Path::new(&clip), 48.0, 3);
         let n0 = n.load(Relaxed);
         let first = wait(&mut p, &|_, c| c > n0);
@@ -227,27 +257,6 @@ fn player_latency() {
         println!("tour {round} : 1re image {first} ms, lecture {play} ms, saut en lecture : image {seek_img} ms puis mouvement {seek_play} ms, saut Ã  l'arrÃªt {seek_paused} ms, glissement : {seen} images sur {i} positions, reprise au lÃ¢cher {release} ms");
         p.close();
     }
-}
-
-/// cuda refusÃ© (carte NVIDIA absente ou pilote trop ancien) : la lecture repart seule en d3d11va.
-#[test]
-#[ignore = "lit un vrai clip avec ffmpeg"]
-fn player_fallback() {
-    use std::time::{Duration, Instant};
-    let Ok(clip) = std::env::var("CLIPPER_CLIP") else { return };
-    crate::player::BREAK_CUDA.store(true, std::sync::atomic::Ordering::Relaxed);
-    let mut p = crate::player::Player::new("ffmpeg", Arc::new(|| {}));
-    p.set_size(384.0, 216.0);
-    p.open(std::path::Path::new(&clip), 48.0, 0);
-    p.toggle();
-    let t = Instant::now();
-    while p.pos() < 0.001 && t.elapsed() < Duration::from_secs(5) {
-        p.tick();
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    println!("dÃ©codeur {} (2 = d3d11va), mouvement aprÃ¨s {} ms", crate::player::decoder(), t.elapsed().as_millis());
-    assert_eq!(crate::player::decoder(), 2);
-    assert!(p.pos() > 0.0);
 }
 
 /// Lecture de 5 s au rythme rÃ©el (taille CLIPPER_SIZE, ex. 384x216) : le processeur des ffmpeg est relevÃ©
