@@ -1,5 +1,5 @@
 //! Aperçu au survol de la barre de temps (lecteur de l'app et de la barre Alt+Z) : une petite image du
-//! point survolé, prise dans la planche d'aperçus du clip (capture::make_strip). Aucun décodage vidéo au
+//! point survolé, prise dans la planche d'aperçus du clip (library::make_strip). Aucun décodage vidéo au
 //! survol : la planche est faite une fois (à l'enregistrement, ou au premier survol d'un ancien clip, en
 //! tâche de fond à priorité inactive), puis relue du disque une fois par clip.
 use crate::config::Config;
@@ -35,12 +35,12 @@ impl Preview {
                 return true;
             }
             self.looked = Some(Instant::now());
-            self.img = std::fs::read(crate::capture::strip_path(clip)).ok().and_then(|b| crate::front::decode_jpeg(&b));
+            self.img = std::fs::read(crate::library::strip_path(clip)).ok().and_then(|b| crate::front::decode_jpeg(&b));
             if self.img.is_none() {
                 if !self.asked {
                     self.asked = true;
                     let (c, p) = (cfg.clone(), clip.to_path_buf());
-                    std::thread::spawn(move || crate::capture::make_strip(&c, &p));
+                    std::thread::spawn(move || crate::library::make_strip(&c, &p));
                 }
                 return true;
             }
@@ -48,7 +48,7 @@ impl Preview {
         let Some(img) = &self.img else { return false };
         let cols = (img.width() / TW).max(1);
         let n = cols * (img.height() / TH).max(1);
-        let i = ((t / crate::capture::strip_step(secs)).round() as u32).min(n - 1);
+        let i = ((t / crate::library::strip_step(secs)).round() as u32).min(n - 1);
         let (sx, sy) = ((i % cols) * TW, (i / cols) * TH);
         // Une image de la planche, recopiée pixel pour pixel (160x90 à l'écran, quelle que soit l'échelle).
         let mut tile = vec![0u8; (TW * TH * 4) as usize];

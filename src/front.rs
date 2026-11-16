@@ -1421,7 +1421,7 @@ impl Front {
 }
 
 pub fn load_thumb(stem: &str, w: u32, h: u32) -> Option<tiny_skia::Pixmap> {
-    let img = std::fs::read(crate::config::dir().join("thumbs").join(format!("{stem}.jpg"))).ok().and_then(|b| decode_jpeg(&b))?;
+    let img = std::fs::read(crate::library::thumb_of_key(stem)).ok().and_then(|b| decode_jpeg(&b))?;
     crate::gfx::fit_cover(&img, w, h)
 }
 

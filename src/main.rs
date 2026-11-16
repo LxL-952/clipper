@@ -16,6 +16,7 @@ mod front_c;
 mod gfx;
 mod gpus;
 mod keepalive;
+mod library;
 mod overlay;
 mod player;
 mod preview;
@@ -297,7 +298,7 @@ fn in_out_dir(cfg: &Config, path: &Path) -> bool {
 
 /// Vidéos du dossier de sortie, plus récentes d'abord. ffprobe en parallèle et en cache : liste immédiate.
 /// Les clips récents qui ne se lisent pas tels quels ont leur copie de lecture préparée en tâche de fond.
-fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>, limit: Option<usize>) -> Value {
+fn list_videos(cfg: &Config, limit: Option<usize>) -> Value {
     // Le dossier de sortie et ses sous-dossiers de jeu (un niveau).
     let top: Vec<std::fs::DirEntry> = std::fs::read_dir(&cfg.out_dir).into_iter().flatten().flatten().collect();
     let subs = top.iter().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).flat_map(|e| std::fs::read_dir(e.path()).into_iter().flatten().flatten());
@@ -325,23 +326,19 @@ fn list_videos(cfg: &Config, proxy: &EventLoopProxy<UserEvent>, limit: Option<us
             let date = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             // `video` : le fichier a une piste d'images ; `audio` : pistes à faire entendre (mélangées par le lecteur).
             let (video, audio) = capture::playable(&pr);
-            capture::migrate_thumbs(&p);
+            library::migrate_thumbs(&p);
             json!({
-                "path": p, "name": name, "kind": if stem.starts_with("REC") { "REC" } else { "Clip" }, "thumb": capture::thumb_key(&p),
+                "path": p, "name": name, "kind": if stem.starts_with("REC") { "REC" } else { "Clip" }, "thumb": library::thumb_key(&p),
                 "bytes": bytes, "secs": pr.secs, "date": date, "video": video, "audio": audio,
                 "game": if p.parent() != Some(cfg.out_dir.as_path()) { p.parent().and_then(|d| d.file_name()).map(|d| d.to_string_lossy().into_owned()) } else { None },
             })
         })
         .collect();
     // Miniatures manquantes : refaites en tâche de fond, puis l'onglet Vidéos les relit.
-    let missing: Vec<PathBuf> = items.iter().filter_map(|i| i["path"].as_str().map(PathBuf::from)).filter(|p| !capture::thumb_path(p).exists()).collect();
+    let missing: Vec<PathBuf> = items.iter().filter_map(|i| i["path"].as_str().map(PathBuf::from)).filter(|p| !library::thumb_path(p).exists()).collect();
     if !missing.is_empty() {
-        let (c, p) = (cfg.clone(), proxy.clone());
-        std::thread::spawn(move || {
-            if capture::make_missing_thumbs(&c, &missing) {
-                let _ = p.send_event(UserEvent::Push(json!({"type": "thumbs_ready"})));
-            }
-        });
+        let c = cfg.clone();
+        std::thread::spawn(move || library::make_missing_thumbs(&c, &missing));
     }
     json!({"type": if limit.is_some() { "recent" } else { "videos" }, "items": items})
 }
@@ -796,7 +793,7 @@ impl App {
             // Galerie de la barre : les derniers clips.
             Cmd::Recent => {
                 let c = self.cfg.clone();
-                self.bg(move |p| list_videos(&c, p, Some(4)));
+                self.bg(move |_| list_videos(&c, Some(4)));
             }
             Cmd::UpdateFound(version) => {
                 self.update = Some(version);
@@ -891,7 +888,7 @@ impl App {
             }
             Cmd::Videos => {
                 let c = self.cfg.clone();
-                self.bg(move |p| list_videos(&c, p, None));
+                self.bg(move |_| list_videos(&c, None));
             }
             Cmd::Video(act, path) => self.video_action(act, &path),
             Cmd::DeleteVideos(paths) => self.delete_videos(paths),
@@ -1114,27 +1111,26 @@ impl App {
     fn delete_videos(&mut self, paths: Vec<PathBuf>) {
         let paths: Vec<PathBuf> = paths.into_iter().filter(|p| in_out_dir(&self.cfg, p)).collect();
         let c = self.cfg.clone();
-        self.bg(move |p| {
+        self.bg(move |_| {
             let t0 = Instant::now();
             // Miniatures repérées avant la suppression : leur clé se lit sur le fichier.
-            let thumbs: Vec<(PathBuf, PathBuf)> = paths.iter().map(|p| (capture::thumb_path(p), capture::strip_path(p))).collect();
+            let thumbs: Vec<[PathBuf; 2]> = paths.iter().map(|p| library::images(p)).collect();
             if !c.delete_permanent {
                 to_recycle_bin_all(&paths);
             }
             let gone = paths
                 .iter()
                 .zip(&thumbs)
-                .filter(|(path, (thumb, strip))| {
+                .filter(|(path, images)| {
                     let ok = if c.delete_permanent { std::fs::remove_file(path).is_ok() } else { !path.exists() };
                     if ok {
-                        let _ = std::fs::remove_file(thumb);
-                        let _ = std::fs::remove_file(strip);
+                        library::forget(images);
                     }
                     ok
                 })
                 .count();
             log(&format!("vidéos supprimées : {gone}/{} en {} ms", paths.len(), t0.elapsed().as_millis()));
-            list_videos(&c, p, None)
+            list_videos(&c, None)
         });
     }
 
@@ -1154,11 +1150,10 @@ impl App {
             VideoAct::Open => return explorer(&format!("\"{}\"", path.display())),
             VideoAct::Delete => {
                 // Réglage « Supprimer définitivement » : le fichier est effacé, sans passer par la Corbeille.
-                let (thumb, strip) = (capture::thumb_path(path), capture::strip_path(path));
+                let images = library::images(path);
                 let gone = if self.cfg.delete_permanent { std::fs::remove_file(path).is_ok() } else { to_recycle_bin(path) };
                 if gone {
-                    let _ = std::fs::remove_file(thumb);
-                    let _ = std::fs::remove_file(strip);
+                    library::forget(&images);
                 }
             }
             VideoAct::Rename(name) => {
@@ -1175,7 +1170,7 @@ impl App {
             }
         }
         let c = self.cfg.clone();
-        self.bg(move |p| list_videos(&c, p, None));
+        self.bg(move |_| list_videos(&c, None));
     }
 }
 
@@ -1251,7 +1246,7 @@ fn main() {
         let _ = proxy.send_event(UserEvent::Menu(e.id));
     }));
     let proxy = event_loop.create_proxy();
-    let _ = capture::ON_THUMB.set(Box::new(move || drop(proxy.send_event(UserEvent::Push(json!({"type": "thumbs_ready"}))))));
+    let _ = library::ON_THUMB.set(Box::new(move || drop(proxy.send_event(UserEvent::Push(json!({"type": "thumbs_ready"}))))));
     let proxy = event_loop.create_proxy();
     std::thread::spawn(move || loop {
         unsafe { WaitForSingleObject(ev as _, INFINITE) };

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 pub const SEG_SECS: u32 = 2;
 
-fn ffmpeg(cfg: &Config) -> Command {
+pub(crate) fn ffmpeg(cfg: &Config) -> Command {
     let mut c = Command::new(&cfg.ffmpeg);
     c.creation_flags(crate::proc::hidden(crate::proc::Priority::Below))
         .stdin(Stdio::null())
@@ -68,7 +68,7 @@ fn gpu_low(ch: &std::process::Child) {
 }
 
 /// Lance, sort du mode efficacité, attend la fin : pour les étapes d'un clip qu'on attend.
-fn run_now(mut c: Command) -> bool {
+pub(crate) fn run_now(mut c: Command) -> bool {
     let Ok(mut ch) = c.spawn() else { return false };
     no_eco(&ch);
     ch.wait().is_ok_and(|s| s.success())
@@ -1272,15 +1272,15 @@ fn save(cfg: &Config, snap: &Snapshot, kind: &str, target: f64) -> Result<(PathB
         // elle attendait la vérification (ffprobe sur tout le fichier) : ~1 s de cadre vide.
         // Aussi pendant un jeu plein écran (un seul fil, priorité « inactive », une image) : avant, elle
         // attendait le retour au bureau et la barre ouverte en jeu montrait des clips sans image.
-        if make_thumb(&cfg, &file) {
-            thumbs_ready();
+        if crate::library::make_thumb(&cfg, &file) {
+            crate::library::thumbs_ready();
         }
         verify(&cfg, &file, want);
         while crate::foreground::fullscreen_foreground() {
             std::thread::sleep(Duration::from_secs(5));
         }
         // Planche d'aperçus de la barre de temps.
-        make_strip(&cfg, &file);
+        crate::library::make_strip(&cfg, &file);
     });
     Ok((out, want))
 }
@@ -1384,127 +1384,6 @@ pub fn verify(cfg: &Config, clip: &Path, want: f64) -> bool {
         crate::log(&format!("clip ANORMAL ({name}) : {}", bad.join(" ; ")));
     }
     bad.is_empty()
-}
-
-/// Écart entre deux images de la planche d'aperçus : 2 s (une image clé sur deux secondes), plus pour un
-/// long REC (100 images au plus).
-pub fn strip_step(secs: f64) -> f64 {
-    (secs / 100.0).max(2.0)
-}
-
-/// Planche d'aperçus d'un clip (« nom~p.jpg » à côté de sa miniature) : une image de 160x90 toutes les
-/// \`strip_step\` secondes, 10 par rangée. Seules les images clés sont décodées (une toutes les 2 s) :
-/// mesuré sur 48 s en 1080p60, 0,5 s de processeur une seule fois, 38 Ko. Priorité « inactive ».
-pub fn make_strip(cfg: &Config, clip: &Path) -> bool {
-    let secs = probe(cfg, clip).secs;
-    if secs <= 0.0 {
-        return false;
-    }
-    let iv = strip_step(secs);
-    let rows = ((secs / iv).floor() as u32 + 1).div_ceil(10);
-    let mut c = ffmpeg(cfg);
-    c.creation_flags(crate::proc::hidden(crate::proc::Priority::Idle));
-    c.args(["-loglevel", "quiet", "-skip_frame", "nokey", "-i"]).arg(clip);
-    c.args(["-an", "-sn", "-vf", &format!("fps=1/{iv},scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2,tile=10x{rows}"), "-frames:v", "1", "-q:v", "6", "-y"]);
-    c.arg(strip_path(clip));
-    let Ok(mut ch) = c.spawn() else { return false };
-    ch.wait().is_ok_and(|s| s.success())
-}
-
-/// Clé des miniatures d'un clip : sa date de création (pas de 100 ns), qui ne change pas quand on le renomme.
-/// Avant : le nom du fichier. Deux clips renommés pareil (dans deux dossiers de jeu) partageaient une miniature,
-/// et un clip renommé avant la fin de sa miniature (faite après la partie) la perdait.
-pub fn thumb_key(clip: &Path) -> String {
-    use std::os::windows::fs::MetadataExt;
-    std::fs::metadata(clip).map_or_else(|_| clip.file_stem().unwrap_or_default().to_string_lossy().into_owned(), |m| format!("c{:x}", m.creation_time()))
-}
-
-/// Fabrique la miniature d'un clip (image à 1 s, sinon la première), à priorité « inactive ».
-fn make_thumb(cfg: &Config, clip: &Path) -> bool {
-    // Une seule fabrication à la fois par clip : l'onglet Vidéos, rafraîchi à l'annonce du clip, la demandait
-    // aussi (deux ffmpeg écrivant le même fichier).
-    static BUSY: Mutex<Vec<PathBuf>> = Mutex::new(vec![]);
-    {
-        let mut b = BUSY.lock().unwrap();
-        if b.iter().any(|p| p == clip) {
-            return false;
-        }
-        b.push(clip.to_path_buf());
-    }
-    let ok = make_thumb_now(cfg, clip);
-    BUSY.lock().unwrap().retain(|p| p != clip);
-    ok
-}
-
-/// Fonction prévenue quand une miniature est prête (main.rs : l'onglet Vidéos et la barre la relisent).
-pub static ON_THUMB: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
-
-fn thumbs_ready() {
-    if let Some(f) = ON_THUMB.get() {
-        f();
-    }
-}
-
-fn make_thumb_now(cfg: &Config, clip: &Path) -> bool {
-    let out = thumb_path(clip);
-    let _ = std::fs::create_dir_all(crate::config::dir().join("thumbs"));
-    for at in ["1", "0"] {
-        let mut t = ffmpeg(cfg);
-        t.creation_flags(crate::proc::hidden(crate::proc::Priority::Idle));
-        t.args(["-loglevel", "quiet", "-threads", "1", "-ss", at, "-i"]).arg(clip).args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"]).arg(&out);
-        if run_now(t) && out.exists() {
-            return true;
-        }
-    }
-    false
-}
-
-/// Miniatures absentes (cache effacé, clip enregistré par une autre copie de Clipper, ancien clip) : refaites
-/// une à une en tâche de fond, jamais pendant un jeu plein écran. Avant, une miniature manquante le restait
-/// pour toujours. Vrai si au moins une a été faite. Une seule tournée à la fois.
-pub fn make_missing_thumbs(cfg: &Config, clips: &[PathBuf]) -> bool {
-    static BUSY: AtomicBool = AtomicBool::new(false);
-    if BUSY.swap(true, Ordering::Relaxed) {
-        return false;
-    }
-    let mut made = 0;
-    for clip in clips.iter().filter(|c| !thumb_path(c).exists()) {
-        while crate::foreground::fullscreen_foreground() {
-            std::thread::sleep(Duration::from_secs(5));
-        }
-        made += usize::from(make_thumb(cfg, clip));
-    }
-    if made > 0 {
-        crate::log(&format!("miniatures refaites : {made}"));
-    }
-    BUSY.store(false, Ordering::Relaxed);
-    made > 0
-}
-
-/// Miniature d'un clip (onglet Vidéos, barre).
-pub fn thumb_path(clip: &Path) -> PathBuf {
-    crate::config::dir().join("thumbs").join(format!("{}.jpg", thumb_key(clip)))
-}
-
-/// Fichier de la planche d'aperçus d'un clip.
-pub fn strip_path(clip: &Path) -> PathBuf {
-    crate::config::dir().join("thumbs").join(format!("{}~p.jpg", thumb_key(clip)))
-}
-
-/// Miniature et planche d'avant la clé par date (nommées comme le fichier) : renommées une fois à la clé.
-pub fn migrate_thumbs(clip: &Path) {
-    let dir = crate::config::dir().join("thumbs");
-    let stem = clip.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    let key = thumb_key(clip);
-    if key == stem {
-        return;
-    }
-    for suffix in [".jpg", "~p.jpg"] {
-        let (old, new) = (dir.join(format!("{stem}{suffix}")), dir.join(format!("{key}{suffix}")));
-        if !new.exists() && old.exists() {
-            let _ = std::fs::rename(old, new);
-        }
-    }
 }
 
 /// Vrai quand aucun ffmpeg de capture ne tourne (clipping désactivé ou au repos).
