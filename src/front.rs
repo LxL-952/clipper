@@ -3,6 +3,7 @@
 //! `App::ipc` (file `out`) et messages JSON reçus par `on` (les anciens `window.__on`).
 use crate::cmd::{Cmd, VideoAct};
 use crate::config::Config;
+use crate::event::{DriverStep, Event, Toast as ToastKind};
 use crate::gfx::{Canvas, Col, F, R, hex, md, pal, r, text_w};
 use crate::player::Player;
 use crate::widgets::{Btn, Ui, ease, id, idn};
@@ -475,23 +476,21 @@ impl Front {
         self.save_folds();
     }
 
-    /// Message venu du reste de Clipper (mêmes types que les anciens `window.__on`).
-    pub fn on(&mut self, m: &Value) {
-        let s = |k: &str| m[k].as_str().unwrap_or("").to_string();
-        match m["type"].as_str().unwrap_or("") {
-            "update" => self.update = m["version"].as_str().map(String::from),
-            "config" => {
-                if let Ok(mut c) = serde_json::from_value::<Config>(m["config"].clone()) {
-                    // Les changements pas encore envoyés restent affichés.
-                    if !self.pending.is_empty() {
-                        let mut v = serde_json::to_value(&c).unwrap_or_default();
-                        for (k, val) in &self.pending {
-                            set_path(&mut v, k, val.clone());
-                        }
-                        c = serde_json::from_value(v).unwrap_or(c);
+    /// Message venu du reste de Clipper (event.rs).
+    pub fn on(&mut self, e: &Event) {
+        match e {
+            Event::Update(v) => self.update = v.clone(),
+            Event::Config(c) => {
+                let mut c = (**c).clone();
+                // Les changements pas encore envoyés restent affichés.
+                if !self.pending.is_empty() {
+                    let mut v = serde_json::to_value(&c).unwrap_or_default();
+                    for (k, val) in &self.pending {
+                        set_path(&mut v, k, val.clone());
                     }
-                    self.cfg = c;
+                    c = serde_json::from_value(v).unwrap_or(c);
                 }
+                self.cfg = c;
                 self.cfg_json = None;
                 for p in [self.cfg.out_dir.clone(), self.cfg.buffer_dir.clone()] {
                     if !self.free.contains_key(&p) {
@@ -499,70 +498,60 @@ impl Front {
                     }
                 }
             }
-            "hotkeys" => {
-                let hk = |k: &str| m["hotkeys"][k].as_str().map(String::from);
-                self.hk = [hk("clip"), hk("rec"), hk("bar"), hk("overlay"), hk("clipping")];
-                self.conflicts = m["conflicts"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(pretty)).collect();
+            Event::Hotkeys { keys, conflicts } => {
+                self.hk = [keys.clip.clone(), keys.rec.clone(), keys.bar.clone(), keys.overlay.clone(), keys.clipping.clone()];
+                self.conflicts = conflicts.iter().map(|c| pretty(c)).collect();
             }
-            "update_ready" => self.upd_ready = true,
-            "update_state" => {
-                if m["ok"] == true {
-                    self.upd_text = Some(s("text"));
+            Event::UpdateReady => self.upd_ready = true,
+            Event::UpdateState { ok, text } => {
+                if *ok {
+                    self.upd_text = Some(text.clone());
                 } else {
                     // Message dans l'encadré de la page de mise à jour (les notifications n'y sont pas dessinées).
                     self.upd_text = None;
-                    self.upd_err = Some(s("text"));
+                    self.upd_err = Some(text.clone());
                 }
             }
-            "gpu" => {
-                self.gpu = Some((s("name"), s("driver")));
+            Event::Gpu { name, driver } => self.gpu = Some((name.clone(), driver.clone())),
+            Event::State { recording, rec_secs } => {
+                self.recording = *recording;
+                self.rec_t0 = Instant::now() - Duration::from_secs(*rec_secs);
             }
-            "state" => {
-                self.recording = m["recording"].as_bool().unwrap_or(false);
-                self.rec_t0 = Instant::now() - Duration::from_secs(m["rec_secs"].as_u64().unwrap_or(0));
-            }
-            "toast" => {
-                let kind = s("kind");
-                self.toast(&kind, &s("text"), m["path"].as_str().map(PathBuf::from));
-                if self.tab == Tab::Videos && kind != "error" {
+            Event::Toast { kind, text, path } => {
+                self.toast(kind.name(), text, path.clone());
+                if self.tab == Tab::Videos && *kind != ToastKind::Error {
                     self.send(Cmd::Videos);
                 }
             }
-            "folder" => {
-                let p = PathBuf::from(s("path"));
-                self.free.insert(p.clone(), m["free_bytes"].as_u64().unwrap_or(0));
-                match s("key").as_str() {
-                    "buffer_dir" => self.cfg.buffer_dir = p,
-                    _ => self.cfg.out_dir = p,
+            Event::Folder { key, path, free_bytes } => {
+                self.free.insert(path.clone(), *free_bytes);
+                match key.as_str() {
+                    "buffer_dir" => self.cfg.buffer_dir = path.clone(),
+                    _ => self.cfg.out_dir = path.clone(),
                 }
             }
-            "disk" => {
-                self.free.insert(PathBuf::from(s("path")), m["free_bytes"].as_u64().unwrap_or(0));
+            Event::Disk { path, free_bytes } => {
+                self.free.insert(path.clone(), *free_bytes);
             }
-            "thumbs_ready" => {
+            Event::ThumbsReady => {
                 // Miniatures manquantes refaites en tâche de fond : relues tout de suite.
                 self.thumbs.retain(|_, t| t.is_some());
                 self.thumb_miss.clear();
             }
-            "videos" => {
-                let vids: Vec<Vid> = m["items"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|v| {
-                        let path = PathBuf::from(v["path"].as_str().unwrap_or(""));
-                        Vid {
-                            // Clé de la miniature (stable au renommage), sinon le nom du fichier.
-                            stem: v["thumb"].as_str().map(String::from).unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned()),
-                            path,
-                            name: v["name"].as_str().unwrap_or("").into(),
-                            rec: v["kind"] == "REC",
-                            bytes: v["bytes"].as_u64().unwrap_or(0),
-                            secs: v["secs"].as_f64().unwrap_or(0.0),
-                            date: v["date"].as_u64().unwrap_or(0),
-                            audio: v["audio"].as_u64().unwrap_or(0) as usize,
-                            video: v["video"].as_bool().unwrap_or(true),
-                        }
+            Event::Videos(items) => {
+                let vids: Vec<Vid> = items
+                    .iter()
+                    .map(|v| Vid {
+                        // Clé de la miniature (stable au renommage).
+                        stem: v.thumb.clone(),
+                        path: v.path.clone(),
+                        name: v.name.clone(),
+                        rec: v.rec,
+                        bytes: v.bytes,
+                        secs: v.secs,
+                        date: v.date,
+                        audio: v.audio,
+                        video: v.video,
                     })
                     .collect();
                 // Miniatures des vidéos disparues : mémoire rendue.
@@ -586,91 +575,76 @@ impl Front {
                     }
                 }
             }
-            "driver" => {
-                let st = s("status");
-                if st == "nogpu" {
-                    self.gpu = None;
-                    return;
-                }
+            Event::NoGpu => self.gpu = None,
+            Event::Driver { status, installed, latest, error } => {
                 let d = &mut self.drv;
-                (d.status, d.error, d.latest) = (st, s("error"), s("latest"));
-                if !s("installed").is_empty() {
-                    d.installed = s("installed");
+                (d.status, d.error, d.latest) = (status.clone(), error.clone(), latest.clone());
+                if !installed.is_empty() {
+                    d.installed = installed.clone();
                     if let Some(g) = &mut self.gpu {
                         g.1 = d.installed.clone();
                     }
                 }
                 (d.confirm, d.phase) = (false, String::new());
             }
-            "driver_progress" => {
+            Event::DriverProgress(step) => {
                 let d = &mut self.drv;
-                let ph = s("phase");
-                if ph == "error" {
-                    (d.phase, d.prog_err) = (String::new(), s("error"));
-                    d.status = "error".into();
-                    d.error = format!("Installation interrompue : {}.", if d.prog_err.is_empty() { "erreur inconnue" } else { &d.prog_err });
-                } else {
-                    (d.phase, d.done, d.total) = (ph, m["done"].as_u64().unwrap_or(0), m["total"].as_u64().unwrap_or(0));
-                    if d.phase == "done" {
+                match step {
+                    DriverStep::Error(err) => {
+                        (d.phase, d.prog_err) = (String::new(), err.clone());
+                        d.status = "error".into();
+                        d.error = format!("Installation interrompue : {}.", if d.prog_err.is_empty() { "erreur inconnue" } else { &d.prog_err });
+                    }
+                    DriverStep::Download { done, total } => (d.phase, d.done, d.total) = ("download".into(), *done, *total),
+                    DriverStep::Install => (d.phase, d.done, d.total) = ("install".into(), 0, 0),
+                    DriverStep::Done => {
+                        (d.phase, d.done, d.total) = ("done".into(), 0, 0);
                         let b = self.cfg.driver_branch.clone();
                         self.send(Cmd::DriverCheck(b)); // version installée relue
                     }
                 }
             }
-            "clean" => {
+            Event::Clean(items) => {
                 self.tools.scanning = false;
                 self.tools.confirm = false;
                 self.tools.items = Some(
-                    m["items"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|c| CleanItem {
-                            id: c["id"].as_str().unwrap_or("").into(),
-                            name: c["name"].as_str().unwrap_or("").into(),
-                            bytes: c["bytes"].as_u64().unwrap_or(0),
-                            files: c["files"].as_u64().unwrap_or(0),
-                            admin: c["admin"].as_bool().unwrap_or(false),
-                            warn: c["warn"].as_str().unwrap_or("").into(),
-                            on: c["default"].as_bool().unwrap_or(false) && c["bytes"].as_u64().unwrap_or(0) > 0,
-                        })
+                    items
+                        .iter()
+                        .map(|c| CleanItem { id: c.id.clone(), name: c.name.clone(), bytes: c.bytes, files: c.files, admin: c.admin, warn: c.warn.clone(), on: c.default && c.bytes > 0 })
                         .collect(),
                 );
             }
-            "clean_done" => {
+            Event::CleanDone { freed, skipped } => {
                 self.tools.running = false;
-                let sk = m["skipped"].as_u64().unwrap_or(0);
                 self.tools.done = Some(format!(
                     "**{} libérés.** {}",
-                    bytes(m["freed_bytes"].as_u64().unwrap_or(0)),
-                    if sk > 0 { format!("{} fichiers en cours d'utilisation ont été ignorés.", thousands(sk)) } else { String::new() }
+                    bytes(*freed),
+                    if *skipped > 0 { format!("{} fichiers en cours d'utilisation ont été ignorés.", thousands(*skipped)) } else { String::new() }
                 ));
                 self.send(Cmd::CleanScan);
             }
-            "ram" => {
+            Event::Ram { before, after, total } => {
                 self.tools.ram_wait = false;
-                self.tools.ram = Some((m["free_before"].as_u64().unwrap_or(0), m["free_after"].as_u64().unwrap_or(0), m["total"].as_u64().unwrap_or(0)));
+                self.tools.ram = Some((*before, *after, *total));
             }
-            "levels" => self.levels = (m["game"].as_f64().unwrap_or(0.0) as f32, m["mic"].as_f64().unwrap_or(0.0) as f32),
-            "autostart" => self.autostart = m["on"].as_bool().unwrap_or(false),
-            "admin" => {
+            Event::Levels { game, mic } => self.levels = (*game, *mic),
+            Event::Autostart(on) => self.autostart = *on,
+            Event::Admin { ok, elevated, .. } => {
                 self.admin_busy = false;
-                if let Some(e) = m["elevated"].as_bool() {
-                    self.elevated = e;
+                if let Some(e) = elevated {
+                    self.elevated = *e;
                 }
-                if m["ok"] != true {
+                if !ok {
                     self.toast("error", "Windows a refusé l'autorisation administrateur.", None);
                 }
             }
-            "tab" => {
-                if let Some(t) = m["tab"].as_str().and_then(Tab::parse) {
+            Event::Tab(t) => {
+                if let Some(t) = Tab::parse(t) {
                     self.select_tab(t);
                 }
             }
-            "ffmpeg" => {
-                self.ff_installing = false;
-            }
-            _ => {}
+            // Pour la barre, ou gardé par main.rs.
+            Event::Show { .. } | Event::Hide | Event::Overlay(_) | Event::Recent(_) | Event::DriverUrl(_) => {}
         }
     }
 

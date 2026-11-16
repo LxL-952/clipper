@@ -4,6 +4,7 @@
 use crate::front::{Front, Tab};
 use crate::gfx::Canvas;
 use crate::widgets::{Input, Ui, UiState};
+use crate::event::{CleanScan, Event, Toast, Video};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -86,21 +87,31 @@ fn every_tab() {
     f.levels = (0.55, 0.3);
     shot(&mut f, "audio", 900, if open { 1100 } else { 620 }, 1.0, &none);
     f.tab = Tab::Videos;
-    let items: Vec<Value> = (0..7)
-        .map(|i| json!({"path": format!("C:\\Users\\Joueur\\Videos\\Clipper\\Clip 2026-11-0{} 21-14-03.mp4", i + 1), "name": format!("Clip 2026-11-0{} 21-14-03.mp4", i + 1),
-            "kind": if i == 2 { "REC" } else { "Clip" }, "bytes": 152_000_000u64 * (i + 1), "secs": 61.0 * (i as f64 + 1.0), "date": 1_794_000_000u64 + i * 86_400, "video": false, "audio": 1}))
+    let items: Vec<Video> = (0..7u64)
+        .map(|i| Video {
+            path: format!("C:\\Users\\Joueur\\Videos\\Clipper\\Clip 2026-11-0{} 21-14-03.mp4", i + 1).into(),
+            name: format!("Clip 2026-11-0{} 21-14-03.mp4", i + 1),
+            thumb: format!("Clip 2026-11-0{} 21-14-03", i + 1),
+            rec: i == 2,
+            bytes: 152_000_000 * (i + 1),
+            secs: 61.0 * (i as f64 + 1.0),
+            date: 1_794_000_000 + i * 86_400,
+            video: false,
+            audio: 1,
+        })
         .collect();
-    f.on(&json!({"type": "videos", "items": items}));
+    f.on(&Event::Videos(items));
     shot(&mut f, "videos", 900, 620, 1.0, &none);
     f.tab = Tab::Drivers;
-    f.on(&json!({"type": "driver", "installed": "621.01", "latest": "626.14", "branch": "game_ready", "status": "update"}));
+    f.on(&Event::Driver { status: "update".into(), installed: "621.01".into(), latest: "626.14".into(), error: String::new() });
     shot(&mut f, "drivers", 900, 620, 1.0, &none);
     f.tab = Tab::Tools;
-    f.on(&json!({"type": "clean", "items": [
-        {"id": "temp", "name": "Fichiers temporaires", "bytes": 1_840_000_000u64, "files": 4213, "admin": false, "default": true, "warn": ""},
-        {"id": "wu", "name": "Cache de Windows Update", "bytes": 3_200_000_000u64, "files": 812, "admin": true, "default": false, "warn": "Windows retÃ©lÃ©chargera les mises Ã  jour en attente."}]}));
-    f.on(&json!({"type": "ram", "free_before": 4_100_000_000u64, "free_after": 9_600_000_000u64, "total": 16_000_000_000u64}));
-    f.on(&json!({"type": "toast", "kind": "clip", "text": "Clip enregistrÃ© Â· 3 min 00 s", "path": "C:\\Users\\Joueur\\Videos\\Clipper\\Clip.mp4"}));
+    f.on(&Event::Clean(vec![
+        CleanScan { id: "temp".into(), name: "Fichiers temporaires".into(), bytes: 1_840_000_000, files: 4213, admin: false, default: true, warn: String::new() },
+        CleanScan { id: "wu".into(), name: "Cache de Windows Update".into(), bytes: 3_200_000_000, files: 812, admin: true, default: false, warn: "Windows retÃ©lÃ©chargera les mises Ã  jour en attente.".into() },
+    ]));
+    f.on(&Event::Ram { before: 4_100_000_000, after: 9_600_000_000, total: 16_000_000_000 });
+    f.on(&Event::Toast { kind: Toast::Clip, text: "Clip enregistrÃ© Â· 3 min 00 s".into(), path: Some(r"C:\Users\Joueur\Videos\Clipper\Clip.mp4".into()) });
     shot(&mut f, "tools", 900, 620, 1.0, &none);
     // Mise Ã  l'Ã©chelle 150 % : mÃªmes proportions, texte net.
     f.tab = Tab::Clip;
@@ -114,11 +125,11 @@ fn bar() {
     let Ok(dir) = std::env::var("CLIPPER_SHOTS") else { return };
     let cfg: crate::config::Config = serde_json::from_value(demo()["config"].clone()).unwrap();
     let mut b = crate::barui::BarUi::new(&cfg, Arc::new(|| {}));
-    b.on(&json!({"type": "show", "config": cfg, "hotkeys": demo()["hotkeys"], "native": [1920, 1200], "overlay_on": true, "recording": false, "rec_secs": 0}));
-    b.on(&json!({"type": "recent", "items": [
-        {"path": "C:\\a\\Clip 1.mp4", "name": "Clip 2026-11-07 21-14-03.mp4", "secs": 180.0, "video": true, "audio": 1},
-        {"path": "C:\\a\\Clip 2.mp4", "name": "Clip 2026-11-06 20-02-41.mp4", "secs": 61.0, "video": true, "audio": 1}]}));
-    b.on(&json!({"type": "toast", "kind": "clip", "text": "Clip enregistrÃ© Â· 3 min 00 s", "path": "C:\\a\\Clip 1.mp4"}));
+    let keys = serde_json::from_value(demo()["hotkeys"].clone()).unwrap_or_default();
+    b.on(&Event::Show { config: Box::new(cfg.clone()), keys, native: (1920, 1200), overlay_on: true, recording: false, rec_secs: 0 });
+    let clip = |p: &str, name: &str, secs: f64| Video { path: p.into(), name: name.into(), thumb: name.trim_end_matches(".mp4").into(), rec: false, bytes: 0, secs, date: 0, video: true, audio: 1 };
+    b.on(&Event::Recent(vec![clip(r"C:\a\Clip 1.mp4", "Clip 2026-11-07 21-14-03.mp4", 180.0), clip(r"C:\a\Clip 2.mp4", "Clip 2026-11-06 20-02-41.mp4", 61.0)]));
+    b.on(&Event::Toast { kind: Toast::Clip, text: "Clip enregistrÃ© Â· 3 min 00 s".into(), path: Some(r"C:\a\Clip 1.mp4".into()) });
     std::thread::sleep(std::time::Duration::from_millis(400)); // animation d'entrÃ©e terminÃ©e
     let (w, h) = (1040u32, 420u32);
     let mut c = Canvas::new(w, h, 1.0);

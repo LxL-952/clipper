@@ -2,6 +2,7 @@
 //! les derniers clips et un lecteur sur place. Mêmes commandes et mêmes messages que l'ancienne page.
 use crate::cmd::{Cmd, VideoAct};
 use crate::config::Config;
+use crate::event::{Event, Toast};
 use crate::front::{dur, pretty};
 use crate::gfx::{Col, F, R, hex, pal, r, text_w};
 use crate::player::Player;
@@ -137,79 +138,83 @@ impl BarUi {
         }
     }
 
-    pub fn on(&mut self, m: &Value) {
-        match m["type"].as_str().unwrap_or("") {
+    pub fn on(&mut self, e: &Event) {
+        match e {
             // Barre affichée : état du moment, animation d'entrée, derniers clips.
-            "show" => {
-                if let Ok(c) = serde_json::from_value(m["config"].clone()) {
-                    self.cfg = c;
-                }
-                let hk = |k: &str| m["hotkeys"][k].as_str().map(String::from);
-                self.hk = [hk("clip"), hk("rec"), hk("bar"), hk("overlay")];
-                self.native = (m["native"][0].as_u64().unwrap_or(1920) as u32, m["native"][1].as_u64().unwrap_or(1080) as u32);
-                self.overlay_on = m["overlay_on"].as_bool().unwrap_or(false);
-                self.recording = m["recording"].as_bool().unwrap_or(false);
-                self.rec_t0 = Instant::now() - Duration::from_secs(m["rec_secs"].as_u64().unwrap_or(0));
+            Event::Show { config, keys, native, overlay_on, recording, rec_secs } => {
+                self.cfg = (**config).clone();
+                self.hk = [keys.clip.clone(), keys.rec.clone(), keys.bar.clone(), keys.overlay.clone()];
+                self.native = *native;
+                self.overlay_on = *overlay_on;
+                self.recording = *recording;
+                self.rec_t0 = Instant::now() - Duration::from_secs(*rec_secs);
                 (self.shown, self.anim_in, self.anim_out, self.busy, self.toast) = (true, Instant::now(), None, false, None);
                 self.pend.clear();
                 self.send(Cmd::Recent);
             }
             // Fermeture : animation de sortie, lecture arrêtée.
-            "hide" => {
+            Event::Hide => {
                 self.flush();
                 self.shown = false;
                 self.anim_out = Some(Instant::now());
                 self.close_player();
             }
-            "state" => {
-                self.recording = m["recording"].as_bool().unwrap_or(false);
-                self.rec_t0 = Instant::now() - Duration::from_secs(m["rec_secs"].as_u64().unwrap_or(0));
+            Event::State { recording, rec_secs } => {
+                self.recording = *recording;
+                self.rec_t0 = Instant::now() - Duration::from_secs(*rec_secs);
             }
-            "config" => {
+            Event::Config(c) => {
                 if self.pend.is_empty() {
-                    if let Ok(c) = serde_json::from_value(m["config"].clone()) {
-                        self.cfg = c;
-                    }
+                    self.cfg = (**c).clone();
                 }
             }
-            "hotkeys" => {
-                let hk = |k: &str| m["hotkeys"][k].as_str().map(String::from);
-                self.hk = [hk("clip"), hk("rec"), hk("bar"), hk("overlay")];
-            }
-            "recent" => {
-                self.clips = m["items"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|v| {
-                        let path = PathBuf::from(v["path"].as_str().unwrap_or(""));
-                        Clip {
-                            // Clé de la miniature (stable au renommage), sinon le nom du fichier.
-                            stem: v["thumb"].as_str().map(String::from).unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned()),
-                            path,
-                            name: v["name"].as_str().unwrap_or("").into(),
-                            secs: v["secs"].as_f64().unwrap_or(0.0),
-                            audio: v["audio"].as_u64().unwrap_or(0) as usize,
-                            video: v["video"].as_bool().unwrap_or(true),
-                        }
+            Event::Hotkeys { keys, .. } => self.hk = [keys.clip.clone(), keys.rec.clone(), keys.bar.clone(), keys.overlay.clone()],
+            Event::Recent(items) => {
+                self.clips = items
+                    .iter()
+                    .map(|v| Clip {
+                        // Clé de la miniature (stable au renommage).
+                        stem: v.thumb.clone(),
+                        path: v.path.clone(),
+                        name: v.name.clone(),
+                        secs: v.secs,
+                        audio: v.audio,
+                        video: v.video,
                     })
                     .collect();
                 self.thumbs.retain(|k, _| self.clips.iter().any(|c| c.stem == k.trim_end_matches('#')));
             }
-            "toast" => {
+            Event::Toast { kind, text, path } => {
                 self.busy = false;
                 if self.shown {
-                    let path = m["path"].as_str().map(PathBuf::from);
-                    self.toast = Some((m["text"].as_str().unwrap_or("").into(), m["kind"] == "error", path.clone(), Instant::now()));
+                    self.toast = Some((text.clone(), *kind == Toast::Error, path.clone(), Instant::now()));
                     if path.is_some() {
                         self.send(Cmd::Recent);
                     }
                 }
             }
-            "overlay" => self.overlay_on = m["on"].as_bool().unwrap_or(false),
+            Event::Overlay(on) => self.overlay_on = *on,
             // Miniature faite après l'ouverture de la barre : les clips encore sans image la relisent.
-            "thumbs_ready" => self.thumbs.retain(|_, t| t.is_some()),
-            _ => {}
+            Event::ThumbsReady => self.thumbs.retain(|_, t| t.is_some()),
+            // Pour la fenêtre principale, ou gardé par main.rs.
+            Event::Update(_)
+            | Event::UpdateReady
+            | Event::UpdateState { .. }
+            | Event::Folder { .. }
+            | Event::Disk { .. }
+            | Event::Levels { .. }
+            | Event::Gpu { .. }
+            | Event::DriverUrl(_)
+            | Event::NoGpu
+            | Event::Driver { .. }
+            | Event::DriverProgress(_)
+            | Event::Clean(_)
+            | Event::CleanDone { .. }
+            | Event::Admin { .. }
+            | Event::Autostart(_)
+            | Event::Ram { .. }
+            | Event::Videos(_)
+            | Event::Tab(_) => {}
         }
     }
 

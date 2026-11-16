@@ -4,6 +4,7 @@ mod audio;
 mod barui;
 mod capture;
 mod cmd;
+mod event;
 mod clipplan;
 mod config;
 mod drivers;
@@ -34,6 +35,7 @@ mod watchdog;
 mod widgets;
 
 use crate::cmd::{Cmd, VideoAct};
+use crate::event::{self as ev, Toast};
 use config::Config;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use serde_json::{Value, json};
@@ -53,8 +55,8 @@ pub enum UserEvent {
     TrayHover,
     /// Commande de la fenêtre, de la barre, de l'icône ou d'un fil de fond (cmd.rs).
     Cmd(ui::Kind, Cmd),
-    /// Message à envoyer à toutes les fenêtres ouvertes (`window.__on`).
-    Push(Value),
+    /// Message à envoyer à toutes les fenêtres ouvertes (event.rs).
+    Push(ev::Event),
     /// Fin d'un clip / REC lancé dans un fil (toast + son) : fichier et durée de ses images (lue dans les segments,
     /// contrôlée ensuite par `verify`).
     Saved(Result<(PathBuf, f64), String>, &'static str),
@@ -126,7 +128,7 @@ fn look_for_update(p: &EventLoopProxy<UserEvent>) -> Result<bool, String> {
     match update::download(&r) {
         Ok(path) => {
             *update::READY.lock().unwrap() = Some(path);
-            let _ = p.send_event(UserEvent::Push(json!({"type": "update_ready"})));
+            let _ = p.send_event(UserEvent::Push(ev::Event::UpdateReady));
         }
         Err(e) => log(&format!("mise à jour : téléchargement d'avance raté ({e})")),
     }
@@ -298,7 +300,7 @@ fn in_out_dir(cfg: &Config, path: &Path) -> bool {
 
 /// Vidéos du dossier de sortie, plus récentes d'abord. ffprobe en parallèle et en cache : liste immédiate.
 /// Les clips récents qui ne se lisent pas tels quels ont leur copie de lecture préparée en tâche de fond.
-fn list_videos(cfg: &Config, limit: Option<usize>) -> Value {
+fn list_videos(cfg: &Config, limit: Option<usize>) -> ev::Event {
     // Le dossier de sortie et ses sous-dossiers de jeu (un niveau).
     let top: Vec<std::fs::DirEntry> = std::fs::read_dir(&cfg.out_dir).into_iter().flatten().flatten().collect();
     let subs = top.iter().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).flat_map(|e| std::fs::read_dir(e.path()).into_iter().flatten().flatten());
@@ -317,30 +319,34 @@ fn list_videos(cfg: &Config, limit: Option<usize>) -> Value {
         v.truncate(n);
     }
     let probes = par_probe(cfg, &v.iter().map(|x| x.1.clone()).collect::<Vec<_>>());
-    let items: Vec<Value> = v
+    let items: Vec<ev::Video> = v
         .into_iter()
         .zip(probes)
         .map(|((t, p, bytes), pr)| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let stem = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-            let date = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             // `video` : le fichier a une piste d'images ; `audio` : pistes à faire entendre (mélangées par le lecteur).
             let (video, audio) = capture::playable(&pr);
             library::migrate_thumbs(&p);
-            json!({
-                "path": p, "name": name, "kind": if stem.starts_with("REC") { "REC" } else { "Clip" }, "thumb": library::thumb_key(&p),
-                "bytes": bytes, "secs": pr.secs, "date": date, "video": video, "audio": audio,
-                "game": if p.parent() != Some(cfg.out_dir.as_path()) { p.parent().and_then(|d| d.file_name()).map(|d| d.to_string_lossy().into_owned()) } else { None },
-            })
+            ev::Video {
+                name: p.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                rec: stem.starts_with("REC"),
+                thumb: library::thumb_key(&p),
+                bytes,
+                secs: pr.secs,
+                date: t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+                video,
+                audio,
+                path: p,
+            }
         })
         .collect();
     // Miniatures manquantes : refaites en tâche de fond, puis l'onglet Vidéos les relit.
-    let missing: Vec<PathBuf> = items.iter().filter_map(|i| i["path"].as_str().map(PathBuf::from)).filter(|p| !library::thumb_path(p).exists()).collect();
+    let missing: Vec<PathBuf> = items.iter().map(|i| i.path.clone()).filter(|p| !library::thumb_path(p).exists()).collect();
     if !missing.is_empty() {
         let c = cfg.clone();
         std::thread::spawn(move || library::make_missing_thumbs(&c, &missing));
     }
-    json!({"type": if limit.is_some() { "recent" } else { "videos" }, "items": items})
+    if limit.is_some() { ev::Event::Recent(items) } else { ev::Event::Videos(items) }
 }
 
 /// ffprobe sur 6 fils au plus (les fichiers déjà vus sortent du cache sans rien lancer).
@@ -482,9 +488,9 @@ impl App {
         (self.buffer, self.audio) = Self::start_capture(&self.cfg, self.native);
     }
 
-    fn hotkeys_json(&self) -> Value {
+    fn hotkeys(&self) -> ev::Hotkeys {
         let k = |k: &Option<HotKey>| k.as_ref().map(pretty);
-        json!({"clip": k(&self.keys.clip), "rec": k(&self.keys.rec), "bar": k(&self.keys.bar), "overlay": k(&self.keys.overlay), "clipping": k(&self.keys.clipping)})
+        ev::Hotkeys { clip: k(&self.keys.clip), rec: k(&self.keys.rec), bar: k(&self.keys.bar), overlay: k(&self.keys.overlay), clipping: k(&self.keys.clipping) }
     }
 
     /// Nouveaux raccourcis actifs tout de suite : les anciens sont libérés, les nouveaux enregistrés.
@@ -494,7 +500,7 @@ impl App {
             log(&format!("raccourcis : libération impossible ({e})"));
         }
         self.keys = register_keys(&self.hotkeys, &self.cfg);
-        self.push(&json!({"type": "hotkeys", "hotkeys": self.hotkeys_json(), "conflicts": self.keys.conflicts}));
+        self.push(&ev::Event::Hotkeys { keys: self.hotkeys(), conflicts: self.keys.conflicts.clone() });
     }
 
     fn init_json(&self, page: &str, tab: Option<&str>) -> Value {
@@ -503,7 +509,7 @@ impl App {
             "page": page, "tab": tab, "config": self.cfg, "encoders": self.encoders, "ffmpeg_ok": self.ffmpeg_ok, "update": self.update, "update_ready": update::READY.lock().unwrap().is_some(),
             "native": [self.native.0, self.native.1], "monitors": self.monitors,
             "outputs": devs(wasapi::Direction::Render), "inputs": devs(wasapi::Direction::Capture),
-            "hotkeys": self.hotkeys_json(),
+            "hotkeys": self.hotkeys(),
             "hotkey_conflicts": self.keys.conflicts,
             "overlay_on": self.overlay_visible(),
             "bar_gen": self.bar_gen,
@@ -517,7 +523,7 @@ impl App {
     }
 
     /// Message pour l'interface : la fenêtre principale et la barre mettent leur état à jour, puis se redessinent.
-    fn push(&self, msg: &Value) {
+    fn push(&self, msg: &ev::Event) {
         if let Some(f) = self.front.borrow_mut().as_mut() {
             f.on(msg);
         }
@@ -534,7 +540,7 @@ impl App {
                 w.window.set_minimized(false);
                 w.window.set_focus();
                 if let (Some(t), Some(f)) = (tab, self.front.borrow_mut().as_mut()) {
-                    f.on(&json!({"type": "tab", "tab": t}));
+                    f.on(&ev::Event::Tab(t.to_string()));
                 }
                 w.window.request_redraw();
             }
@@ -637,9 +643,14 @@ impl App {
         self.open(ui::Kind::Bar, target, None); // créée si elle ne l'est pas encore
         self.bar_open = self.bar.is_some();
         // État du moment, puis animation d'entrée.
-        let show = json!({"type": "show", "gen": self.bar_gen, "config": self.cfg, "hotkeys": self.hotkeys_json(),
-            "native": [self.native.0, self.native.1], "overlay_on": self.overlay_visible(),
-            "recording": self.recording.is_some(), "rec_secs": self.recording.map_or(0, |t| t.elapsed().as_secs())});
+        let show = ev::Event::Show {
+            config: Box::new(self.cfg.clone()),
+            keys: self.hotkeys(),
+            native: self.native,
+            overlay_on: self.overlay_visible(),
+            recording: self.recording.is_some(),
+            rec_secs: self.recording.map_or(0, |t| t.elapsed().as_secs()),
+        };
         self.barui.borrow_mut().on(&show);
         eco(false);
         if let Some(w) = &self.bar {
@@ -659,7 +670,7 @@ impl App {
         if !std::mem::take(&mut self.bar_open) {
             return;
         }
-        self.barui.borrow_mut().on(&json!({"type": "hide"}));
+        self.barui.borrow_mut().on(&ev::Event::Hide);
         if let Some(w) = &self.bar {
             w.window.request_redraw();
         }
@@ -689,7 +700,7 @@ impl App {
     /// Raccourci et menu de l'icône : coupe ou relance toute la capture, tout de suite, sans redémarrer.
     fn toggle_clipping(&mut self) {
         if self.recording.is_some() {
-            return self.push(&json!({"type": "toast", "kind": "error", "text": "Arrêtez le REC avant de désactiver le clipping."}));
+            return self.push(&ev::Event::Toast { kind: Toast::Error, text: "Arrêtez le REC avant de désactiver le clipping.".into(), path: None });
         }
         let on = !self.cfg.clipping;
         self.set("clipping", json!(on));
@@ -700,7 +711,7 @@ impl App {
     fn clip(&self) {
         if !self.cfg.clipping {
             sound(&self.cfg, sounds::Sound::Error);
-            return self.push(&json!({"type": "toast", "kind": "error", "text": "Clipping désactivé : rien n'est enregistré."}));
+            return self.push(&ev::Event::Toast { kind: Toast::Error, text: "Clipping désactivé : rien n'est enregistré.".into(), path: None });
         }
         let (c, b, p) = (self.cfg_for_game(), self.buffer.clone(), self.proxy.clone());
         std::thread::spawn(move || {
@@ -712,7 +723,7 @@ impl App {
     fn toggle_rec(&mut self) {
         if self.recording.is_none() && !self.cfg.clipping {
             sound(&self.cfg, sounds::Sound::Error);
-            return self.push(&json!({"type": "toast", "kind": "error", "text": "Clipping désactivé : activez-le pour enregistrer."}));
+            return self.push(&ev::Event::Toast { kind: Toast::Error, text: "Clipping désactivé : activez-le pour enregistrer.".into(), path: None });
         }
         if self.recording.take().is_none() {
             capture::rec_start(&self.buffer);
@@ -734,11 +745,11 @@ impl App {
                 let _ = p.send_event(UserEvent::Saved(r, "rec"));
             });
         }
-        self.push(&json!({"type": "state", "recording": self.recording.is_some(), "rec_secs": 0}));
+        self.push(&ev::Event::State { recording: self.recording.is_some(), rec_secs: 0 });
     }
 
     /// Exécute `f` dans un fil et envoie son résultat aux fenêtres.
-    fn bg(&self, f: impl FnOnce(&EventLoopProxy<UserEvent>) -> Value + Send + 'static) {
+    fn bg(&self, f: impl FnOnce(&EventLoopProxy<UserEvent>) -> ev::Event + Send + 'static) {
         let p = self.proxy.clone();
         std::thread::spawn(move || {
             let v = f(&p);
@@ -797,7 +808,7 @@ impl App {
             }
             Cmd::UpdateFound(version) => {
                 self.update = Some(version);
-                self.push(&json!({"type": "update", "version": self.update}));
+                self.push(&ev::Event::Update(self.update.clone()));
             }
             // Bouton « Installer » du bandeau : téléchargement vérifié puis installateur silencieux,
             // qui ferme Clipper et le relance à jour.
@@ -817,9 +828,9 @@ impl App {
                         // Clipper se ferme lui-même tout de suite : l'installateur n'a plus à lui demander de
                         // quitter puis à attendre 2 s.
                         let _ = p.send_event(UserEvent::Quit);
-                        json!({"type": "update_state", "ok": true, "text": "Installing… Clipper will restart."})
+                        ev::Event::UpdateState { ok: true, text: "Installing… Clipper will restart.".into() }
                     }
-                    Err(_) => json!({"type": "update_state", "ok": false, "text": "Download failed. Check your connection and try again."}),
+                    Err(_) => ev::Event::UpdateState { ok: false, text: "Download failed. Check your connection and try again.".into() },
                 }
             }),
             // Bouton « Installer FFmpeg » : winget dans une fenêtre visible, puis Clipper se met à jour seul.
@@ -839,9 +850,9 @@ impl App {
                     self.cfg.encoder = capture::resolve_encoder(&self.cfg, &self.encoders, &self.gpus);
                     self.native = capture::native_of(&self.monitors, self.cfg.monitor).unwrap_or((1920, 1080));
                     self.restart_capture(false);
-                    self.push(&json!({"type": "toast", "kind": "ok", "text": "FFmpeg installé : Clipper enregistre."}));
+                    self.push(&ev::Event::Toast { kind: Toast::Ok, text: "FFmpeg installé : Clipper enregistre.".into(), path: None });
                 } else {
-                    self.push(&json!({"type": "toast", "kind": "error", "text": "FFmpeg n'a pas pu être installé (winget)."}));
+                    self.push(&ev::Event::Toast { kind: Toast::Error, text: "FFmpeg n'a pas pu être installé (winget).".into(), path: None });
                 }
                 // Fenêtre rouverte : elle reçoit les nouveaux encodeurs et écrans.
                 if self.main.is_some() {
@@ -880,11 +891,11 @@ impl App {
                 if let Some(dir) = rfd::FileDialog::new().set_directory(cur).pick_folder() {
                     let dir = if key == "buffer_dir" { dir.join("Clipper-buffer") } else { dir };
                     self.set(&key, json!(dir));
-                    self.push(&json!({"type": "folder", "key": key, "path": dir, "free_bytes": disk_free(&dir)}));
+                    self.push(&ev::Event::Folder { free_bytes: disk_free(&dir), key, path: dir });
                 }
             }
             Cmd::DiskFree(p) => {
-                self.push(&json!({"type": "disk", "path": p, "free_bytes": disk_free(&p)}));
+                self.push(&ev::Event::Disk { free_bytes: disk_free(&p), path: p });
             }
             Cmd::Videos => {
                 let c = self.cfg.clone();
@@ -895,7 +906,7 @@ impl App {
             Cmd::Levels => {
                 let peak = |src: &audio::Source| f32::from_bits(src.peak.swap(0, std::sync::atomic::Ordering::Relaxed));
                 let (g, mi) = self.audio.as_ref().map_or((0.0, 0.0), |a| (peak(&a.game), peak(&a.mic)));
-                self.push(&json!({"type": "levels", "game": g, "mic": mi}));
+                self.push(&ev::Event::Levels { game: g, mic: mi });
             }
             Cmd::DriverCheck(branch) => {
                 let studio = branch == "studio";
@@ -906,16 +917,16 @@ impl App {
                 let known = self.gpu.as_ref().map(|g| (g.name.clone(), g.driver.clone()));
                 self.bg(move |p| {
                     let Some((name, inst)) = drivers::installed().map(|g| (g.name, g.driver)).or(known) else {
-                        return json!({"type": "driver", "status": "nogpu"});
+                        return ev::Event::NoGpu;
                     };
-                    let _ = p.send_event(UserEvent::Push(json!({"type": "gpu", "name": name, "driver": inst})));
+                    let _ = p.send_event(UserEvent::Push(ev::Event::Gpu { name: name.clone(), driver: inst.clone() }));
                     match drivers::latest(&name, studio) {
                         Ok(l) => {
-                            let _ = p.send_event(UserEvent::Push(json!({"type": "driver_url", "url": l.url})));
-                            json!({"type": "driver", "installed": inst, "latest": l.version, "branch": branch, "url": l.url,
-                                   "status": if drivers::is_newer(&l.version, &inst) { "update" } else { "ok" }})
+                            let _ = p.send_event(UserEvent::Push(ev::Event::DriverUrl(l.url.clone())));
+                            let status = if drivers::is_newer(&l.version, &inst) { "update" } else { "ok" };
+                            ev::Event::Driver { status: status.into(), installed: inst, latest: l.version, error: String::new() }
                         }
-                        Err(e) => json!({"type": "driver", "installed": inst, "branch": branch, "status": "error", "error": e}),
+                        Err(e) => ev::Event::Driver { status: "error".into(), installed: inst, latest: String::new(), error: e },
                     }
                 });
             }
@@ -926,12 +937,12 @@ impl App {
                     let name = url.rsplit('/').next().unwrap_or("nvidia-driver.exe").to_string();
                     let dest = std::env::temp_dir().join("Clipper").join("driver").join(name);
                     let prog = |done: u64, total: u64| {
-                        let _ = p.send_event(UserEvent::Push(json!({"type": "driver_progress", "done": done, "total": total, "phase": "download"})));
+                        let _ = p.send_event(UserEvent::Push(ev::Event::DriverProgress(ev::DriverStep::Download { done, total })));
                     };
                     let mut ran = false; // installateur lancé (sinon : échec du téléchargement, rien à attendre)
                     let r = drivers::download(&url, &dest, prog).and_then(|exe| {
                         ran = true;
-                        let _ = p.send_event(UserEvent::Push(json!({"type": "driver_progress", "phase": "install", "done": 0, "total": 0})));
+                        let _ = p.send_event(UserEvent::Push(ev::Event::DriverProgress(ev::DriverStep::Install)));
                         let r = drivers::install(&exe);
                         let _ = std::fs::remove_file(&exe);
                         r
@@ -949,28 +960,27 @@ impl App {
                         std::thread::sleep(std::time::Duration::from_secs(2));
                     }
                     if let Some(g) = drivers::installed() {
-                        let _ = p.send_event(UserEvent::Push(json!({"type": "gpu", "name": g.name, "driver": g.driver})));
+                        let _ = p.send_event(UserEvent::Push(ev::Event::Gpu { name: g.name, driver: g.driver }));
                     }
                     log(&format!("pilote : {before} -> {after} ({r:?})"));
                     match r {
-                        _ if !after.is_empty() && after != before => json!({"type": "driver_progress", "phase": "done", "done": 0, "total": 0, "installed": after}),
-                        Ok(()) => json!({"type": "driver_progress", "phase": "error", "done": 0, "total": 0,
-                                         "error": format!("L'installateur NVIDIA s'est terminé mais le pilote est toujours en {before}. Redémarrez le PC puis vérifiez à nouveau ; sinon relancez l'installation.")}),
-                        Err(e) => json!({"type": "driver_progress", "phase": "error", "error": e, "done": 0, "total": 0}),
+                        _ if !after.is_empty() && after != before => ev::Event::DriverProgress(ev::DriverStep::Done),
+                        Ok(()) => ev::Event::DriverProgress(ev::DriverStep::Error(format!("L'installateur NVIDIA s'est terminé mais le pilote est toujours en {before}. Redémarrez le PC puis vérifiez à nouveau ; sinon relancez l'installation."))),
+                        Err(e) => ev::Event::DriverProgress(ev::DriverStep::Error(e)),
                     }
                 });
             }
             Cmd::CleanScan => {
                 let keep = vec![self.cfg.buffer_dir.clone()];
                 self.bg(move |_| {
-                    let items: Vec<Value> = tools::CATEGORIES
+                    let items: Vec<ev::CleanScan> = tools::CATEGORIES
                         .iter()
                         .map(|c| {
-                            let (b, n) = tools::scan(c.id, &keep);
-                            json!({"id": c.id, "name": c.name, "bytes": b, "files": n, "admin": c.admin, "default": c.default, "warn": c.warn})
+                            let (bytes, files) = tools::scan(c.id, &keep);
+                            ev::CleanScan { id: c.id.into(), name: c.name.into(), bytes, files, admin: c.admin, default: c.default, warn: c.warn.unwrap_or("").into() }
                         })
                         .collect();
-                    json!({"type": "clean", "items": items})
+                    ev::Event::Clean(items)
                 });
             }
             Cmd::CleanRun(ids) => {
@@ -992,20 +1002,20 @@ impl App {
                             skipped += 1;
                         }
                     }
-                    json!({"type": "clean_done", "freed_bytes": freed, "skipped": skipped})
+                    ev::Event::CleanDone { freed, skipped }
                 });
             }
             Cmd::AdminMode(on) => {
                 self.bg(move |_| {
                     let ok = tools::run_elevated(&format!("--admin-task {}", if on { "on" } else { "off" })).is_ok_and(|c| c == 0);
-                    json!({"type": "admin", "ok": ok, "on": on})
+                    ev::Event::Admin { ok, on, elevated: None }
                 });
             }
             Cmd::Autostart(on) => {
                 if !elevate::set_autostart(on) {
-                    self.push(&json!({"type": "toast", "kind": "error", "text": "Impossible de modifier le démarrage avec Windows."}));
+                    self.push(&ev::Event::Toast { kind: Toast::Error, text: "Impossible de modifier le démarrage avec Windows.".into(), path: None });
                 }
-                self.push(&json!({"type": "autostart", "on": elevate::autostart()}));
+                self.push(&ev::Event::Autostart(elevate::autostart()));
             }
             Cmd::RelaunchAdmin => self.relaunch(),
             Cmd::RamClean => self.bg(|_| {
@@ -1014,7 +1024,7 @@ impl App {
                 let ok = tools::run_elevated(if game { "--clean-ram --standby-only" } else { "--clean-ram" }).is_ok();
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 let (after, _) = tools::ram();
-                json!({"type": "ram", "free_before": before, "free_after": if ok { after } else { before }, "total": total, "ok": ok})
+                ev::Event::Ram { before, after: if ok { after } else { before }, total }
             }),
         }
     }
@@ -1060,21 +1070,21 @@ impl App {
             a.levels(&self.cfg); // sourdine, volumes, boost : en direct, sans relance
         }
         overlay::apply(&self.cfg, self.overlay_shown);
-        self.push(&json!({"type": "config", "config": self.cfg}));
-        self.push(&json!({"type": "overlay", "on": self.overlay_visible()}));
+        self.push(&ev::Event::Config(Box::new(self.cfg.clone())));
+        self.push(&ev::Event::Overlay(self.overlay_visible()));
     }
 
     /// Relance Clipper dans le mode demandé par le réglage : par la tâche (administrateur, sans demande UAC)
     /// ou normalement (par l'Explorateur, qui lance toujours sans élévation).
     fn relaunch(&mut self) {
         if self.recording.is_some() {
-            return self.push(&json!({"type": "toast", "kind": "error", "text": "Arrêtez le REC : Clipper se relancera ensuite dans le bon mode."}));
+            return self.push(&ev::Event::Toast { kind: Toast::Error, text: "Arrêtez le REC : Clipper se relancera ensuite dans le bon mode.".into(), path: None });
         }
         let ok = if self.cfg.admin_mode { elevate::run_task(false) } else { elevate::relaunch_normal() };
         if ok {
             let _ = self.proxy.send_event(UserEvent::Quit);
         } else {
-            self.push(&json!({"type": "toast", "kind": "error", "text": "Relance impossible : fermez puis rouvrez Clipper."}));
+            self.push(&ev::Event::Toast { kind: Toast::Error, text: "Relance impossible : fermez puis rouvrez Clipper.".into(), path: None });
         }
     }
 
@@ -1100,7 +1110,7 @@ impl App {
         self.overlay_shown = on;
         if self.cfg.overlay_mode == "hotkey" {
             overlay::apply(&self.cfg, on);
-            self.push(&json!({"type": "overlay", "on": on}));
+            self.push(&ev::Event::Overlay(on));
         } else {
             self.set("overlay_mode", json!("hotkey")); // applique et prévient les fenêtres
         }
@@ -1246,7 +1256,7 @@ fn main() {
         let _ = proxy.send_event(UserEvent::Menu(e.id));
     }));
     let proxy = event_loop.create_proxy();
-    let _ = library::ON_THUMB.set(Box::new(move || drop(proxy.send_event(UserEvent::Push(json!({"type": "thumbs_ready"}))))));
+    let _ = library::ON_THUMB.set(Box::new(move || drop(proxy.send_event(UserEvent::Push(ev::Event::ThumbsReady)))));
     let proxy = event_loop.create_proxy();
     std::thread::spawn(move || loop {
         unsafe { WaitForSingleObject(ev as _, INFINITE) };
@@ -1406,25 +1416,24 @@ fn main() {
                 }
             }
             Event::UserEvent(UserEvent::Cmd(kind, c)) => app.ipc(kind, c, target),
-            Event::UserEvent(UserEvent::Push(v)) => {
-                if v["type"] == "driver_url" {
-                    app.driver_url = v["url"].as_str().map(String::from);
-                } else if v["type"] == "gpu" {
-                    app.gpu = Some(drivers::Gpu { name: v["name"].as_str().unwrap_or("").into(), driver: v["driver"].as_str().unwrap_or("").into() });
-                    app.push(&v);
-                } else if v["type"] == "admin" {
-                    if v["ok"] == true {
-                        app.set("admin_mode", v["on"].clone());
+            Event::UserEvent(UserEvent::Push(e)) => match e {
+                ev::Event::DriverUrl(url) => app.driver_url = Some(url),
+                ev::Event::Gpu { ref name, ref driver } => {
+                    app.gpu = Some(drivers::Gpu { name: name.clone(), driver: driver.clone() });
+                    app.push(&e);
+                }
+                ev::Event::Admin { ok, on, .. } => {
+                    if ok {
+                        app.set("admin_mode", json!(on));
                     }
-                    app.push(&json!({"type": "admin", "ok": v["ok"], "on": v["on"], "elevated": elevate::is_elevated()}));
+                    app.push(&ev::Event::Admin { ok, on, elevated: Some(elevate::is_elevated()) });
                     // Le mode demandé prend effet tout de suite : relance dans le bon mode (sauf pendant un REC).
-                    if v["ok"] == true && v["on"].as_bool() != Some(elevate::is_elevated()) && app.recording.is_none() {
+                    if ok && on != elevate::is_elevated() && app.recording.is_none() {
                         app.relaunch();
                     }
-                } else {
-                    app.push(&v);
                 }
-            }
+                e => app.push(&e),
+            },
             Event::UserEvent(UserEvent::Saved(r, kind)) => {
                 match (&r, kind) {
                     (Err(_), _) => sound(&app.cfg, sounds::Sound::Error),
@@ -1438,10 +1447,10 @@ fn main() {
                         let secs = secs.round() as u64;
                         let len = if secs >= 60 { format!("{} min {:02} s", secs / 60, secs % 60) } else { format!("{secs} s") };
                         log(&format!("{kind} : {len}"));
-                        json!({"type": "toast", "kind": kind, "path": p,
-                            "text": format!("{} enregistré · {len}", if kind == "clip" { "Clip" } else { "REC" })})
+                        let (kind, what) = if kind == "clip" { (Toast::Clip, "Clip") } else { (Toast::Rec, "REC") };
+                        ev::Event::Toast { kind, path: Some(p.clone()), text: format!("{what} enregistré · {len}") }
                     }
-                    Err(e) => json!({"type": "toast", "kind": "error", "text": e}),
+                    Err(e) => ev::Event::Toast { kind: Toast::Error, text: e.clone(), path: None },
                 };
                 app.push(&msg);
                 if kind == "rec" && app.recording.is_none() && app.restart_pending {
@@ -1510,10 +1519,10 @@ fn main() {
                     std::thread::spawn(move || {
                         let (kind, text) = match look_for_update(&p) {
                             Ok(true) => return,
-                            Ok(false) => ("ok", format!("Clipper est à jour ({}).", env!("CARGO_PKG_VERSION"))),
-                            Err(e) => ("error", format!("Recherche impossible : {e}")),
+                            Ok(false) => (Toast::Ok, format!("Clipper est à jour ({}).", env!("CARGO_PKG_VERSION"))),
+                            Err(e) => (Toast::Error, format!("Recherche impossible : {e}")),
                         };
-                        let _ = p.send_event(UserEvent::Push(json!({"type": "toast", "kind": kind, "text": text})));
+                        let _ = p.send_event(UserEvent::Push(ev::Event::Toast { kind, text, path: None }));
                     });
                 } else if m == *tm.ram.id() {
                     // Même chemin que le bouton de l'onglet Outils (autorisation administrateur demandée).
