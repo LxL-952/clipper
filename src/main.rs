@@ -19,6 +19,7 @@ mod keepalive;
 mod overlay;
 mod player;
 mod preview;
+mod registry;
 #[cfg(test)]
 mod shots;
 mod sounds;

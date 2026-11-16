@@ -977,7 +977,7 @@ impl Buffer {
                         no_eco(&ch); // enregistrement continu : jamais ralenti par Windows
                         gpu_low(&ch); // mais servi après le jeu sur la carte graphique
                         *c.lock().unwrap() = Some(ch);
-                        TIMELINE.lock().unwrap().begin(crate::timeline::now(), &sig);
+                        REGISTRY.lock().unwrap().begin(crate::timeline::now(), &sig);
                         crate::keepalive::set(crate::keepalive::Owner::Buffer, if wgc { captured_hmonitor(&cfg) } else { None });
                     }
                     Err(_) => {
@@ -1013,7 +1013,7 @@ impl Buffer {
                         }
                         last = t;
                         let numbers: Vec<u64> = segments(&d).iter().map(|p| seg_number(p)).collect();
-                        TIMELINE.lock().unwrap().observe(t, &numbers);
+                        REGISTRY.lock().unwrap().observe(t, &numbers);
                         lost = video_lost(&d.join("ffmpeg.log"), &mut log_len);
                         if lost || s.load(Ordering::Relaxed) {
                             break;
@@ -1024,7 +1024,7 @@ impl Buffer {
                     // pris au réveil (2 s d'images d'avant la mise en veille).
                     if slept {
                         crate::log("capture : sortie de veille, relance");
-                        TIMELINE.lock().unwrap().end(last);
+                        REGISTRY.lock().unwrap().end(last);
                         stop_child(&c);
                         break;
                     }
@@ -1107,7 +1107,7 @@ impl Buffer {
                         }
                     }
                     // Jamais un segment d'un REC en cours ni d'un clip en cours d'assemblage.
-                    let floor = r.lock().unwrap().unwrap_or(u64::MAX).min(PINS.lock().unwrap().iter().copied().min().unwrap_or(u64::MAX));
+                    let floor = r.lock().unwrap().unwrap_or(u64::MAX).min(REGISTRY.lock().unwrap().floor().unwrap_or(u64::MAX));
                     for p in segs.iter().take(segs.len().saturating_sub(keep)) {
                         if seg_number(p) < floor {
                             let _ = std::fs::remove_file(p);
@@ -1126,7 +1126,7 @@ impl Buffer {
                         break;
                     }
                 }
-                TIMELINE.lock().unwrap().end(crate::timeline::now());
+                REGISTRY.lock().unwrap().end(crate::timeline::now());
                 crate::keepalive::set(crate::keepalive::Owner::Buffer, None);
                 // Attente par tranches de 300 ms : un arrêt (réglage changé, clipping coupé) reste immédiat.
                 let until = std::time::Instant::now() + crate::watchdog::backoff(fails);
@@ -1525,10 +1525,9 @@ pub static LIGHT: AtomicBool = AtomicBool::new(false);
 /// Un seul clip assemblé à la fois (le disque n'écrit pas deux fichiers en même temps). Chacun a pris son
 /// instantané à l'appui, avant d'attendre son tour : deux appuis rapprochés donnent deux clips corrects.
 static SAVING: Mutex<()> = Mutex::new(());
-/// Horloge du buffer (timeline.rs), partagée par le superviseur de capture, les clips et le REC.
-static TIMELINE: std::sync::LazyLock<Mutex<crate::timeline::Timeline>> = std::sync::LazyLock::new(Default::default);
-/// Premier segment de chaque clip en cours d'assemblage : le nettoyage du buffer n'efface rien à partir de là.
-static PINS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+/// Horloge du buffer, marque du dernier clip et segments retenus (registry.rs), partagés par le superviseur
+/// de capture, les clips et le REC.
+static REGISTRY: std::sync::LazyLock<Mutex<crate::registry::Registry>> = std::sync::LazyLock::new(Default::default);
 
 /// Ce qu'un clip emporte, figé à l'instant de l'appui : les segments de chaque capture, dans l'ordre, et la
 /// durée qu'ils couvrent. La capture continue pendant l'assemblage ; rien n'est retiré ni vidé du buffer.
@@ -1545,10 +1544,7 @@ pub struct Snapshot {
 impl Drop for Snapshot {
     fn drop(&mut self) {
         if let Some(n) = self.pin {
-            let mut p = PINS.lock().unwrap();
-            if let Some(i) = p.iter().position(|x| *x == n) {
-                p.swap_remove(i);
-            }
+            REGISTRY.lock().unwrap().release(n);
         }
         if let Some(t) = &self.tail {
             let _ = std::fs::remove_file(t);
@@ -1559,23 +1555,18 @@ impl Drop for Snapshot {
 /// Instantané du buffer : les segments choisis par `pick` sur l'horloge du buffer, retenus contre le
 /// nettoyage, et le segment en cours copié jusqu'à sa dernière image entière. Quelques millisecondes : le
 /// clip va jusqu'à l'appui sans attendre la fin du segment (avant : jusqu'à 2,7 s d'attente).
-fn take(dir: &Path, fps: u32, pick: impl Fn(&crate::timeline::Timeline, f64) -> Vec<crate::timeline::Part>) -> Snapshot {
+/// `pick` choisit les segments sous le verrou du registre (ils y sont retenus avant qu'il soit relâché : le
+/// nettoyage ne peut plus les effacer) et peut rendre une valeur de plus (durée visée et marque d'un clip).
+fn take<T>(dir: &Path, fps: u32, pick: impl FnOnce(&mut crate::registry::Registry, f64, &[u64]) -> (crate::registry::Pick, T)) -> (Snapshot, T) {
     let files = segments(dir);
     let numbers: Vec<u64> = files.iter().map(|p| seg_number(p)).collect();
     let now = crate::timeline::now();
-    let (picked, secs, pin) = {
-        let mut tl = TIMELINE.lock().unwrap();
-        tl.observe(now, &numbers);
-        let picked = pick(&tl, now);
-        let pin = picked.first().and_then(|p| p.segs.first().copied());
-        // Retenus avant de relâcher l'horloge : le nettoyage ne peut plus les effacer.
-        if let Some(n) = pin {
-            PINS.lock().unwrap().push(n);
-        }
-        let secs = tl.span(&picked, now);
-        let (n, runs, age) = tl.stats(now);
+    let (crate::registry::Pick { parts: picked, secs, pin }, extra) = {
+        let mut reg = REGISTRY.lock().unwrap();
+        let r = pick(&mut reg, now, &numbers);
+        let (n, runs, age) = reg.stats(now);
         crate::log(&format!("horloge du buffer : {n} segments datés, {runs} capture(s), plus ancien il y a {age:.1} s, {} sur le disque", numbers.len()));
-        (picked, secs, pin)
+        r
     };
     let mut snap = Snapshot { parts: vec![], secs, media: Some(0.0), pin, tail: None };
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1600,7 +1591,7 @@ fn take(dir: &Path, fps: u32, pick: impl Fn(&crate::timeline::Timeline, f64) -> 
             snap.parts.push(paths);
         }
     }
-    snap
+    (snap, extra)
 }
 
 /// AV1 (segments MKV) : un segment en cours d'écriture ne se lit pas. On attend qu'il se ferme (2 s au plus)
@@ -1622,23 +1613,14 @@ pub fn save_clip(cfg: &Config, dir: &Path) -> Result<(PathBuf, f64), String> {
     if seg_ext(&cfg.encoder) == "mkv" {
         wait_segment_close(dir);
     }
-    // Début du clip : pas avant la fin du clip précédent (clipplan::Ledger). Marque posée sous le verrou de
-    // l'horloge, à l'instant de l'instantané : deux appuis rapprochés se suivent sans se recouvrir.
-    static LEDGER: Mutex<crate::clipplan::Ledger> = Mutex::new(crate::clipplan::Ledger::new());
-    let full = f64::from(cfg.buffer_secs);
-    let (target, mark) = (std::cell::Cell::new(full), std::cell::Cell::new(None));
-    let snap = take(dir, cfg.clip.fps, |tl, now| {
-        let (w, m) = LEDGER.lock().unwrap().mark(full, now);
-        target.set(w);
-        mark.set(Some(m));
-        tl.pick(now, w)
+    // Début du clip : pas avant la fin du clip précédent (registry.rs). Marque posée à l'instant de
+    // l'instantané : deux appuis rapprochés se suivent sans se recouvrir.
+    let (snap, (target, mark)) = take(dir, cfg.clip.fps, |reg, now, disk| {
+        let (pick, w, m) = reg.clip(now, disk, f64::from(cfg.buffer_secs));
+        (pick, (w, m))
     });
     // Clip raté : la marque revient, ces secondes iront dans le prochain clip.
-    let undo = || {
-        if let Some(m) = mark.get() {
-            LEDGER.lock().unwrap().undo(m);
-        }
-    };
+    let undo = || REGISTRY.lock().unwrap().undo(mark);
     let t_snap = t0.elapsed().as_secs_f32();
     if snap.parts.is_empty() {
         undo();
@@ -1648,7 +1630,7 @@ pub fn save_clip(cfg: &Config, dir: &Path) -> Result<(PathBuf, f64), String> {
     }
     let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
     let t1 = std::time::Instant::now();
-    let out = save(cfg, &snap, "Clip", target.get()).inspect_err(|_| undo())?;
+    let out = save(cfg, &snap, "Clip", target).inspect_err(|_| undo())?;
     crate::log(&format!(
         "clip : instantané {:.0} ms, attente {:.0} ms, assemblage {:.0} ms ({} segments, {} capture(s), {:.0} s, images {:.2} s, durée visée {:.1} s)",
         t_snap * 1000.0,
@@ -1658,7 +1640,7 @@ pub fn save_clip(cfg: &Config, dir: &Path) -> Result<(PathBuf, f64), String> {
         snap.parts.len(),
         snap.secs,
         snap.media.unwrap_or(0.0),
-        target.get()
+        target
     ));
     Ok(out)
 }
@@ -1676,7 +1658,7 @@ pub fn rec_stop(cfg: &Config, buf: &Buffer) -> Result<(PathBuf, f64), String> {
     if seg_ext(&cfg.encoder) == "mkv" {
         wait_segment_close(&buf.dir);
     }
-    let snap = take(&buf.dir, cfg.clip.fps, |tl, now| tl.since(now, from));
+    let (snap, ()) = take(&buf.dir, cfg.clip.fps, |reg, now, disk| (reg.rec(now, disk, from), ()));
     let r = if snap.parts.is_empty() { Err("Le REC n'a rien enregistré.".to_string()) } else { save(cfg, &snap, "REC", f64::from(cfg.buffer_secs)) };
     *buf.rec_from.lock().unwrap() = None;
     r

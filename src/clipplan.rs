@@ -27,6 +27,7 @@ pub fn window(buffer: f64, last: Option<f64>, now: f64) -> f64 {
 
 /// Registre des clips : où commence le prochain. Un clip pose sa marque à l'instantané (deux appuis
 /// rapprochés se suivent sans se recouvrir) et la rend s'il échoue.
+#[derive(Default)]
 pub struct Ledger {
     /// Instant du dernier clip sur l'horloge du buffer ; `None` : le prochain clip prend tout le buffer.
     floor: Option<f64>,
@@ -39,10 +40,6 @@ pub struct Mark {
 }
 
 impl Ledger {
-    pub const fn new() -> Self {
-        Self { floor: None }
-    }
-
     /// Clip demandé à `now` : sa durée (voir `window`) et sa marque.
     pub fn mark(&mut self, buffer: f64, now: f64) -> (f64, Mark) {
         let m = Mark { prev: self.floor };
@@ -110,7 +107,7 @@ mod tests {
     #[test]
     fn a_failed_clip_gives_its_seconds_to_the_next_one() {
         // Clip réussi, puis clip raté 20 s après : le suivant repart de la fin du réussi.
-        let mut l = Ledger::new();
+        let mut l = Ledger::default();
         assert_eq!(l.mark(60.0, 600.0).0, 60.0);
         let (w, b) = l.mark(60.0, 620.0);
         assert_eq!(w, 20.0);
@@ -118,7 +115,7 @@ mod tests {
         assert_eq!(l.mark(60.0, 630.0).0, 30.0, "les 20 s ratées + 10 s");
 
         // Tout premier clip raté : le suivant prend tout le buffer.
-        let mut l = Ledger::new();
+        let mut l = Ledger::default();
         let (_, a) = l.mark(60.0, 600.0);
         l.undo(a);
         assert_eq!(l.mark(60.0, 610.0).0, 60.0);
@@ -128,7 +125,7 @@ mod tests {
     fn double_press_where_the_first_clip_fails_loses_nothing() {
         // A à 600 (après un clip à 500), B à 602. A échoue après la marque de B : le prochain clip
         // repart de 500, il reprend les secondes de A (et celles de B, en double).
-        let mut l = Ledger::new();
+        let mut l = Ledger::default();
         l.mark(60.0, 500.0);
         let (_, a) = l.mark(60.0, 600.0);
         let (wb, _) = l.mark(60.0, 602.0);
@@ -136,7 +133,7 @@ mod tests {
         l.undo(a);
         assert_eq!(l.mark(60.0, 640.0).0, 60.0, "640 - 500 > 60 : tout le buffer");
         // Les deux échouent : le plancher reste au plus bas, jamais remonté par le second undo.
-        let mut l = Ledger::new();
+        let mut l = Ledger::default();
         l.mark(60.0, 500.0);
         let (_, a) = l.mark(60.0, 600.0);
         let (_, b) = l.mark(60.0, 602.0);
