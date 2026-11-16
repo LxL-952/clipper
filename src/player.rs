@@ -9,6 +9,7 @@
 //!   tuait la précédente avant qu'elle ait fini : aucune image pendant tout le geste) ;
 //! - lecture : décodage et mise à l'échelle par le processeur (voir `spawn`).
 use crate::gfx::{Canvas, R};
+use std::ffi::OsString;
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -74,6 +75,9 @@ pub struct Player {
     /// La lecture n'a sorti aucune image loin de la fin (fichier abîmé, ffmpeg en échec).
     failed: Arc<AtomicBool>,
     kids: Vec<Child>,
+    /// ffmpeg arrêtés pas encore sortis : attendus par `close` (fichier à libérer), sinon relevés au prochain
+    /// arrêt. Propres à ce lecteur : la barre et la fenêtre ne s'attendent plus l'une l'autre.
+    dying: Vec<Child>,
     /// Image fixe en cours de décodage (une seule à la fois) et sa fin, signalée par son fil (un drapeau par
     /// image : celui d'une image tuée ne doit pas marquer la suivante comme finie).
     still: Option<(Child, Instant, Arc<AtomicBool>)>,
@@ -110,6 +114,7 @@ impl Player {
             ended: Arc::new(AtomicBool::new(false)),
             failed: Arc::new(AtomicBool::new(false)),
             kids: vec![],
+            dying: vec![],
             still: None,
             want: None,
             dirty: false,
@@ -146,7 +151,7 @@ impl Player {
         self.file = None;
         // Fichier libéré avant de rendre la main : la fenêtre peut supprimer ou renommer le clip juste après
         // (Windows refuse tant qu'un ffmpeg le tient ouvert). Seule attente du lecteur dans le fil de la fenêtre.
-        for mut k in std::mem::take(&mut *DYING.lock().unwrap()) {
+        for mut k in std::mem::take(&mut self.dying) {
             let _ = k.wait();
         }
     }
@@ -306,31 +311,33 @@ impl Player {
 
     fn kill(&mut self) {
         self.run.fetch_add(1, Ordering::Relaxed);
-        reap(self.kids.drain(..).collect());
+        let kids = std::mem::take(&mut self.kids);
+        self.reap(kids);
     }
 
     fn kill_still(&mut self) {
         if let Some((k, _, _)) = self.still.take() {
-            reap(vec![k]);
+            self.reap(vec![k]);
         }
     }
 
-    /// Filtre commun : image entière dans le cadre, bandes noires autour si le format diffère.
-    fn pad(&self) -> String {
-        let (w, h) = self.size;
-        format!("pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=bgra")
+    /// Arrête des ffmpeg du lecteur. L'arrêt est demandé tout de suite ; la fin n'est attendue que par
+    /// `close`. Avant, chaque saut figeait la fenêtre ~70 ms et chaque pause ~45 ms. Leurs images déjà en
+    /// route sont ignorées : `run` et `epoch` ont changé.
+    fn reap(&mut self, mut kids: Vec<Child>) {
+        if kids.is_empty() {
+            return;
+        }
+        kids.iter_mut().for_each(|k| drop(k.kill()));
+        self.dying.retain_mut(|k| !matches!(k.try_wait(), Ok(Some(_))));
+        self.dying.extend(kids);
     }
 
     /// Une seule image au point `t`, décodée par le processeur (sortie la plus rapide).
     fn spawn_still(&mut self, t: f64) {
         let Some(file) = self.file.clone() else { return };
         let (w, h) = self.size;
-        let mut c = Command::new(&self.ffmpeg);
-        // Lanczos : réduction la plus nette (bicubique laissait l'aperçu un peu flou).
-        let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd,{}", self.pad());
-        c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{t:.3}"), "-i"]).arg(&file);
-        c.args(["-map", "0:v:0", "-an", "-sn", "-frames:v", "1", "-vf", &vf, "-f", "rawvideo", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let Ok(mut child) = c.spawn() else { return };
+        let Ok(mut child) = command(&self.ffmpeg, still_args(&file, t, self.size)).spawn() else { return };
         let done = Arc::new(AtomicBool::new(false));
         if let Some(mut out) = child.stdout.take() {
             let (frame, shown, wake, done) = (self.frame.clone(), self.shown.clone(), self.wake.clone(), done.clone());
@@ -366,21 +373,8 @@ impl Player {
         let Some(file) = self.file.clone() else { return };
         let run = self.run.load(Ordering::Relaxed);
         let (w, h) = self.size;
-        let mut c = Command::new(&self.ffmpeg);
-        // Pas de -readrate : il réglait aussi le rythme des images décodées avant le point visé (jusqu'à
-        // une image clé, 2 s plus tôt), d'où une image très en retard sur le son après un saut. ffmpeg
-        // décode au plus vite, le fil de lecture ci-dessous cale chaque image sur l'horloge.
-        c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base)]);
-        // Décodage par le processeur, jamais par la carte. Avec un jeu qui pousse la carte à 100 % (The Last
-        // of Us Part II, RTX 4060 portable), le décodage cuda du lecteur provoquait des erreurs du pilote
-        // NVIDIA (nvlddmkm 153), suivies du plantage du jeu. Aussi plus rapide ici : 1re image 0,17 s contre
-        // ~0,9 s pour cuda et 2,2 s pour d3d11va ; ~150 images/s décodées en 1696x954 (~0,5 cœur en lecture).
-        // En lecture, 60 images/s fixes (cadence du fil).
-        let vf = format!("fps={PLAY_FPS},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,{}", self.pad());
-        c.arg("-i").arg(&file).args(["-map", "0:v:0", "-an", "-sn"]);
         let step = Duration::from_secs_f64(1.0 / (PLAY_FPS * self.rate.max(0.1) as f64));
-        c.args(["-vf", &vf, "-f", "rawvideo", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        if let Ok(mut child) = c.spawn() {
+        if let Ok(mut child) = command(&self.ffmpeg, video_args(&file, self.base, self.size)).spawn() {
             if let Some(mut out) = child.stdout.take() {
                 let (cur, frame, ended, wake, t0) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.t0.clone());
                 let (shown, failed, epoch) = (self.shown.clone(), self.failed.clone(), self.epoch.load(Ordering::Relaxed));
@@ -443,19 +437,7 @@ impl Player {
     }
 
     fn spawn_audio(&mut self, file: &Path, run: u64) {
-        // atempo accepte 0,5 à 100 : 0,25 = deux fois 0,5.
-        let tempo = match self.rate {
-            x if (x - 1.0).abs() < 0.01 => String::new(),
-            x if x < 0.5 => ",atempo=0.5,atempo=0.5".into(),
-            x => format!(",atempo={x}"),
-        };
-        let mut c = Command::new(&self.ffmpeg);
-        c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base), "-i"]).arg(file);
-        let n = self.audio_tracks;
-        let ins: String = (0..n).map(|i| format!("[0:a:{i}]")).collect();
-        c.args(["-filter_complex", &format!("{ins}amix=inputs={n}:normalize=0,aresample=48000{tempo}[a]"), "-map", "[a]", "-vn", "-sn"]);
-        c.args(["-f", "f32le", "-ar", "48000", "-ac", "2", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let Ok(mut child) = c.spawn() else { return };
+        let Ok(mut child) = command(&self.ffmpeg, audio_args(file, self.base, self.audio_tracks, self.rate)).spawn() else { return };
         if let Some(out) = child.stdout.take() {
             let (cur, gain, t0) = (self.run.clone(), self.gain.clone(), self.t0.clone());
             std::thread::spawn(move || {
@@ -496,25 +478,70 @@ impl Drop for Player {
     }
 }
 
+/// ffmpeg du lecteur : sans fenêtre, priorité normale (voir en haut), images ou son sur la sortie standard.
+fn command(ffmpeg: &str, args: Vec<OsString>) -> Command {
+    let mut c = Command::new(ffmpeg);
+    c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    c
+}
+
+/// Début commun : silencieux, analyse minimale (`PROBE`), saut rapide à `t` avant l'ouverture.
+fn head(t: f64) -> Vec<OsString> {
+    let mut a: Vec<OsString> = ["-hide_banner", "-loglevel", "error"].into_iter().chain(PROBE).map(Into::into).collect();
+    a.extend(["-ss".into(), format!("{t:.3}").into(), "-i".into()]);
+    a
+}
+
+/// Filtre commun : image entière dans le cadre, bandes noires autour si le format diffère.
+fn pad((w, h): (u32, u32)) -> String {
+    format!("pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=bgra")
+}
+
+/// Une seule image au point `t`, à la taille du lecteur. Lanczos : réduction la plus nette (bicubique
+/// laissait l'aperçu un peu flou).
+fn still_args(file: &Path, t: f64, (w, h): (u32, u32)) -> Vec<OsString> {
+    let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd,{}", pad((w, h)));
+    let mut a = head(t);
+    a.push(file.into());
+    a.extend(["-map", "0:v:0", "-an", "-sn", "-frames:v", "1", "-vf", vf.as_str(), "-f", "rawvideo", "-"].map(OsString::from));
+    a
+}
+
+/// Lecture des images à partir de `base`, 60 images/s fixes (cadence du fil de lecture).
+/// Pas de -readrate : il réglait aussi le rythme des images décodées avant le point visé (jusqu'à une image
+/// clé, 2 s plus tôt), d'où une image très en retard sur le son après un saut. ffmpeg décode au plus vite,
+/// le fil de lecture cale chaque image sur l'horloge.
+/// Décodage par le processeur, jamais par la carte. Avec un jeu qui pousse la carte à 100 % (The Last of Us
+/// Part II, RTX 4060 portable), le décodage cuda du lecteur provoquait des erreurs du pilote NVIDIA
+/// (nvlddmkm 153), suivies du plantage du jeu. Aussi plus rapide ici : 1re image 0,17 s contre ~0,9 s pour
+/// cuda et 2,2 s pour d3d11va ; ~150 images/s décodées en 1696x954 (~0,5 cœur en lecture).
+fn video_args(file: &Path, base: f64, (w, h): (u32, u32)) -> Vec<OsString> {
+    let vf = format!("fps={PLAY_FPS},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,{}", pad((w, h)));
+    let mut a = head(base);
+    a.push(file.into());
+    a.extend(["-map", "0:v:0", "-an", "-sn", "-vf", vf.as_str(), "-f", "rawvideo", "-"].map(OsString::from));
+    a
+}
+
+/// Son à partir de `base` : les `tracks` pistes mélangées, 48 kHz stéréo f32, à la vitesse `rate`.
+fn audio_args(file: &Path, base: f64, tracks: usize, rate: f32) -> Vec<OsString> {
+    // atempo accepte 0,5 à 100 : 0,25 = deux fois 0,5.
+    let tempo = match rate {
+        x if (x - 1.0).abs() < 0.01 => String::new(),
+        x if x < 0.5 => ",atempo=0.5,atempo=0.5".into(),
+        x => format!(",atempo={x}"),
+    };
+    let ins: String = (0..tracks).map(|i| format!("[0:a:{i}]")).collect();
+    let fc = format!("{ins}amix=inputs={tracks}:normalize=0,aresample=48000{tempo}[a]");
+    let mut a = head(base);
+    a.push(file.into());
+    a.extend(["-filter_complex", fc.as_str(), "-map", "[a]", "-vn", "-sn", "-f", "f32le", "-ar", "48000", "-ac", "2", "-"].map(OsString::from));
+    a
+}
+
 /// Envoie le son décodé (f32, 48 kHz, stéréo) à la sortie par défaut de Windows, au rythme de la carte son.
 /// Le tampon est rempli d'avance, mais la lecture ne démarre qu'avec la première image (`t0`) : sans ça, le
 /// son partait avant l'image (démarrage du décodage vidéo, saut jusqu'au point visé).
-/// Arrête des ffmpeg du lecteur. L'arrêt est demandé tout de suite ; la fin
-/// n'est attendue que par `close`. Avant, chaque saut figeait la fenêtre ~70 ms et chaque pause ~45 ms.
-/// Leurs images déjà en route sont ignorées : `run` et `epoch` ont changé.
-fn reap(mut kids: Vec<Child>) {
-    if kids.is_empty() {
-        return;
-    }
-    kids.iter_mut().for_each(|k| drop(k.kill()));
-    let mut d = DYING.lock().unwrap();
-    d.retain_mut(|k| !matches!(k.try_wait(), Ok(Some(_))));
-    d.extend(kids);
-}
-
-/// ffmpeg arrêtés pas encore sortis : attendus par `close` (fichier à libérer), sinon relevés au prochain arrêt.
-static DYING: Mutex<Vec<Child>> = Mutex::new(Vec::new());
-
 fn play_pcm(mut out: impl Read, cur: &AtomicU64, run: u64, gain: &AtomicU32, t0: &Mutex<Option<Instant>>) -> Result<(), Box<dyn std::error::Error>> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
     let _ = wasapi::initialize_mta();
@@ -591,5 +618,42 @@ fn apply_gain(buf: &mut [u8], gain: &AtomicU32) {
             let v = f32::from_le_bytes([s[0], s[1], s[2], s[3]]) * g;
             s.copy_from_slice(&v.to_le_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(a: Vec<OsString>) -> String {
+        a.iter().map(|x| x.to_string_lossy()).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn seek_is_before_the_input_for_a_fast_jump() {
+        let f = Path::new(r"C:\clips\a b.mp4");
+        for a in [line(still_args(f, 12.3456, (384, 216))), line(video_args(f, 12.3456, (384, 216))), line(audio_args(f, 12.3456, 1, 1.0))] {
+            let (ss, i) = (a.find("-ss 12.346").unwrap(), a.find(r"-i C:\clips\a b.mp4").unwrap());
+            assert!(ss < i, "{a}");
+            assert!(a.contains("-analyzeduration 0 -probesize 32768"), "{a}");
+        }
+    }
+
+    #[test]
+    fn still_is_one_frame_and_playback_is_60_fps_at_the_player_size() {
+        let f = Path::new("c.mp4");
+        let s = line(still_args(f, 0.0, (594, 334)));
+        assert!(s.contains("-frames:v 1") && s.contains("scale=594:334") && s.contains("pad=594:334"), "{s}");
+        let v = line(video_args(f, 0.0, (594, 334)));
+        assert!(v.contains("fps=60,scale=594:334") && !v.contains("hwaccel") && !v.contains("-frames:v"), "{v}");
+    }
+
+    #[test]
+    fn audio_mixes_every_track_and_follows_the_speed() {
+        let f = Path::new("c.mp4");
+        let a = line(audio_args(f, 0.0, 3, 1.0));
+        assert!(a.contains("[0:a:0][0:a:1][0:a:2]amix=inputs=3:normalize=0,aresample=48000[a]"), "{a}");
+        assert!(line(audio_args(f, 0.0, 1, 2.0)).contains("aresample=48000,atempo=2[a]"));
+        assert!(line(audio_args(f, 0.0, 1, 0.25)).contains("atempo=0.5,atempo=0.5[a]"), "0,25 : deux fois 0,5");
     }
 }
