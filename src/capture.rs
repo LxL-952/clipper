@@ -1709,6 +1709,38 @@ mod live_fullscreen {
     }
 }
 
+/// Bout en bout sur ce PC : vraie capture du bureau (dossiers temporaires, sans son), puis deux clips à 8 s
+/// d'écart. Le premier prend tout le buffer, le second seulement ces ~8 s (registry.rs), et le superviseur
+/// (watchdog::Watch) ne relance pas ffmpeg entre-temps.
+#[cfg(test)]
+mod live_clips {
+    #[test]
+    #[ignore = "capture l'écran avec ffmpeg pendant ~35 s"]
+    fn second_clip_does_not_repeat_the_first() {
+        let mut cfg = crate::config::Config::load();
+        let base = std::env::temp_dir().join(format!("clipper-live-{}", std::process::id()));
+        (cfg.out_dir, cfg.buffer_dir, cfg.buffer_secs, cfg.desktop_capture) = (base.join("out"), base.join("buf"), 30, true);
+        let (ok, encoders, _) = super::startup_probes(&cfg, false);
+        assert!(ok, "ffmpeg introuvable");
+        cfg.encoder = super::resolve_encoder(&cfg, &encoders, &super::gpus());
+        let native = super::native_size(&cfg).unwrap_or((1920, 1080));
+        let b = super::Buffer::start(cfg.clone(), native, cfg.buffer_dir.clone(), None);
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        let first = super::save_clip(&cfg, &b.dir);
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        let second = super::save_clip(&cfg, &b.dir);
+        b.stop();
+        println!("encodeur {} : 1er clip {first:?}, 2e clip {second:?}", cfg.encoder);
+        let ((p1, s1), (p2, s2)) = (first.unwrap(), second.unwrap());
+        for p in [&p1, &p2] {
+            crate::library::forget(&crate::library::images(p));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert!((15.0..=31.0).contains(&s1), "1er clip : {s1} s");
+        assert!((5.0..=11.0).contains(&s2), "2e clip : {s2} s, il reprend le premier");
+    }
+}
+
 #[cfg(test)]
 mod segs {
     #[test]
