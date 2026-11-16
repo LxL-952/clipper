@@ -233,7 +233,7 @@ pub fn run_elevated(args: &str) -> Result<u32, String> {
 pub fn clean_elevated(ids: &[String], keep: &[PathBuf]) -> i32 {
     let sc = |a: &str, s: &str| {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("sc").args([a, s]).creation_flags(0x0800_0000).status();
+        let _ = std::process::Command::new("sc").args([a, s]).creation_flags(crate::proc::hidden(crate::proc::Priority::Inherit)).status();
     };
     let wu = ids.iter().any(|i| i == "win_update");
     if wu {

@@ -17,10 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// Le processus de Clipper tourne sous la normale (le jeu passe avant) et ses enfants en héritent : le
-/// décodage du lecteur, lui, sert l'utilisateur qui regarde, il garde la priorité normale.
-const NORMAL_PRIORITY: u32 = 0x0000_0020;
+// Le processus de Clipper tourne sous la normale (le jeu passe avant) et ses enfants en héritent : le
+// décodage du lecteur, lui, sert l'utilisateur qui regarde, il garde la priorité normale (Priority::Normal).
 /// Cadence des images envoyées par ffmpeg pendant la lecture (clips à 30 ou 60 images/s).
 const PLAY_FPS: f64 = 60.0;
 /// Fondu de la miniature vers la 1re vraie image d'un clip (la miniature est prise à 1 s, en 320 px :
@@ -330,7 +328,7 @@ impl Player {
         let mut c = Command::new(&self.ffmpeg);
         // Lanczos : réduction la plus nette (bicubique laissait l'aperçu un peu flou).
         let vf = format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd,{}", self.pad());
-        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{t:.3}"), "-i"]).arg(&file);
+        c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{t:.3}"), "-i"]).arg(&file);
         c.args(["-map", "0:v:0", "-an", "-sn", "-frames:v", "1", "-vf", &vf, "-f", "rawvideo", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = c.spawn() else { return };
         let done = Arc::new(AtomicBool::new(false));
@@ -372,7 +370,7 @@ impl Player {
         // Pas de -readrate : il réglait aussi le rythme des images décodées avant le point visé (jusqu'à
         // une image clé, 2 s plus tôt), d'où une image très en retard sur le son après un saut. ffmpeg
         // décode au plus vite, le fil de lecture ci-dessous cale chaque image sur l'horloge.
-        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base)]);
+        c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base)]);
         // Décodage par le processeur, jamais par la carte. Avec un jeu qui pousse la carte à 100 % (The Last
         // of Us Part II, RTX 4060 portable), le décodage cuda du lecteur provoquait des erreurs du pilote
         // NVIDIA (nvlddmkm 153), suivies du plantage du jeu. Aussi plus rapide ici : 1re image 0,17 s contre
@@ -452,7 +450,7 @@ impl Player {
             x => format!(",atempo={x}"),
         };
         let mut c = Command::new(&self.ffmpeg);
-        c.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base), "-i"]).arg(file);
+        c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)).args(["-hide_banner", "-loglevel", "error"]).args(PROBE).args(["-ss", &format!("{:.3}", self.base), "-i"]).arg(file);
         let n = self.audio_tracks;
         let ins: String = (0..n).map(|i| format!("[0:a:{i}]")).collect();
         c.args(["-filter_complex", &format!("{ins}amix=inputs={n}:normalize=0,aresample=48000{tempo}[a]"), "-map", "[a]", "-vn", "-sn"]);

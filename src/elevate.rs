@@ -3,7 +3,6 @@
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TASK: &str = "Clipper (administrateur)";
 const EVENT: &str = "Local\\ClipperOpenSettings";
 
@@ -81,7 +80,7 @@ pub fn own_event(wait: bool) -> Option<windows_sys::Win32::Foundation::HANDLE> {
 }
 
 fn schtasks(args: &[&str]) -> bool {
-    Command::new("schtasks").creation_flags(CREATE_NO_WINDOW).args(args).output().is_ok_and(|o| o.status.success())
+    Command::new("schtasks").creation_flags(crate::proc::hidden(crate::proc::Priority::Inherit)).args(args).output().is_ok_and(|o| o.status.success())
 }
 
 /// Lance l'instance admin via la tâche. `tray` est transmis par un fichier (la tâche a des arguments fixes).
@@ -98,7 +97,7 @@ pub fn run_task(tray: bool) -> bool {
 
 /// Programme que lance la tâche (None : pas de tâche).
 fn task_exe() -> Option<String> {
-    let out = Command::new("schtasks").creation_flags(CREATE_NO_WINDOW).args(["/query", "/tn", TASK, "/xml"]).output().ok()?;
+    let out = Command::new("schtasks").creation_flags(crate::proc::hidden(crate::proc::Priority::Inherit)).args(["/query", "/tn", TASK, "/xml"]).output().ok()?;
     if !out.status.success() {
         return None;
     }

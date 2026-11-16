@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Clipper";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct Gpu {
     pub name: String,
@@ -52,7 +51,7 @@ fn from_registry() -> Option<Gpu> {
 
 fn from_smi() -> Option<Gpu> {
     let out = Command::new("nvidia-smi")
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(crate::proc::hidden(crate::proc::Priority::Inherit))
         .args(["--query-gpu=name,driver_version", "--format=csv,noheader"])
         .output()
         .ok()?;
@@ -179,7 +178,7 @@ fn signed_by_nvidia(file: &Path) -> bool {
         file.display().to_string().replace('\'', "''")
     );
     Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(crate::proc::hidden(crate::proc::Priority::Inherit))
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .status()
         .is_ok_and(|s| s.success())

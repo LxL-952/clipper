@@ -643,7 +643,7 @@ fn run_presentmon() -> bool {
     // Celui livré par l'installateur, à côté de clipper.exe ; sinon celui du PATH (winget).
     let bundled = std::env::current_exe().ok().map(|e| e.with_file_name("presentmon.exe")).filter(|p| p.is_file());
     let mut cmd = std::process::Command::new(bundled.as_deref().unwrap_or("presentmon".as_ref()));
-    cmd.creation_flags(0x0800_0000 | 0x0000_4000) // sans fenêtre, priorité sous la normale
+    cmd.creation_flags(crate::proc::hidden(crate::proc::Priority::Below))
         // Métriques 2.x (pas --v1_metrics) : une ligne par image affichée, images générées comprises.
         .args(["--output_stdout", "--no_console_stats", "--session_name", "ClipperPresentMon", "--stop_existing_session"])
         // Suivi jusqu'à l'affichage indispensable : en plein écran (flip indépendant), une image n'est « terminée »

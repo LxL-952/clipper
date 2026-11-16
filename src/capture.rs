@@ -7,13 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const BELOW_NORMAL: u32 = 0x0000_4000;
 pub const SEG_SECS: u32 = 2;
 
 fn ffmpeg(cfg: &Config) -> Command {
     let mut c = Command::new(&cfg.ffmpeg);
-    c.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL)
+    c.creation_flags(crate::proc::hidden(crate::proc::Priority::Below))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -24,9 +22,8 @@ fn ffmpeg(cfg: &Config) -> Command {
 /// le processeur (compilation des shaders, chargement) l'affamait : plus aucun segment pendant 13 s, relance,
 /// et un trou dans le clip. L'encodage se fait sur la carte graphique : peu de processeur pris au jeu.
 fn ffmpeg_capture(cfg: &Config) -> Command {
-    const NORMAL: u32 = 0x0000_0020;
     let mut c = ffmpeg(cfg);
-    c.creation_flags(CREATE_NO_WINDOW | NORMAL);
+    c.creation_flags(crate::proc::hidden(crate::proc::Priority::Normal));
     c
 }
 
@@ -84,7 +81,7 @@ fn run_now(mut c: Command) -> bool {
 pub fn locate_ffmpeg(cfg: &Config) -> bool {
     let works = || {
         Command::new(&cfg.ffmpeg)
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(crate::proc::hidden(crate::proc::Priority::Inherit))
             .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -454,7 +451,7 @@ pub fn native_size(cfg: &Config) -> Option<(u32, u32)> {
 /// ffprobe qui lit la taille de la sortie `idx` de ddagrab (« 1920,1080 »).
 fn ddagrab_size(cfg: &Config, idx: u32) -> Command {
     let mut c = Command::new(ffprobe(cfg));
-    c.creation_flags(CREATE_NO_WINDOW)
+    c.creation_flags(crate::proc::hidden(crate::proc::Priority::Inherit))
         .args(["-v", "error", "-f", "lavfi", "-i", &format!("ddagrab=output_idx={idx}")])
         .args(["-show_entries", "stream=width,height", "-of", "csv=p=0"])
         .stdin(Stdio::null())
@@ -633,7 +630,7 @@ pub fn probe(cfg: &Config, p: &Path) -> Probe {
         return pr.clone();
     }
     let out = Command::new(ffprobe(cfg))
-        .creation_flags(CREATE_NO_WINDOW | 0x20) // priorité normale : sert au clip qu'on attend
+        .creation_flags(crate::proc::hidden(crate::proc::Priority::Normal)) // priorité normale : sert au clip qu'on attend
         .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name:stream_tags=title", "-of", "json"])
         .arg(p)
         .output()
@@ -1372,7 +1369,7 @@ fn problems(c: &Check, want: f64, fps: u32) -> Vec<String> {
 /// cadence réelle. Le résultat va au journal ; une anomalie y est écrite en clair.
 pub fn verify(cfg: &Config, clip: &Path, want: f64) -> bool {
     let out = Command::new(ffprobe(cfg))
-        .creation_flags(CREATE_NO_WINDOW | 0x0000_0040)
+        .creation_flags(crate::proc::hidden(crate::proc::Priority::Idle))
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,dts_time,flags", "-of", "csv=p=0"])
         .arg(clip)
         .output()
@@ -1406,7 +1403,7 @@ pub fn make_strip(cfg: &Config, clip: &Path) -> bool {
     let iv = strip_step(secs);
     let rows = ((secs / iv).floor() as u32 + 1).div_ceil(10);
     let mut c = ffmpeg(cfg);
-    c.creation_flags(CREATE_NO_WINDOW | 0x0000_0040);
+    c.creation_flags(crate::proc::hidden(crate::proc::Priority::Idle));
     c.args(["-loglevel", "quiet", "-skip_frame", "nokey", "-i"]).arg(clip);
     c.args(["-an", "-sn", "-vf", &format!("fps=1/{iv},scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2,tile=10x{rows}"), "-frames:v", "1", "-q:v", "6", "-y"]);
     c.arg(strip_path(clip));
@@ -1453,7 +1450,7 @@ fn make_thumb_now(cfg: &Config, clip: &Path) -> bool {
     let _ = std::fs::create_dir_all(crate::config::dir().join("thumbs"));
     for at in ["1", "0"] {
         let mut t = ffmpeg(cfg);
-        t.creation_flags(CREATE_NO_WINDOW | 0x0000_0040);
+        t.creation_flags(crate::proc::hidden(crate::proc::Priority::Idle));
         t.args(["-loglevel", "quiet", "-threads", "1", "-ss", at, "-i"]).arg(clip).args(["-frames:v", "1", "-vf", "scale=320:-2", "-y"]).arg(&out);
         if run_now(t) && out.exists() {
             return true;
