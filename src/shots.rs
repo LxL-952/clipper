@@ -363,3 +363,22 @@ fn player_close_releases_file() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Fichier sans image (abîmé) : la lecture s'arrête sur place, elle ne saute pas à la fin comme un clip fini.
+#[test]
+#[ignore = "lance ffmpeg"]
+fn player_stops_in_place_when_no_frame_decodes() {
+    let f = std::env::temp_dir().join("clipper-broken-clip.mp4");
+    std::fs::write(&f, b"pas une video").unwrap();
+    let mut p = crate::player::Player::new("ffmpeg", Arc::new(|| {}));
+    p.set_size(384.0, 216.0);
+    p.open_playing(&f, 30.0, 1);
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_secs(3) {
+        p.tick();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(p.pos() < 1.0, "position {} : le lecteur a sauté à la fin", p.pos());
+    p.close();
+    let _ = std::fs::remove_file(&f);
+}

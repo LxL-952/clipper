@@ -1622,25 +1622,21 @@ pub fn save_clip(cfg: &Config, dir: &Path) -> Result<(PathBuf, f64), String> {
     if seg_ext(&cfg.encoder) == "mkv" {
         wait_segment_close(dir);
     }
-    // Début du clip : pas avant la fin du clip précédent (clipplan::window). Marque posée sous le verrou de
+    // Début du clip : pas avant la fin du clip précédent (clipplan::Ledger). Marque posée sous le verrou de
     // l'horloge, à l'instant de l'instantané : deux appuis rapprochés se suivent sans se recouvrir.
-    static LAST_CLIP: Mutex<Option<f64>> = Mutex::new(None);
+    static LEDGER: Mutex<crate::clipplan::Ledger> = Mutex::new(crate::clipplan::Ledger::new());
     let full = f64::from(cfg.buffer_secs);
-    let (target, mark) = (std::cell::Cell::new(full), std::cell::Cell::new((None, 0.0)));
+    let (target, mark) = (std::cell::Cell::new(full), std::cell::Cell::new(None));
     let snap = take(dir, cfg.clip.fps, |tl, now| {
-        let mut last = LAST_CLIP.lock().unwrap();
-        let w = crate::clipplan::window(full, *last, now);
+        let (w, m) = LEDGER.lock().unwrap().mark(full, now);
         target.set(w);
-        mark.set((*last, now));
-        *last = Some(now);
+        mark.set(Some(m));
         tl.pick(now, w)
     });
     // Clip raté : la marque revient, ces secondes iront dans le prochain clip.
     let undo = || {
-        let (prev, mine) = mark.get();
-        let mut last = LAST_CLIP.lock().unwrap();
-        if *last == Some(mine) {
-            *last = prev;
+        if let Some(m) = mark.get() {
+            LEDGER.lock().unwrap().undo(m);
         }
     };
     let t_snap = t0.elapsed().as_secs_f32();

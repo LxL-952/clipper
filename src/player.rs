@@ -73,6 +73,8 @@ pub struct Player {
     /// Arrivée de la première image du clip ouvert (fondu depuis la miniature).
     shown: Arc<Mutex<Option<Instant>>>,
     ended: Arc<AtomicBool>,
+    /// La lecture n'a sorti aucune image loin de la fin (fichier abîmé, ffmpeg en échec).
+    failed: Arc<AtomicBool>,
     kids: Vec<Child>,
     /// Image fixe en cours de décodage (une seule à la fois) et sa fin, signalée par son fil (un drapeau par
     /// image : celui d'une image tuée ne doit pas marquer la suivante comme finie).
@@ -108,6 +110,7 @@ impl Player {
             frame: Arc::new(Mutex::new(None)),
             shown: Arc::new(Mutex::new(None)),
             ended: Arc::new(AtomicBool::new(false)),
+            failed: Arc::new(AtomicBool::new(false)),
             kids: vec![],
             still: None,
             want: None,
@@ -278,6 +281,13 @@ impl Player {
             self.playing = false;
             self.base = self.dur;
         }
+        if self.failed.swap(false, Ordering::Relaxed) && self.playing {
+            // Aucune image : arrêt sur place (avant, le lecteur sautait à la fin comme si le clip était fini).
+            // `kill` arrête aussi le son, qui attendait la première image.
+            crate::log("lecteur : aucune image décodée, lecture arrêtée");
+            self.playing = false;
+            self.kill();
+        }
         // Image fixe finie (ou bloquée plus de 2 s) : place à la suivante, vers le dernier point demandé.
         if self.still.as_ref().is_some_and(|(_, t, done)| done.load(Ordering::Relaxed) || t.elapsed() > Duration::from_secs(2)) {
             self.kill_still();
@@ -375,7 +385,9 @@ impl Player {
         if let Ok(mut child) = c.spawn() {
             if let Some(mut out) = child.stdout.take() {
                 let (cur, frame, ended, wake, t0) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.t0.clone());
-                let (shown, epoch) = (self.shown.clone(), self.epoch.load(Ordering::Relaxed));
+                let (shown, failed, epoch) = (self.shown.clone(), self.failed.clone(), self.epoch.load(Ordering::Relaxed));
+                // 0 image à moins de 0,5 s de la fin : fin normale, pas un échec.
+                let near_end = self.dur > 0.0 && self.base > self.dur - 0.5;
                 std::thread::spawn(move || {
                     let mut buf = vec![0u8; (w * h * 4) as usize];
                     let (mut i, mut dropped, mut streak) = (0u32, 0u32, 0u32);
@@ -420,7 +432,7 @@ impl Player {
                         crate::log(&format!("lecteur : {dropped} image(s) sautée(s) sur {i} pour rester calé sur le son"));
                     }
                     if cur.load(Ordering::Relaxed) == run {
-                        ended.store(true, Ordering::Relaxed);
+                        if i == 0 && !near_end { &failed } else { &ended }.store(true, Ordering::Relaxed);
                         wake();
                     }
                 });
