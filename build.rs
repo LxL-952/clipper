@@ -1,6 +1,7 @@
 //! Logo : trombone orange brillant dessiné ici (pas de fichier image dans le dépôt), puis
 //! - clipper.ico à côté de l'exe (pour l'installateur),
-//! - ressource d'icône n° 1 liée dans l'exe (Explorateur, barre des tâches, zone de notification).
+//! - ressource d'icône n° 1 liée dans l'exe (Explorateur, barre des tâches, zone de notification),
+//! - ressource de version n° 1 (éditeur, description, version lus dans Cargo.toml).
 //! link.exe accepte un .res tel quel : pas besoin de rc.exe ni du SDK Windows.
 use std::path::PathBuf;
 
@@ -142,8 +143,69 @@ fn res_entry(out: &mut Vec<u8>, kind: u16, id: u16, flags: u16, data: &[u8]) {
     out.resize(out.len().div_ceil(4) * 4, 0);
 }
 
+/// Chaîne UTF-16 terminée par un zéro, comme Windows l'attend dans les ressources.
+fn utf16z(s: &str) -> Vec<u8> {
+    s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
+}
+
+/// Un nœud de VS_VERSIONINFO : longueur, longueur de la valeur, type (1 = texte), clé, valeur, enfants,
+/// chaque partie alignée sur 4 octets.
+fn ver_node(key: &str, text: bool, value: &[u8], value_len: u16, children: &[Vec<u8>]) -> Vec<u8> {
+    let pad = |b: &mut Vec<u8>| b.resize(b.len().div_ceil(4) * 4, 0);
+    let mut b = vec![0, 0];
+    b.extend(value_len.to_le_bytes());
+    b.extend((text as u16).to_le_bytes());
+    b.extend(utf16z(key));
+    pad(&mut b);
+    b.extend(value);
+    for c in children {
+        pad(&mut b);
+        b.extend(c);
+    }
+    let len = (b.len() as u16).to_le_bytes();
+    b[..2].copy_from_slice(&len);
+    b
+}
+
+/// Ressource de version (onglet « Détails » des propriétés) : éditeur, description, version.
+/// Un exe sans ces informations ressemble davantage à un programme malveillant pour les antivirus.
+fn version_info() -> Vec<u8> {
+    let v = |k: &str| std::env::var(k).unwrap().parse::<u32>().unwrap();
+    let (major, minor, patch) = (v("CARGO_PKG_VERSION_MAJOR"), v("CARGO_PKG_VERSION_MINOR"), v("CARGO_PKG_VERSION_PATCH"));
+    let version = format!("{major}.{minor}.{patch}.0");
+    let ms = major << 16 | minor;
+    let ls = patch << 16;
+    // VS_FIXEDFILEINFO : signature, version de la structure, versions fichier et produit, masque,
+    // drapeaux, système (VOS_NT_WINDOWS32), type (VFT_APP), sous-type, date.
+    let fixed: Vec<u8> = [0xFEEF_04BD, 0x0001_0000, ms, ls, ms, ls, 0x3F, 0, 0x0004_0004, 1, 0, 0, 0]
+        .iter()
+        .flat_map(|d: &u32| d.to_le_bytes())
+        .collect();
+    let strings: Vec<Vec<u8>> = [
+        ("CompanyName", "LxL-952"),
+        ("FileDescription", "Clipper - enregistreur de clips de jeu"),
+        ("FileVersion", &version),
+        ("InternalName", "clipper"),
+        ("LegalCopyright", "Copyright (c) 2026 LxL-952"),
+        ("OriginalFilename", "clipper.exe"),
+        ("ProductName", "Clipper"),
+        ("ProductVersion", &version),
+    ]
+    .iter()
+    .map(|(k, s)| ver_node(k, true, &utf16z(s), s.encode_utf16().count() as u16 + 1, &[]))
+    .collect();
+    // 0409 = anglais (États-Unis), comme la langue des autres ressources ; 04B0 = 1200 = Unicode.
+    let table = ver_node("040904B0", true, &[], 0, &strings);
+    let string_info = ver_node("StringFileInfo", true, &[], 0, &[table]);
+    let translation = ver_node("Translation", false, &[0x09, 0x04, 0xB0, 0x04], 4, &[]);
+    let var_info = ver_node("VarFileInfo", true, &[], 0, &[translation]);
+    ver_node("VS_VERSION_INFO", false, &fixed, fixed.len() as u16, &[string_info, var_info])
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // La version de l'exe vient de Cargo.toml : la changer doit relancer ce script.
+    println!("cargo:rerun-if-changed=Cargo.toml");
     // include_dir! ne prévient pas Cargo : sans ça, une interface modifiée n'entre pas dans l'exe.
     println!("cargo:rerun-if-changed=ui");
     let images: Vec<(usize, Vec<u8>)> = SIZES.iter().map(|&n| (n, dib(n, &draw(n)))).collect();
@@ -168,6 +230,7 @@ fn main() {
         group.extend((i as u16 + 1).to_le_bytes());
     }
     res_entry(&mut res, 14, 1, 0x1030, &group); // RT_GROUP_ICON n° 1 = icône de l'exe
+    res_entry(&mut res, 16, 1, 0x0030, &version_info()); // RT_VERSION n° 1
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     std::fs::write(out.join("clipper.res"), res).unwrap();
