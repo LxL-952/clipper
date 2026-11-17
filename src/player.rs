@@ -160,7 +160,7 @@ impl Transport {
     }
 
     /// À chaque dessin. `ended` : la lecture a sorti sa dernière image ; `failed` : aucune image loin de la
-    /// fin ; `still_free` : aucune image fixe en cours de décodage.
+    /// fin ; `still_free` : une image fixe de plus peut être lancée.
     fn tick(&mut self, ended: bool, failed: bool, still_free: bool, now: Instant) -> Vec<Act> {
         let mut acts = vec![];
         if ended && self.playing {
@@ -234,10 +234,20 @@ pub struct Player {
     /// ffmpeg arrêtés pas encore sortis : attendus par `close` (fichier à libérer), sinon relevés au prochain
     /// arrêt. Propres à ce lecteur : la barre et la fenêtre ne s'attendent plus l'une l'autre.
     dying: Vec<Child>,
-    /// Image fixe en cours de décodage (une seule à la fois) et sa fin, signalée par son fil (un drapeau par
-    /// image : celui d'une image tuée ne doit pas marquer la suivante comme finie).
-    still: Option<(Child, Instant, Arc<AtomicBool>)>,
+    /// Images fixes en cours de décodage (`STILLS` au plus, lancées à `STILL_GAP` d'écart), chacune avec sa
+    /// fin, signalée par son fil (un drapeau par image : celui d'une image tuée ne marque pas les autres).
+    still: Vec<(Child, Instant, Arc<AtomicBool>)>,
+    /// Numéro de la dernière image fixe lancée, et de la plus récente affichée : une image fixe partie plus tôt
+    /// mais finie plus tard est ignorée (l'image ne recule pas pendant un glissement).
+    still_seq: u64,
+    still_shown: Arc<AtomicU64>,
 }
+
+/// Images fixes décodées en même temps. Une image coûte ~170 ms (surtout le lancement de ffmpeg et le
+/// décodage depuis l'image clé) : une à la fois, un glissement ne montrait que ~6 images par seconde.
+/// Deux, et pas plus : la barre Alt+Z s'en sert aussi pendant un jeu.
+const STILLS: usize = 2;
+const STILL_GAP: Duration = Duration::from_millis(80);
 
 impl Player {
     pub fn new(ffmpeg: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Player {
@@ -261,7 +271,9 @@ impl Player {
             failed: Arc::new(AtomicBool::new(false)),
             kids: vec![],
             dying: vec![],
-            still: None,
+            still: vec![],
+            still_seq: 0,
+            still_shown: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -387,13 +399,14 @@ impl Player {
         if failed && self.t.playing {
             crate::log("lecteur : aucune image décodée, lecture arrêtée");
         }
-        // Image fixe finie (ou bloquée plus de 2 s) : place à la suivante, vers le dernier point demandé.
-        if self.still.as_ref().is_some_and(|(_, t, done)| done.load(Ordering::Relaxed) || t.elapsed() > Duration::from_secs(2)) {
-            self.kill_still();
-        }
-        let acts = self.t.tick(ended, failed, self.still.is_none(), Instant::now());
+        // Images fixes finies (ou bloquées plus de 2 s) : place aux suivantes, vers le dernier point demandé.
+        let (over, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.still).into_iter().partition(|(_, t, done)| done.load(Ordering::Relaxed) || t.elapsed() > Duration::from_secs(2));
+        self.still = live;
+        self.reap(over.into_iter().map(|(k, _, _)| k).collect());
+        let free = self.still.len() < STILLS && self.still.last().is_none_or(|(_, t, _)| t.elapsed() >= STILL_GAP);
+        let acts = self.t.tick(ended, failed, free, Instant::now());
         self.act(acts);
-        self.t.busy() || self.still.is_some() || self.fade() < 1.0
+        self.t.busy() || !self.still.is_empty() || self.fade() < 1.0
     }
 
     /// Fait les actions décidées par `Transport`.
@@ -418,9 +431,8 @@ impl Player {
     }
 
     fn kill_still(&mut self) {
-        if let Some((k, _, _)) = self.still.take() {
-            self.reap(vec![k]);
-        }
+        let kids = std::mem::take(&mut self.still).into_iter().map(|(k, _, _)| k).collect();
+        self.reap(kids);
     }
 
     /// Arrête des ffmpeg du lecteur. L'arrêt est demandé tout de suite ; la fin n'est attendue que par
@@ -441,17 +453,19 @@ impl Player {
         let (w, h) = self.size;
         let Ok(mut child) = command(&self.ffmpeg, still_args(&file, t, self.size)).spawn() else { return };
         let done = Arc::new(AtomicBool::new(false));
+        self.still_seq += 1;
         if let Some(mut out) = child.stdout.take() {
             let (frame, shown, wake, done) = (self.frame.clone(), self.shown.clone(), self.wake.clone(), done.clone());
-            let (opened, epoch) = (self.opened.clone(), self.epoch.clone());
+            let (opened, epoch, newest, seq) = (self.opened.clone(), self.epoch.clone(), self.still_shown.clone(), self.still_seq);
             let my_open = opened.load(Ordering::Relaxed);
             std::thread::spawn(move || {
                 let mut buf = vec![0u8; (w * h * 4) as usize];
                 if out.read_exact(&mut buf).is_ok() {
                     let mut f = frame.lock().unwrap();
                     let now = epoch.load(Ordering::Relaxed);
-                    // Clip refermé (vérifié sous le verrou), ou point déjà montré par la lecture : image ignorée.
-                    if opened.load(Ordering::Relaxed) == my_open && !f.as_ref().is_some_and(|f| f.play && f.epoch == now) {
+                    // Clip refermé (vérifié sous le verrou), point déjà montré par la lecture, ou image fixe plus
+                    // récente déjà affichée : image ignorée.
+                    if opened.load(Ordering::Relaxed) == my_open && !f.as_ref().is_some_and(|f| f.play && f.epoch == now) && newest.fetch_max(seq, Ordering::Relaxed) < seq {
                         if f.is_none() {
                             *shown.lock().unwrap() = Some(Instant::now());
                         }
@@ -462,7 +476,7 @@ impl Player {
                 wake();
             });
         }
-        self.still = Some((child, Instant::now(), done));
+        self.still.push((child, Instant::now(), done));
     }
 
     /// (Re)lance la lecture à la position `base` : images au rythme du clip, et le son.
