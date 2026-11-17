@@ -999,7 +999,7 @@ function introSound(A,t0){try{
 if(!window.__INIT__){
   window.__DEV__=true;
   const nogpu=/nogpu/.test(location.hash), novid=/vide/.test(location.hash);
-  const C0={buffer_secs:180,clip:{height:1080,fps:60},rec:{height:1080,fps:30},encoder:"h264_nvenc",quality:1,container:"mp4",audio_mode:"split",audio_tracks:["game","mic"],out_device:null,mic_device:"{0.0.1.00000000}.{b2c1}",game_volume:1,mic_volume:.8,mic_muted:false,key_clip:"Alt+KeyX",key_rec:"Alt+KeyR",key_bar:"Alt+KeyZ",out_dir:"C:\\Users\\Kurero\\Videos\\Clipper",ffmpeg:"ffmpeg",driver_branch:"game_ready",encode_chip:"auto",monitor:0,stretch:"off",desktop_capture:true,buffer_dir:"C:\\Users\\Kurero\\AppData\\Local\\Temp\\Clipper\\buf",overlay_mode:"hotkey",key_overlay:"Alt+KeyF",overlay_items:["fps","frametime","cpu","gpu"]};
+  const C0={buffer_secs:180,clip:{height:1080,fps:60},rec:{height:1080,fps:30},encoder:"h264_nvenc",quality:1,container:"mp4",audio_mode:"split",audio_tracks:["game","mic"],out_device:null,mic_device:"{0.0.1.00000000}.{b2c1}",game_volume:1,mic_volume:.8,mic_muted:false,key_clip:"Alt+KeyX",key_rec:"Alt+KeyR",key_bar:"Alt+KeyZ",out_dir:"C:\\Users\\Joueur\\Videos\\Clipper",ffmpeg:"ffmpeg",driver_branch:"game_ready",encode_chip:"auto",monitor:0,stretch:"off",desktop_capture:true,buffer_dir:"C:\\Users\\Joueur\\AppData\\Local\\Temp\\Clipper\\buf",overlay_mode:"hotkey",key_overlay:"Alt+KeyF",overlay_items:["fps","frametime","cpu","gpu"]};
   window.__INIT__={page:"index",config:C0,encoders:["h264_nvenc","hevc_nvenc","av1_nvenc","h264_amf","hevc_amf","libx264"],native:[1920,1200],
     gpus:[{id:"nvidia",name:"NVIDIA GeForce RTX 4060 Laptop GPU"},{id:"amd",name:"AMD Radeon(TM) 780M"}],
     monitors:[{idx:0,w:1920,h:1200,name:"Écran 1 (interne)"},{idx:1,w:1920,h:1080,name:"Écran 2"}],
@@ -1009,11 +1009,11 @@ if(!window.__INIT__){
     gpu:nogpu?null:{name:"NVIDIA GeForce RTX 4060 Laptop GPU",driver:"621.01"}};
   const now=Date.now()/1000|0;
   let vids=novid?[]:[
-    {path:"C:\\Users\\Kurero\\Videos\\Clipper\\Valorant 2026-11-07 21-14-03.mp4",name:"Valorant 2026-11-07 21-14-03.mp4",kind:"Clip",bytes:452e6,secs:180,date:now-600,thumb:""},
-    {path:"C:\\Users\\Kurero\\Videos\\Clipper\\Valorant 2026-11-07 20-51-40.mp4",name:"Valorant 2026-11-07 20-51-40.mp4",kind:"Clip",bytes:449e6,secs:179,date:now-2000,thumb:""},
-    {path:"C:\\Users\\Kurero\\Videos\\Clipper\\REC 2026-11-06 22-03-11.mp4",name:"REC 2026-11-06 22-03-11.mp4",kind:"REC",bytes:3.21e9,secs:1924,date:now-86400,thumb:""},
-    {path:"C:\\Users\\Kurero\\Videos\\Clipper\\Bureau 2026-11-05 18-40-02.mp4",name:"Bureau 2026-11-05 18-40-02.mp4",kind:"Clip",bytes:151e6,secs:60,date:now-200000,thumb:""},
-    {path:"C:\\Users\\Kurero\\Videos\\Clipper\\Elden Ring 2026-11-02 23-12-55.mkv",name:"Elden Ring 2026-11-02 23-12-55.mkv",kind:"Clip",bytes:301e6,secs:120,date:now-450000,thumb:""}];
+    {path:"C:\\Users\\Joueur\\Videos\\Clipper\\Valorant 2026-11-07 21-14-03.mp4",name:"Valorant 2026-11-07 21-14-03.mp4",kind:"Clip",bytes:452e6,secs:180,date:now-600,thumb:""},
+    {path:"C:\\Users\\Joueur\\Videos\\Clipper\\Valorant 2026-11-07 20-51-40.mp4",name:"Valorant 2026-11-07 20-51-40.mp4",kind:"Clip",bytes:449e6,secs:179,date:now-2000,thumb:""},
+    {path:"C:\\Users\\Joueur\\Videos\\Clipper\\REC 2026-11-06 22-03-11.mp4",name:"REC 2026-11-06 22-03-11.mp4",kind:"REC",bytes:3.21e9,secs:1924,date:now-86400,thumb:""},
+    {path:"C:\\Users\\Joueur\\Videos\\Clipper\\Bureau 2026-11-05 18-40-02.mp4",name:"Bureau 2026-11-05 18-40-02.mp4",kind:"Clip",bytes:151e6,secs:60,date:now-200000,thumb:""},
+    {path:"C:\\Users\\Joueur\\Videos\\Clipper\\Elden Ring 2026-11-02 23-12-55.mkv",name:"Elden Ring 2026-11-02 23-12-55.mkv",kind:"Clip",bytes:301e6,secs:120,date:now-450000,thumb:""}];
   let rec=false,rs=0,rt=null;
   const emit=(m,ms=80)=>setTimeout(()=>window.__on&&window.__on(m),ms);
   window.ipc={postMessage(s){const m=JSON.parse(s);switch(m.cmd){

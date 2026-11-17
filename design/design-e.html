@@ -689,7 +689,7 @@ details.more .in{padding:4px 12px 14px;display:grid;gap:12px}
             <div class="loc">
               <svg class="i" aria-hidden="true"><use href="#i-folder"/></svg>
               <span class="what">Clips et REC</span>
-              <span class="path">C:\Users\Kurero\Vidéos\Clipper</span>
+              <span class="path">C:\Users\Joueur\Vidéos\Clipper</span>
               <div class="disk"><span class="gauge" aria-hidden="true"><i style="--used:71%"></i></span><span class="n">C: <b>138 Go</b> libres / 476</span></div>
               <button class="btn" type="button">Changer…</button>
             </div>
@@ -891,7 +891,7 @@ $('#desk').addEventListener('change',e=>{$('#h-desk').textContent=e.target.check
 $('#fixKey').onclick=()=>{$('#kBar').textContent='Alt+Maj+Z';$('#hkBar').classList.remove('conflict');$('#conflict').hidden=true};
 
 /* ---- disque buffer : démo du sélecteur ---- */
-const disks=[['D:\\Clipper\\buf','D: <b>580 Go</b> libres / 931','38%'],['C:\\Users\\Kurero\\AppData\\Local\\Temp\\Clipper\\buf','C: <b>138 Go</b> libres / 476','71%']];let di=0;
+const disks=[['D:\\Clipper\\buf','D: <b>580 Go</b> libres / 931','38%'],['C:\\Users\\Joueur\\AppData\\Local\\Temp\\Clipper\\buf','C: <b>138 Go</b> libres / 476','71%']];let di=0;
 $('#bufBtn').onclick=()=>{di=(di+1)%2;$('#bufPath').textContent=disks[di][0];$('#bufN').innerHTML=disks[di][1];$('#bufG').style.setProperty('--used',disks[di][2])};
 
 /* ---- overlay ---- */

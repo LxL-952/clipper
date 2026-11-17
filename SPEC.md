@@ -134,9 +134,15 @@ D:\clipper
   Cargo.toml
   src/main.rs       boucle tao, tray, hotkeys, dispatch
   src/config.rs     config.json (%APPDATA%\Clipper)
-  src/capture.rs    encodeurs, args ffmpeg, buffer, clip, REC
-  src/watchdog.rs   décisions du superviseur (blocage, plein écran, veille, garde-fou NVENC), testées
+  src/cmd.rs        commandes des fenêtres vers l'app (typées)
+  src/event.rs      messages de l'app vers la fenêtre et la barre (typés)
+  src/capture.rs    encodeurs, args ffmpeg, buffer (superviseur : relevés et actions), clip, REC
+  src/watchdog.rs   automate du superviseur (Watch : blocage, plein écran, garde-fou NVENC, échecs, retour au bureau), testé
+  src/registry.rs   registre du buffer : horloge, marque du dernier clip, segments retenus, testé
   src/clipplan.rs   règles d'assemblage d'un clip (durée sans reprise du clip précédent, coupe au début, durée attendue, entrée ffmpeg), testées
+  src/library.rs    miniatures et planches d'aperçus (clés, chemins, fabrication)
+  src/player.rs     lecteur : Transport (état pur, testé), arguments ffmpeg, image et son
+  src/proc.rs       drapeaux de lancement des processus (sans fenêtre, priorités nommées)
   src/foreground.rs jeu plein écran au premier plan, bureau sécurisé
   src/timeline.rs   horloge du buffer (segments datés, captures)
   src/keepalive.rs  point invisible qui garde WGC vivant sur un écran immobile
