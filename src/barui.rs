@@ -518,7 +518,7 @@ impl BarUi {
             }
             if ui.click(id("pl-img"), scr) {
                 self.player.toggle();
-                self.tap = Some((now, self.player.playing));
+                self.tap = Some((now, self.player.t.playing));
             }
             // Retour du clic sur l'image : icône lecture / pause qui grossit et s'efface (0,5 s).
             if let Some((t, play)) = self.tap {
@@ -537,7 +537,7 @@ impl BarUi {
             }
             // commandes
             let cy = scr.bottom() + 8.0;
-            let playing = self.player.playing;
+            let playing = self.player.t.playing;
             let pb = r(q.x + 10.0, cy, 32.0, 30.0);
             if ui.hot(pb) {
                 ui.c.rrect(pb, 6.0, pal::RAISE_H);
@@ -546,11 +546,11 @@ impl BarUi {
             if ui.click(id("c-play"), pb) {
                 self.player.toggle();
             }
-            let (d, pos) = (self.player.dur.max(0.001), self.player.pos());
+            let (d, pos) = (self.player.t.dur.max(0.001), self.player.pos());
             let f = F::m(12.0, 500);
             let mut tx = pb.right() + 6.0;
             tx += ui.c.text(tx, cy, 30.0, &dur(pos), f, pal::TEXT);
-            tx += ui.c.text(tx, cy, 30.0, &format!(" / {}", dur(self.player.dur)), f, pal::TEXT3) + 10.0;
+            tx += ui.c.text(tx, cy, 30.0, &format!(" / {}", dur(self.player.t.dur)), f, pal::TEXT3) + 10.0;
             let vol = r(q.right() - 10.0 - 70.0, cy + 6.0, 70.0, 18.0);
             let mb = r(vol.x - 38.0, cy, 32.0, 30.0);
             let sk = r(tx, cy + 6.0, mb.x - 8.0 - tx, 18.0);
@@ -580,7 +580,7 @@ impl BarUi {
             if ui.hot(sk) || ui.s.active == id("seek") {
                 let mx = ui.mouse().0.clamp(sk.x, sk.right());
                 let t = ((mx - sk.x) / sk.w).clamp(0.0, 1.0) as f64 * d;
-                if self.preview.show(ui, &self.cfg, &path, self.player.dur, t, mx, sk, scr) {
+                if self.preview.show(ui, &self.cfg, &path, self.player.t.dur, t, mx, sk, scr) {
                     self.wake_in(Duration::from_millis(300));
                 }
             }
@@ -671,7 +671,7 @@ impl BarUi {
             self.wake_in(Duration::from_millis(500));
         }
         if self.player.tick() {
-            self.wake_in(Duration::from_millis(if self.player.playing { 100 } else { 60 }));
+            self.wake_in(Duration::from_millis(if self.player.t.playing { 100 } else { 60 }));
         }
         let _ = pretty;
     }

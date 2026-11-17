@@ -68,7 +68,7 @@ impl Front {
             self.p_idle = now;
             self.p_mouse = ui.i.mouse;
         }
-        let playing = self.player.playing;
+        let playing = self.player.t.playing;
         let idle = playing && ui.s.active == 0 && (!inside || now.duration_since(self.p_idle).as_secs_f32() > 2.2);
         let a = ui.anim(id("p-idle"), if idle { 0.0 } else { 1.0 }, 0.25);
         if playing && !idle {
@@ -78,7 +78,7 @@ impl Front {
         let (pt, px, pb) = (cq(12.0, 5.0, 22.0), cq(4.0, 1.6, 8.0), cq(2.0, 1.0, 6.0));
         let (bh, bw, ic, fs) = (cq(24.0, 6.6, 32.0), cq(24.0, 7.0, 34.0), cq(14.0, 3.8, 18.0), cq(10.0, 2.5, 12.5));
         let pc = r(q.x, q.bottom() - (pt + 18.0 + bh + pb), q.w, pt + 18.0 + bh + pb);
-        let (d, pos) = (self.player.dur.max(0.001), self.player.pos());
+        let (d, pos) = (self.player.t.dur.max(0.001), self.player.pos());
         let mut used = false;
         if a > 0.01 {
             let old = ui.c.set_clip(Some(q.inter(&ui.c.clip_rect())));
@@ -137,7 +137,7 @@ impl Front {
             x += bw + cq(2.0, 1.0, 6.0);
             let f = F::m(fs, 400);
             x += ui.c.text(x, ry, bh, &dur(pos), f.wt(500), pal::TEXT.a(a));
-            ui.c.text(x, ry, bh, &format!(" / {}", dur(self.player.dur)), f, pal::TEXT3.a(a));
+            ui.c.text(x, ry, bh, &format!(" / {}", dur(self.player.t.dur)), f, pal::TEXT3.a(a));
             let mut rx = pc.right() - px - bw;
             if pbtn(ui, id("pFull"), rx, bw, Some(if self.fullscreen { "unfull" } else { "full" }), "") {
                 self.set_fullscreen(!self.fullscreen);
@@ -176,9 +176,9 @@ impl Front {
             }
             if q.w > 300.0 {
                 rx -= bw + 2.0;
-                let label = format!("{}×", self.player.rate.to_string().replace('.', ","));
+                let label = format!("{}×", self.player.t.rate.to_string().replace('.', ","));
                 if pbtn(ui, id("pRate"), rx, bw, None, &label) {
-                    let i = RATES.iter().position(|x| (*x - self.player.rate).abs() < 0.01).unwrap_or(0);
+                    let i = RATES.iter().position(|x| (*x - self.player.t.rate).abs() < 0.01).unwrap_or(0);
                     self.player.set_rate(RATES[(i + 1) % RATES.len()]);
                     used = true;
                 }
@@ -201,7 +201,7 @@ impl Front {
                 let mx = ui.mouse().0.clamp(sk.x, sk.right());
                 let t = ((mx - sk.x) / sk.w).clamp(0.0, 1.0) as f64 * d;
                 if let Some(path) = self.player.file.clone() {
-                    if self.preview.show(ui, &self.cfg, &path, self.player.dur, t, mx, sk, q) {
+                    if self.preview.show(ui, &self.cfg, &path, self.player.t.dur, t, mx, sk, q) {
                         self.wake_in(std::time::Duration::from_millis(300));
                     }
                 }

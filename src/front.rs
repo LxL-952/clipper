@@ -723,7 +723,7 @@ impl Front {
             self.wake_in(Duration::from_millis(66));
         }
         if self.player.tick() {
-            self.wake_in(Duration::from_millis(if self.player.playing { 100 } else { 60 }));
+            self.wake_in(Duration::from_millis(if self.player.t.playing { 100 } else { 60 }));
         }
         if self.thumb_wait {
             self.wake_in(Duration::from_secs(1)); // miniature d'un clip tout neuf : relue dans une seconde

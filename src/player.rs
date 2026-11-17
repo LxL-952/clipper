@@ -34,6 +34,164 @@ const PROBE: [&str; 4] = ["-analyzeduration", "0", "-probesize", "32768"];
 #[cfg(test)]
 pub static AUDIO_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Ce que `Player` doit faire après un geste ou à un dessin, décidé par `Transport`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Act {
+    /// Arrêter la lecture en cours (images et son).
+    Kill,
+    /// Nouveau point visé : les images de l'ancien point sont ignorées, et la position reste figée jusqu'à la
+    /// première image du prochain lancement.
+    Aim,
+    /// Décoder une seule image au point donné.
+    Still(f64),
+    /// (Re)lancer la lecture depuis `base`.
+    Play,
+}
+
+/// État de lecture (lecture, pause, saut, glissement, vitesse), sans processus ni fil : testé seul. `Player`
+/// fait les actions rendues (ffmpeg, fils, horloge des images).
+pub struct Transport {
+    pub playing: bool,
+    /// Position au dernier lancement ou à l'arrêt, en secondes.
+    pub base: f64,
+    pub rate: f32,
+    pub dur: f64,
+    /// Glissement en cours sur la barre de temps.
+    pub scrubbing: bool,
+    /// Prochaine image fixe demandée : seul le dernier point compte.
+    want: Option<f64>,
+    /// Lecture à relancer (saut, vitesse, taille) : regroupé, un lancement toutes les 120 ms au plus.
+    dirty: bool,
+    last_spawn: Instant,
+}
+
+impl Transport {
+    fn new() -> Self {
+        Transport { playing: false, base: 0.0, rate: 1.0, dur: 0.0, scrubbing: false, want: None, dirty: false, last_spawn: Instant::now() }
+    }
+
+    /// Clip fermé ou changé : plus rien en cours.
+    fn stop(&mut self) {
+        (self.playing, self.dirty, self.scrubbing, self.want) = (false, false, false, None);
+    }
+
+    /// Clip ouvert, durée `dur`. À l'arrêt : sa première image ; en lecture : lancée au prochain `tick`
+    /// (après le `set_size` du dessin, à la bonne taille du premier coup).
+    fn open(&mut self, dur: f64, play: bool, now: Instant) {
+        self.stop();
+        (self.dur, self.base) = (dur, 0.0);
+        if play {
+            (self.playing, self.dirty, self.last_spawn) = (true, true, now - Duration::from_secs(1));
+        } else {
+            self.want = Some(0.0);
+        }
+    }
+
+    fn play_now(&mut self, now: Instant) -> Act {
+        (self.dirty, self.last_spawn) = (false, now);
+        Act::Play
+    }
+
+    /// Lecture / pause. `pos` : position affichée ; `has_frame` : une image est déjà à l'écran.
+    fn toggle(&mut self, pos: f64, has_frame: bool, now: Instant) -> Vec<Act> {
+        if self.playing {
+            // Pause : on garde l'image affichée et on arrête ffmpeg, sans redécoder une image fixe (elle
+            // tombait un peu à côté : l'image sautait en arrière puis revenait).
+            (self.base, self.playing, self.dirty) = (pos, false, false);
+            // Pause avant la 1re image (clic juste après l'ouverture) : une image fixe, sinon seule la
+            // miniature restait.
+            if !has_frame {
+                self.want = Some(self.base);
+            }
+            return vec![Act::Kill];
+        }
+        let mut acts = vec![];
+        if self.dur > 0.0 && self.base >= self.dur - 0.05 {
+            self.base = 0.0; // fin atteinte : on repart du début
+            acts.push(Act::Aim);
+        }
+        self.playing = true;
+        if !self.scrubbing {
+            acts.push(self.play_now(now));
+        }
+        acts
+    }
+
+    /// Saut à `t` : image fixe au point visé tout de suite, lecture relancée (regroupée) si elle était en cours.
+    fn seek(&mut self, t: f64) -> Vec<Act> {
+        self.base = t.clamp(0.0, self.dur.max(0.0));
+        self.want = Some(self.base);
+        if self.playing {
+            self.dirty = true;
+            // Plus aucune image de l'ancien point (sinon l'image repartait en arrière).
+            return vec![Act::Aim, Act::Kill];
+        }
+        vec![Act::Aim]
+    }
+
+    /// Glissement : images fixes seules (sans son, sans lecture) jusqu'au lâcher.
+    fn scrub(&mut self, t: f64) -> Vec<Act> {
+        self.scrubbing = true;
+        let acts = self.seek(t);
+        self.dirty = false;
+        acts
+    }
+
+    /// Lâcher : la lecture (si elle était en cours) reprend au point lâché, sans attendre les 120 ms.
+    fn scrub_end(&mut self, now: Instant) {
+        self.scrubbing = false;
+        if self.playing {
+            (self.dirty, self.last_spawn) = (true, now - Duration::from_secs(1));
+        }
+    }
+
+    fn set_rate(&mut self, pos: f64, rate: f32) {
+        (self.base, self.rate, self.dirty) = (pos, rate, self.playing);
+    }
+
+    /// Taille d'image changée : lecture relancée, ou image fixe refaite à la nouvelle taille.
+    fn resized(&mut self, pos: f64) {
+        self.base = pos;
+        if self.playing {
+            self.dirty = true;
+        } else {
+            self.want = Some(self.base);
+        }
+    }
+
+    /// À chaque dessin. `ended` : la lecture a sorti sa dernière image ; `failed` : aucune image loin de la
+    /// fin ; `still_free` : aucune image fixe en cours de décodage.
+    fn tick(&mut self, ended: bool, failed: bool, still_free: bool, now: Instant) -> Vec<Act> {
+        let mut acts = vec![];
+        if ended && self.playing {
+            (self.playing, self.base) = (false, self.dur);
+        }
+        if failed && self.playing {
+            // Aucune image : arrêt sur place (avant, le lecteur sautait à la fin comme si le clip était fini).
+            // L'arrêt coupe aussi le son, qui attendait la première image.
+            self.playing = false;
+            acts.push(Act::Kill);
+        }
+        if still_free {
+            if let Some(t) = self.want.take() {
+                acts.push(Act::Still(t));
+            }
+        }
+        if self.dirty && !self.playing {
+            self.dirty = false;
+        }
+        if self.dirty && !self.scrubbing && now.duration_since(self.last_spawn) > Duration::from_millis(120) {
+            acts.push(self.play_now(now));
+        }
+        acts
+    }
+
+    /// Quelque chose reste à faire ou à montrer : redessiner bientôt.
+    fn busy(&self) -> bool {
+        self.dirty || self.playing || self.want.is_some()
+    }
+}
+
 struct Frame {
     w: u32,
     h: u32,
@@ -48,16 +206,14 @@ pub struct Player {
     /// Demande un nouveau dessin de la fenêtre (image arrivée, fin de lecture).
     wake: Arc<dyn Fn() + Send + Sync>,
     pub file: Option<PathBuf>,
-    pub dur: f64,
+    /// Lecture, pause, position, vitesse, durée (état pur, testé).
+    pub t: Transport,
     audio_tracks: usize,
-    pub playing: bool,
-    pub rate: f32,
     pub vol: f32,
     pub muted: bool,
     gain: Arc<AtomicU32>,
-    /// Position au lancement des ffmpeg en cours, et instant où la première image est arrivée : le son
-    /// attend cet instant pour partir, et la position n'avance qu'à partir de lui (son et image calés).
-    base: f64,
+    /// Instant où la première image du lancement en cours est arrivée : le son attend cet instant pour
+    /// partir, et la position n'avance qu'à partir de lui (son et image calés).
     t0: Arc<Mutex<Option<Instant>>>,
     /// Taille d'image demandée à ffmpeg (pixels physiques, paire).
     size: (u32, u32),
@@ -81,13 +237,6 @@ pub struct Player {
     /// Image fixe en cours de décodage (une seule à la fois) et sa fin, signalée par son fil (un drapeau par
     /// image : celui d'une image tuée ne doit pas marquer la suivante comme finie).
     still: Option<(Child, Instant, Arc<AtomicBool>)>,
-    /// Prochaine image fixe demandée : seul le dernier point compte.
-    want: Option<f64>,
-    /// Lecture à relancer (saut, vitesse, taille) : regroupé, un lancement toutes les 120 ms au plus.
-    dirty: bool,
-    last_spawn: Instant,
-    /// Glissement en cours sur la barre de temps.
-    scrubbing: bool,
 }
 
 impl Player {
@@ -96,14 +245,11 @@ impl Player {
             ffmpeg: ffmpeg.into(),
             wake,
             file: None,
-            dur: 0.0,
+            t: Transport::new(),
             audio_tracks: 0,
-            playing: false,
-            rate: 1.0,
             vol: 1.0,
             muted: false,
             gain: Arc::new(AtomicU32::new(1f32.to_bits())),
-            base: 0.0,
             t0: Arc::new(Mutex::new(None)),
             size: (640, 360),
             run: Arc::new(AtomicU64::new(0)),
@@ -116,19 +262,14 @@ impl Player {
             kids: vec![],
             dying: vec![],
             still: None,
-            want: None,
-            dirty: false,
-            last_spawn: Instant::now(),
-            scrubbing: false,
         }
     }
 
     /// Ouvre un clip, à l'arrêt sur sa première image. `audio_tracks` : pistes à mélanger (0 = muet).
     pub fn open(&mut self, file: &Path, dur: f64, audio_tracks: usize) {
         self.reset();
-        self.file = Some(file.to_path_buf());
-        (self.dur, self.audio_tracks, self.base) = (dur, audio_tracks, 0.0);
-        self.want = Some(0.0);
+        (self.file, self.audio_tracks) = (Some(file.to_path_buf()), audio_tracks);
+        self.t.open(dur, false, Instant::now());
         self.tick(); // image fixe lancée tout de suite, sans attendre le prochain dessin
     }
 
@@ -136,12 +277,10 @@ impl Player {
     /// lecture (deux ffmpeg pour la même première image) ; la miniature est montrée en attendant.
     pub fn open_playing(&mut self, file: &Path, dur: f64, audio_tracks: usize) {
         self.reset();
-        self.file = Some(file.to_path_buf());
-        (self.dur, self.audio_tracks, self.base) = (dur, audio_tracks, 0.0);
+        (self.file, self.audio_tracks) = (Some(file.to_path_buf()), audio_tracks);
         // Lancée au prochain `tick`, après le `set_size` du dessin : à la bonne taille du premier coup (avant,
         // le 1er clip ouvert partait en 640x360 puis était relancé 120 ms plus tard).
-        (self.playing, self.dirty) = (true, true);
-        self.last_spawn = Instant::now() - Duration::from_secs(1);
+        self.t.open(dur, true, Instant::now());
         *self.t0.lock().unwrap() = None;
     }
 
@@ -161,7 +300,7 @@ impl Player {
         self.kill_still();
         self.opened.fetch_add(1, Ordering::Relaxed);
         self.epoch.fetch_add(1, Ordering::Relaxed);
-        (self.playing, self.dirty, self.scrubbing, self.want) = (false, false, false, None);
+        self.t.stop();
         *self.frame.lock().unwrap() = None;
         *self.shown.lock().unwrap() = None;
     }
@@ -173,43 +312,24 @@ impl Player {
 
     /// Position de lecture, en secondes.
     pub fn pos(&self) -> f64 {
-        let p = match (self.playing, *self.t0.lock().unwrap()) {
-            (true, Some(t)) => self.base + t.elapsed().as_secs_f64() * self.rate as f64,
-            _ => self.base,
+        let p = match (self.t.playing, *self.t0.lock().unwrap()) {
+            (true, Some(t)) => self.t.base + t.elapsed().as_secs_f64() * self.t.rate as f64,
+            _ => self.t.base,
         };
-        p.clamp(0.0, self.dur.max(0.0))
+        p.clamp(0.0, self.t.dur.max(0.0))
     }
 
     pub fn toggle(&mut self) {
         if self.file.is_none() {
             return;
         }
-        if self.playing {
-            // Pause : on garde l'image affichée et on arrête ffmpeg, sans redécoder une image fixe (elle
-            // tombait un peu à côté : l'image sautait en arrière puis revenait).
-            self.base = self.pos();
-            self.playing = false;
-            // Pause avant la 1re image (clic juste après l'ouverture) : une image fixe, sinon seule la
-            // miniature restait.
-            if self.frame.lock().unwrap().is_none() {
-                self.want = Some(self.base);
-            }
-            self.dirty = false;
-            self.kill();
-            return;
-        }
-        if self.dur > 0.0 && self.base >= self.dur - 0.05 {
-            self.base = 0.0; // fin atteinte : on repart du début
-            self.epoch.fetch_add(1, Ordering::Relaxed);
-        }
-        self.playing = true;
-        if !self.scrubbing {
-            self.spawn();
-        }
+        let has_frame = self.frame.lock().unwrap().is_some();
+        let acts = self.t.toggle(self.pos(), has_frame, Instant::now());
+        self.act(acts);
     }
 
     pub fn pause(&mut self) {
-        if self.playing {
+        if self.t.playing {
             self.toggle();
         }
     }
@@ -217,37 +337,24 @@ impl Player {
     /// Saute à `t` secondes. La barre montre le point visé tout de suite ; une image fixe y est décodée
     /// (~100 ms), puis la lecture reprend si elle était en cours. Sauts rapprochés : seul le dernier compte.
     pub fn seek(&mut self, t: f64) {
-        self.base = t.clamp(0.0, self.dur.max(0.0));
-        // Position figée sur le point visé jusqu'à la première image du nouveau lancement.
-        *self.t0.lock().unwrap() = None;
-        self.epoch.fetch_add(1, Ordering::Relaxed);
-        self.want = Some(self.base);
-        if self.playing {
-            self.kill(); // plus aucune image de l'ancien point (sinon l'image repartait en arrière)
-            self.dirty = true;
-        }
+        let acts = self.t.seek(t);
+        self.act(acts);
     }
 
     /// Glissement sur la barre de temps : images fixes seules (sans son, sans lecture) jusqu'au lâcher.
     pub fn scrub(&mut self, t: f64) {
-        self.scrubbing = true;
-        self.seek(t);
-        self.dirty = false;
+        let acts = self.t.scrub(t);
+        self.act(acts);
     }
 
     /// Fin du glissement : la lecture (si elle était en cours) reprend au point lâché, sans attendre.
     pub fn scrub_end(&mut self) {
-        self.scrubbing = false;
-        if self.playing {
-            self.dirty = true;
-            self.last_spawn = Instant::now() - Duration::from_secs(1);
-        }
+        self.t.scrub_end(Instant::now());
     }
 
     pub fn set_rate(&mut self, rate: f32) {
-        self.base = self.pos();
-        self.rate = rate;
-        self.dirty = self.playing;
+        let pos = self.pos();
+        self.t.set_rate(pos, rate);
     }
 
     pub fn set_volume(&mut self, vol: f32, muted: bool) {
@@ -263,12 +370,8 @@ impl Player {
         if s != self.size {
             self.size = s;
             if self.file.is_some() {
-                self.base = self.pos();
-                if self.playing {
-                    self.dirty = true;
-                } else {
-                    self.want = Some(self.base); // image fixe refaite à la nouvelle taille
-                }
+                let pos = self.pos();
+                self.t.resized(pos);
             }
         }
     }
@@ -280,33 +383,32 @@ impl Player {
 
     /// À appeler à chaque dessin : lance les changements en attente, détecte la fin. Vrai : redessiner bientôt.
     pub fn tick(&mut self) -> bool {
-        if self.ended.swap(false, Ordering::Relaxed) && self.playing {
-            self.playing = false;
-            self.base = self.dur;
-        }
-        if self.failed.swap(false, Ordering::Relaxed) && self.playing {
-            // Aucune image : arrêt sur place (avant, le lecteur sautait à la fin comme si le clip était fini).
-            // `kill` arrête aussi le son, qui attendait la première image.
+        let (ended, failed) = (self.ended.swap(false, Ordering::Relaxed), self.failed.swap(false, Ordering::Relaxed));
+        if failed && self.t.playing {
             crate::log("lecteur : aucune image décodée, lecture arrêtée");
-            self.playing = false;
-            self.kill();
         }
         // Image fixe finie (ou bloquée plus de 2 s) : place à la suivante, vers le dernier point demandé.
         if self.still.as_ref().is_some_and(|(_, t, done)| done.load(Ordering::Relaxed) || t.elapsed() > Duration::from_secs(2)) {
             self.kill_still();
         }
-        if self.still.is_none() {
-            if let Some(t) = self.want.take() {
-                self.spawn_still(t);
+        let acts = self.t.tick(ended, failed, self.still.is_none(), Instant::now());
+        self.act(acts);
+        self.t.busy() || self.still.is_some() || self.fade() < 1.0
+    }
+
+    /// Fait les actions décidées par `Transport`.
+    fn act(&mut self, acts: Vec<Act>) {
+        for a in acts {
+            match a {
+                Act::Kill => self.kill(),
+                Act::Aim => {
+                    *self.t0.lock().unwrap() = None;
+                    self.epoch.fetch_add(1, Ordering::Relaxed);
+                }
+                Act::Still(t) => self.spawn_still(t),
+                Act::Play => self.spawn(),
             }
         }
-        if self.dirty && !self.playing {
-            self.dirty = false;
-        }
-        if self.dirty && !self.scrubbing && self.last_spawn.elapsed() > Duration::from_millis(120) {
-            self.spawn();
-        }
-        self.dirty || self.playing || self.still.is_some() || self.want.is_some() || self.fade() < 1.0
     }
 
     fn kill(&mut self) {
@@ -366,20 +468,18 @@ impl Player {
     /// (Re)lance la lecture à la position `base` : images au rythme du clip, et le son.
     fn spawn(&mut self) {
         self.kill();
-        self.dirty = false;
-        self.last_spawn = Instant::now();
         self.ended.store(false, Ordering::Relaxed);
         *self.t0.lock().unwrap() = None;
         let Some(file) = self.file.clone() else { return };
         let run = self.run.load(Ordering::Relaxed);
         let (w, h) = self.size;
-        let step = Duration::from_secs_f64(1.0 / (PLAY_FPS * self.rate.max(0.1) as f64));
-        if let Ok(mut child) = command(&self.ffmpeg, video_args(&file, self.base, self.size)).spawn() {
+        let step = Duration::from_secs_f64(1.0 / (PLAY_FPS * self.t.rate.max(0.1) as f64));
+        if let Ok(mut child) = command(&self.ffmpeg, video_args(&file, self.t.base, self.size)).spawn() {
             if let Some(mut out) = child.stdout.take() {
                 let (cur, frame, ended, wake, t0) = (self.run.clone(), self.frame.clone(), self.ended.clone(), self.wake.clone(), self.t0.clone());
                 let (shown, failed, epoch) = (self.shown.clone(), self.failed.clone(), self.epoch.load(Ordering::Relaxed));
                 // 0 image à moins de 0,5 s de la fin : fin normale, pas un échec.
-                let near_end = self.dur > 0.0 && self.base > self.dur - 0.5;
+                let near_end = self.t.dur > 0.0 && self.t.base > self.t.dur - 0.5;
                 std::thread::spawn(move || {
                     let mut buf = vec![0u8; (w * h * 4) as usize];
                     let (mut i, mut dropped, mut streak) = (0u32, 0u32, 0u32);
@@ -437,7 +537,7 @@ impl Player {
     }
 
     fn spawn_audio(&mut self, file: &Path, run: u64) {
-        let Ok(mut child) = command(&self.ffmpeg, audio_args(file, self.base, self.audio_tracks, self.rate)).spawn() else { return };
+        let Ok(mut child) = command(&self.ffmpeg, audio_args(file, self.t.base, self.audio_tracks, self.t.rate)).spawn() else { return };
         if let Some(out) = child.stdout.take() {
             let (cur, gain, t0) = (self.run.clone(), self.gain.clone(), self.t0.clone());
             std::thread::spawn(move || {
@@ -624,6 +724,80 @@ fn apply_gain(buf: &mut [u8], gain: &AtomicU32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ms(t: Instant, n: u64) -> Instant {
+        t + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn pause_before_the_first_frame_decodes_a_still() {
+        let t0 = Instant::now();
+        let mut t = Transport::new();
+        t.open(30.0, true, t0);
+        assert_eq!(t.tick(false, false, true, ms(t0, 16)), [Act::Play], "lecture lancée au 1er dessin");
+        assert_eq!(t.toggle(0.0, false, ms(t0, 40)), [Act::Kill]);
+        assert_eq!(t.tick(false, false, true, ms(t0, 56)), [Act::Still(0.0)], "sinon seule la miniature restait");
+    }
+
+    #[test]
+    fn seek_while_playing_shows_a_still_then_replays_once() {
+        let t0 = Instant::now();
+        let mut t = Transport::new();
+        t.open(30.0, true, t0);
+        t.tick(false, false, true, t0);
+        assert_eq!(t.seek(12.0), [Act::Aim, Act::Kill]);
+        assert_eq!(t.seek(14.0), [Act::Aim, Act::Kill], "sauts rapprochés");
+        assert_eq!(t.tick(false, false, true, ms(t0, 50)), [Act::Still(14.0)], "seul le dernier point ; relance pas avant 120 ms");
+        assert_eq!(t.tick(false, false, false, ms(t0, 130)), [Act::Play]);
+        assert_eq!(t.base, 14.0);
+        assert!(t.tick(false, false, true, ms(t0, 400)).is_empty());
+    }
+
+    #[test]
+    fn scrub_decodes_stills_only_then_release_resumes_at_once() {
+        let t0 = Instant::now();
+        let mut t = Transport::new();
+        t.open(30.0, true, t0);
+        t.tick(false, false, true, t0);
+        t.scrub(5.0);
+        t.scrub(6.0);
+        assert_eq!(t.tick(false, false, true, ms(t0, 500)), [Act::Still(6.0)], "pas de lecture pendant le geste");
+        t.scrub(7.0);
+        assert!(t.tick(false, false, false, ms(t0, 520)).is_empty(), "image fixe en cours : on attend");
+        t.scrub_end(ms(t0, 530));
+        assert_eq!(t.tick(false, false, true, ms(t0, 531)), [Act::Still(7.0), Act::Play], "reprise au lâcher, sans attendre");
+    }
+
+    #[test]
+    fn no_frame_stops_in_place_and_end_goes_to_the_end() {
+        let t0 = Instant::now();
+        let mut t = Transport::new();
+        t.open(30.0, true, t0);
+        t.tick(false, false, true, t0);
+        assert_eq!(t.tick(false, true, true, ms(t0, 300)), [Act::Kill]);
+        assert!(!t.playing && t.base == 0.0, "arrêt sur place");
+        let mut t = Transport::new();
+        t.open(30.0, true, t0);
+        t.tick(false, false, true, t0);
+        assert!(t.tick(true, false, true, ms(t0, 300)).is_empty());
+        assert!(!t.playing && t.base == 30.0);
+        assert_eq!(t.toggle(30.0, true, ms(t0, 400)), [Act::Aim, Act::Play], "relu depuis le début");
+        assert_eq!(t.base, 0.0);
+    }
+
+    #[test]
+    fn speed_change_relaunches_only_while_playing() {
+        let t0 = Instant::now();
+        let mut t = Transport::new();
+        t.open(30.0, false, t0);
+        t.tick(false, false, true, t0);
+        t.set_rate(3.0, 2.0);
+        assert!(t.tick(false, false, true, ms(t0, 500)).is_empty(), "à l'arrêt : rien à relancer");
+        t.toggle(3.0, true, ms(t0, 600));
+        t.set_rate(4.0, 0.5);
+        assert_eq!(t.tick(false, false, true, ms(t0, 800)), [Act::Play]);
+        assert_eq!((t.base, t.rate), (4.0, 0.5));
+    }
 
     fn line(a: Vec<OsString>) -> String {
         a.iter().map(|x| x.to_string_lossy()).collect::<Vec<_>>().join(" ")
