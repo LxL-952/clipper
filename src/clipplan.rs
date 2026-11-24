@@ -73,22 +73,34 @@ pub enum Input {
     List(String),
 }
 
-pub fn input(parts: &[Vec<PathBuf>]) -> Input {
+/// Longueur des noms au-delà de laquelle le flux unique passe par un fichier de liste (marge sous 32 767).
+const STREAM_MAX_CHARS: usize = 24_000;
+/// Segments par ligne du fichier de liste (≈ 10 000 caractères avec des chemins complets).
+const LIST_CHUNK: usize = 200;
+
+/// `stream` faux : jamais le flux unique (nouvel essai après un échec, morceaux d'un REC sauvés).
+pub fn input(parts: &[Vec<PathBuf>], stream: bool) -> Input {
     let ts = parts.iter().flatten().all(|p| p.extension().is_some_and(|e| e == "ts"));
     let dir = parts.first().and_then(|g| g.first()).and_then(|p| p.parent()).filter(|d| parts.iter().flatten().all(|p| p.parent() == Some(*d)));
+    let names = |g: &[PathBuf]| g.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect::<Vec<_>>();
+    // Windows refuse une ligne de commande de plus de 32 767 caractères : un REC de 82 min (2468 noms)
+    // n'a jamais pu être assemblé. Au-delà, fichier de liste (pas de limite).
+    let short = |g: &[PathBuf]| names(g).iter().map(|n| n.len() + 1).sum::<usize>() < STREAM_MAX_CHARS;
     match dir {
-        Some(d) if ts && parts.len() == 1 => {
-            Input::Stream { dir: d.to_path_buf(), names: parts[0].iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect() }
-        }
-        _ => {
-            let quote = |p: &Path| p.display().to_string().replace('\'', "'\\''");
-            Input::List(if ts {
-                parts.iter().map(|g| format!("file 'concat:{}'\n", g.iter().map(|p| quote(p)).collect::<Vec<_>>().join("|"))).collect()
-            } else {
-                parts.iter().flatten().map(|p| format!("file '{}'\n", quote(p))).collect()
-            })
-        }
+        Some(d) if stream && ts && parts.len() == 1 && short(&parts[0]) => Input::Stream { dir: d.to_path_buf(), names: names(&parts[0]) },
+        _ => Input::List(if ts {
+            // Une ligne par paquet de segments : chaque ligne reste courte, et le démultiplexeur raccorde
+            // les horodatages d'une ligne à l'autre comme pour plusieurs captures. Pas un .ts par ligne : petit
+            // trou à chaque raccord (90 s en segments de 0,2 s donnaient 114 s).
+            parts.iter().flat_map(|g| g.chunks(LIST_CHUNK)).map(|g| format!("file 'concat:{}'\n", g.iter().map(|p| quote(p)).collect::<Vec<_>>().join("|"))).collect()
+        } else {
+            parts.iter().flatten().map(|p| format!("file '{}'\n", quote(p))).collect()
+        }),
     }
+}
+
+fn quote(p: &Path) -> String {
+    p.display().to_string().replace('\'', "'\\''")
 }
 
 #[cfg(test)]
@@ -162,20 +174,32 @@ mod tests {
     fn one_capture_is_read_as_one_stream() {
         let d = PathBuf::from(r"C:\buf");
         let parts = vec![vec![d.join("0000000001.ts"), d.join("0000000002.ts"), d.join("tail-3.ts")]];
-        assert_eq!(input(&parts), Input::Stream { dir: d, names: vec!["0000000001.ts".into(), "0000000002.ts".into(), "tail-3.ts".into()] });
+        assert_eq!(input(&parts, true), Input::Stream { dir: d, names: vec!["0000000001.ts".into(), "0000000002.ts".into(), "tail-3.ts".into()] });
+        assert_eq!(input(&parts, false), Input::List("file 'concat:C:\\buf\\0000000001.ts|C:\\buf\\0000000002.ts|C:\\buf\\tail-3.ts'\n".into()));
     }
 
     #[test]
     fn several_captures_get_one_list_line_each() {
         let d = PathBuf::from(r"C:\buf");
         let parts = vec![vec![d.join("1.ts"), d.join("2.ts")], vec![d.join("7.ts")]];
-        assert_eq!(input(&parts), Input::List("file 'concat:C:\\buf\\1.ts|C:\\buf\\2.ts'\nfile 'concat:C:\\buf\\7.ts'\n".into()));
+        assert_eq!(input(&parts, true), Input::List("file 'concat:C:\\buf\\1.ts|C:\\buf\\2.ts'\nfile 'concat:C:\\buf\\7.ts'\n".into()));
+    }
+
+    /// REC de 82 min : 2468 noms dépassaient la limite de la ligne de commande Windows.
+    #[test]
+    fn long_rec_goes_through_a_list_in_short_lines() {
+        let d = PathBuf::from(r"C:\buf");
+        let parts = vec![(1..=2468).map(|i| d.join(format!("{i:010}.ts"))).collect::<Vec<_>>()];
+        let Input::List(body) = input(&parts, true) else { panic!("un long REC doit passer par une liste") };
+        assert_eq!(body.lines().count(), 13);
+        assert!(body.lines().all(|l| l.len() < 32_767));
+        assert_eq!(body.matches(".ts").count(), 2468);
     }
 
     #[test]
     fn mkv_segments_are_listed_one_by_one_and_quotes_escaped() {
         let d = PathBuf::from(r"C:\l'a");
         let parts = vec![vec![d.join("1.mkv"), d.join("2.mkv")]];
-        assert_eq!(input(&parts), Input::List("file 'C:\\l'\\''a\\1.mkv'\nfile 'C:\\l'\\''a\\2.mkv'\n".into()));
+        assert_eq!(input(&parts, true), Input::List("file 'C:\\l'\\''a\\1.mkv'\nfile 'C:\\l'\\''a\\2.mkv'\n".into()));
     }
 }

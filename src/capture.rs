@@ -1188,17 +1188,35 @@ pub fn concat(cfg: &Config, parts: &[Vec<PathBuf>], out: &Path, trim: f64) -> Re
         "mov" => "mov",
         _ => "mp4",
     };
+    // Choix de l'entrée : voir clipplan.rs. Plusieurs captures : avant, le flux unique donnait un fichier cassé.
+    // Échec du flux unique : nouvel essai par un fichier de liste (pas de limite de longueur).
+    let first = crate::clipplan::input(parts, true);
+    let retry = matches!(first, crate::clipplan::Input::Stream { .. });
+    if concat_once(cfg, first, &list, &part, out, format, trim) {
+        return Ok(());
+    }
+    if retry {
+        crate::log("assemblage : échec, nouvel essai par un fichier de liste");
+        if concat_once(cfg, crate::clipplan::input(parts, false), &list, &part, out, format, trim) {
+            return Ok(());
+        }
+    }
+    Err("ffmpeg n'a pas pu assembler le clip.".into())
+}
+
+/// Un essai d'assemblage ; `.part` puis renommé en `out`. Faux si ffmpeg échoue.
+fn concat_once(cfg: &Config, input: crate::clipplan::Input, list: &Path, part: &Path, out: &Path, format: &str, trim: f64) -> bool {
     let mut c = ffmpeg_capture(cfg);
     c.args(["-loglevel", "error"]);
-    // Choix de l'entrée : voir clipplan.rs. Noms courts, dossier courant : la ligne de commande reste courte
-    // même pour un long REC. Plusieurs captures : avant, le flux unique donnait un fichier cassé.
-    match crate::clipplan::input(parts) {
+    match input {
         crate::clipplan::Input::Stream { dir, names } => {
             c.current_dir(dir).arg("-i").arg(format!("concat:{}", names.join("|")));
         }
         crate::clipplan::Input::List(body) => {
-            std::fs::write(&list, body).map_err(|e| e.to_string())?;
-            c.args(["-protocol_whitelist", "file,concat,crypto,data", "-f", "concat", "-safe", "0", "-i"]).arg(&list);
+            if std::fs::write(list, body).is_err() {
+                return false;
+            }
+            c.args(["-protocol_whitelist", "file,concat,crypto,data", "-f", "concat", "-safe", "0", "-i"]).arg(list);
         }
     }
     // Pas de « +faststart » : il réécrivait tout le fichier une 2e fois (double écriture disque). Disque
@@ -1209,15 +1227,13 @@ pub fn concat(cfg: &Config, parts: &[Vec<PathBuf>], out: &Path, trim: f64) -> Re
         // Les `trim` premières secondes passent avant zéro : le lecteur les décode sans les montrer.
         c.args(["-output_ts_offset", &format!("-{trim:.3}"), "-avoid_negative_ts", "disabled"]);
     }
-    c.args(["-f", format, "-y"]).arg(&part);
-    let ok = run_now(c) && std::fs::rename(&part, out).is_ok();
-    let _ = std::fs::remove_file(&list);
-    if ok {
-        Ok(())
-    } else {
-        let _ = std::fs::remove_file(&part);
-        Err("ffmpeg n'a pas pu assembler le clip.".into())
+    c.args(["-f", format, "-y"]).arg(part);
+    let ok = run_now(c) && std::fs::rename(part, out).is_ok();
+    let _ = std::fs::remove_file(list);
+    if !ok {
+        let _ = std::fs::remove_file(part);
     }
+    ok
 }
 
 /// "2026-11-07 21-14-03" en heure locale.
@@ -1519,8 +1535,59 @@ pub fn rec_stop(cfg: &Config, buf: &Buffer) -> Result<(PathBuf, f64), String> {
     }
     let (snap, ()) = take(&buf.dir, cfg.clip.fps, |reg, now, disk| (reg.rec(now, disk, from), ()));
     let r = if snap.parts.is_empty() { Err("Le REC n'a rien enregistré.".to_string()) } else { save(cfg, &snap, "REC", f64::from(cfg.buffer_secs)) };
+    // REC raté : ses morceaux sortent du buffer avant que le nettoyage les efface (un REC d'1 h 20 a été
+    // perdu ainsi). Ils sont encore retenus par l'instantané pendant le déplacement.
+    let r = r.map_err(|e| match rescue(&cfg.out_dir, &snap.parts) {
+        Some(d) => format!("{e} Les morceaux du REC sont gardés dans « {} ».", d.display()),
+        None => e,
+    });
     *buf.rec_from.lock().unwrap() = None;
     r
+}
+
+/// Déplace les morceaux d'un REC raté dans « REC <date> (non assemblé) » du dossier des clips, numérotés dans
+/// l'ordre, avec la liste et la commande ffmpeg pour les assembler. Copiés si le buffer est sur un autre disque.
+fn rescue(out_dir: &Path, parts: &[Vec<PathBuf>]) -> Option<PathBuf> {
+    if parts.is_empty() {
+        return None;
+    }
+    let dir = out_dir.join(format!("REC {} (non assemblé)", stamp()));
+    std::fs::create_dir_all(&dir).ok()?;
+    // Noms relatifs, une liste par capture comme pour un clip : la commande se lance dans ce dossier.
+    let (mut i, mut kept, mut names) = (0, 0, vec![]);
+    for part in parts {
+        let mut group = vec![];
+        for p in part {
+            let ext = p.extension().map_or("ts".into(), |e| e.to_string_lossy().into_owned());
+            let name = PathBuf::from(format!("{i:06}.{ext}"));
+            i += 1;
+            if std::fs::rename(p, dir.join(&name)).is_ok() || std::fs::copy(p, dir.join(&name)).is_ok() {
+                group.push(name);
+                kept += 1;
+            } else {
+                crate::log(&format!("REC raté : morceau {} impossible à garder", p.display()));
+            }
+        }
+        names.push(group);
+    }
+    names.retain(|g| !g.is_empty());
+    let list = match crate::clipplan::input(&names, false) {
+        crate::clipplan::Input::List(body) => body,
+        crate::clipplan::Input::Stream { .. } => String::new(),
+    };
+    let _ = std::fs::write(dir.join("liste.txt"), list);
+    let _ = std::fs::write(
+        dir.join("LISEZMOI.txt"),
+        "Clipper n'a pas pu assembler ce REC. Ses morceaux sont gardés ici, dans l'ordre.\r\n\
+         Pour les assembler, ouvrez un terminal dans ce dossier et lancez :\r\n\
+         ffmpeg -protocol_whitelist file,concat,crypto,data -f concat -safe 0 -i liste.txt -map 0 -c copy REC.mp4\r\n",
+    );
+    crate::log(&format!("REC raté : {kept} morceau(x) sur {i} gardés dans {}", dir.display()));
+    if kept == 0 {
+        let _ = std::fs::remove_dir_all(&dir);
+        return None;
+    }
+    Some(dir)
 }
 
 #[cfg(test)]
@@ -1754,5 +1821,24 @@ mod segs {
         assert_eq!(s.len(), 2);
         assert!(s.iter().all(|p| !p.to_string_lossy().contains("rec-")));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// REC raté : ses morceaux quittent le buffer, dans l'ordre, avec la liste pour ffmpeg.
+    #[test]
+    fn failed_rec_keeps_its_pieces() {
+        let base = std::env::temp_dir().join(format!("clipper-rescue-{}", std::process::id()));
+        let (buf, out) = (base.join("buf"), base.join("out"));
+        std::fs::create_dir_all(&buf).unwrap();
+        let parts: Vec<Vec<std::path::PathBuf>> = vec![vec![buf.join("0000000007.ts"), buf.join("0000000008.ts")], vec![buf.join("tail-0.ts")]];
+        for (i, p) in parts.iter().flatten().enumerate() {
+            std::fs::write(p, [i as u8]).unwrap();
+        }
+        let dir = super::rescue(&out, &parts).expect("dossier de secours");
+        assert!(parts.iter().flatten().all(|p| !p.exists()), "les morceaux ont quitté le buffer");
+        assert_eq!(std::fs::read(dir.join("000002.ts")).unwrap(), [2]);
+        assert_eq!(std::fs::read_to_string(dir.join("liste.txt")).unwrap(), "file 'concat:000000.ts|000001.ts'\nfile 'concat:000002.ts'\n");
+        assert!(dir.join("LISEZMOI.txt").exists());
+        assert_eq!(super::rescue(&out, &[]), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
